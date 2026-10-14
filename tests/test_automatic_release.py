@@ -336,3 +336,30 @@ def test_readonly_previous_release_does_not_overwrite_historical_evidence(tmp_pa
         'html_url':release_url('v1.0.1'),'url':'https://api.github.com/repos/'+auto.REPO+'/releases/7','target_commitish':'b'*40}
     monkeypatch.setattr(publisher,'api',lambda endpoint:json.dumps([release]).encode())
     assert publisher.read('1.0.1')['id']==7 and not scope.out.exists()
+
+@pytest.mark.parametrize('case',['valid','wrong_latest','tampered_manifest','foreign_asset','wrong_size'])
+def test_actual_anonymous_verifier_checks_latest_and_metadata_before_baseline(project,monkeypatch,case):
+    import httpx
+    root,runtime,system=project;change(root);record=system.run('build-only');work=root/record['work'];folder=root/'releases'/record['version']
+    release={'id':7,'tag_name':'v1.0.1','draft':False,'prerelease':False,'html_url':release_url('v1.0.1'),'published_at':'2026-10-15T00:00:00Z',
+        'assets':[{'name':n,'size':(folder/n).stat().st_size,'state':'uploaded','browser_download_url':asset_url('v1.0.1',n)} for n in package.names('1.0.1')]}
+    probes=[];requests=[];original=httpx.Client
+    runtime.baseline=lambda previous:root/'baseline.exe'
+    runtime.probe=lambda r,w,b,remote:probes.append(remote)
+    def response(request):
+        url=str(request.url);requests.append(url)
+        if url.startswith('https://api.github.com/repos/'+auto.REPO+'/releases/'):
+            value=json.loads(json.dumps(release))
+            if case=='wrong_latest' and url.endswith('/latest'):value['tag_name']='v1.0.0'
+            if case=='foreign_asset':value['assets'][0]['browser_download_url']='https://github.com/other/repo/releases/download/v1.0.1/'+package.names('1.0.1')[0]
+            if case=='wrong_size':value['assets'][1]['size']+=1
+            return httpx.Response(200,json=value)
+        name=request.url.path.rsplit('/',1)[-1];raw=(folder/name).read_bytes()
+        if case=='tampered_manifest' and name=='transcomic-update.json':raw=b'{}'
+        return httpx.Response(200,content=raw)
+    monkeypatch.setattr(httpx,'Client',lambda **kwargs:original(transport=httpx.MockTransport(response),**kwargs))
+    if case=='valid':auto.Runtime.verify_public(runtime,record,work);assert probes==[True]
+    else:
+        with pytest.raises(UpdateError):auto.Runtime.verify_public(runtime,record,work)
+        assert not probes
+    assert all('/other/repo/' not in url for url in requests)

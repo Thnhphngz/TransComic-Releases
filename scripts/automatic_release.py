@@ -242,7 +242,8 @@ class Runtime:
                 if len(response.content)>1024*1024:raise UpdateError('PUBLIC_RELEASE_TOO_LARGE')
                 found.append(response.json())
             latest,tag=found
-            if latest['id']!=tag['id'] or tag['tag_name']!='v'+record['version'] or tag['draft'] or tag['prerelease']:raise UpdateError('LATEST_NOT_NEW_RELEASE')
+            if (latest['id']!=tag['id'] or latest.get('tag_name')!='v'+record['version'] or tag['tag_name']!='v'+record['version']
+                    or latest.get('draft') is not False or latest.get('prerelease') is not False or tag['draft'] or tag['prerelease']):raise UpdateError('LATEST_NOT_NEW_RELEASE')
             expected={a['name']:a for a in tag['assets']}
             if set(expected)!=set(package.names(record['version'])):raise UpdateError('PUBLIC_ASSET_INVENTORY_MISMATCH')
             service=UpdateService(directory=work/'anonymous',client=client)
