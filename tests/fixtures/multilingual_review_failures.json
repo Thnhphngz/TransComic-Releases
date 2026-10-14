@@ -1,0 +1,11 @@
+{
+  "provenance": "Negative examples explicitly supplied in the user's multilingual request; no invented reference translation",
+  "semantic_ground_truth": false,
+  "cases": [
+    {"source": "cael bị mù màu sao", "reported_bad_output": "cael is colorblind", "warning": "Sắc thái câu hỏi"},
+    {"source": "ly, ly hôn ư", "reported_bad_output": "you divorce", "warning": "Đối tượng lời thoại", "note": "Synthetic candidate with the pronoun the user prohibited; not a reported exact output or reference"},
+    {"source": "dài như sớ", "reported_bad_output": "long like a petition", "warning": "Thành ngữ", "note": "Synthetic literal candidate tests the heuristic; not a reported exact translation or trusted reference"},
+    {"source": "", "reported_bad_output": "sang pangeri reina", "warning": "Từ vựng Indonesia", "note": "User did not supply aligned source"},
+    {"source": "", "reported_bad_output": "boss akhir", "warning": "Từ vựng Indonesia", "note": "User did not supply aligned source"}
+  ]
+}

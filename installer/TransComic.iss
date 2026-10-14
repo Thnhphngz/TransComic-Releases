@@ -1,0 +1,41 @@
+#define MyAppName "TransComic"
+#error Stage A locked: no installer build permitted until reviewed Stage B
+; Stage B generates this include from transcomic/version.py.
+#include "generated-version.iss"
+#define MyAppExeName "TransComic.exe"
+
+[Setup]
+AppId={{CB58C770-47B7-42DC-A2CA-409DDF456487}
+AppName={#MyAppName}
+AppVersion={#MyAppVersion}
+DefaultDirName={localappdata}\Programs\{#MyAppName}
+DefaultGroupName={#MyAppName}
+OutputDir=..\installer\output
+OutputBaseFilename=TransComic-Setup-{#MyAppVersion}-windows-x64
+Compression=lzma
+SolidCompression=yes
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+PrivilegesRequired=lowest
+MinVersion=10.0
+RestartIfNeededByRun=no
+CloseApplications=no
+RestartApplications=no
+UsePreviousAppDir=yes
+SetupIconFile=TransComic.ico
+UninstallDisplayIcon={app}\{#MyAppExeName}
+VersionInfoVersion={#MyAppVersion}
+
+[Files]
+Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\TransComic-UpdateHelper.exe"; DestDir: "{app}"; Flags: ignoreversion
+
+[Icons]
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+[Tasks]
+Name: "desktopicon"; Description: "Tạo biểu tượng Desktop"; GroupDescription: "Biểu tượng bổ sung:"; Flags: unchecked
+
+[Run]
+Filename: "{app}\{#MyAppExeName}"; Description: "Mở {#MyAppName}"; Flags: nowait postinstall skipifsilent

@@ -1,0 +1,28 @@
+{
+  "payload": {
+    "app_id": "TransComic.Desktop",
+    "version": "{VERSION_FROM_TRANSCOMIC_VERSION}",
+    "channel": "stable",
+    "os": "windows",
+    "architecture": "x64",
+    "installer_filename": "TransComic-Setup-{VERSION_FROM_TRANSCOMIC_VERSION}-windows-x64.exe",
+    "installer_size": "REQUIRED_VERIFIED_BUILD_SIZE",
+    "sha256": "REQUIRED_VERIFIED_BUILD_SHA256",
+    "release_tag": "v{VERSION_FROM_TRANSCOMIC_VERSION}",
+    "release_url": "https://github.com/Thnhphngz/TransComic-Releases/releases/tag/v{VERSION_FROM_TRANSCOMIC_VERSION}",
+    "minimum_updater_version": "{UPDATER_VERSION_FROM_SOURCE}",
+    "minimum_windows": "10",
+    "metadata_format": 2,
+    "signed_at": "REQUIRED_SIGNER_UTC_TIMESTAMP",
+    "provenance": {
+      "source_repository": "REQUIRED_VERIFIED_SOURCE_REPOSITORY",
+      "source_commit": "REQUIRED_EXACT_SOURCE_COMMIT_SHA",
+      "distribution_commit": "REQUIRED_EXACT_DISTRIBUTION_COMMIT_SHA"
+    }
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "PRODUCTION_KEY_NOT_CONFIGURED",
+    "value": ""
+  }
+}

@@ -1,0 +1,503 @@
+{
+  "source_sha256": "1103b346f781c4cc9f1aca7ee787b8421b12749e1ff28d96524a59645a288696",
+  "unit_count": 125,
+  "cases": [
+    {
+      "ordinal": 5,
+      "category": "internal narration",
+      "locator": "5:0",
+      "line": {
+        "id": "fixture-6",
+        "source": "đến khi này cô chỉ có thể bất lực hỏi lại, tại sao trong tất cả mọi thứ, lại là giường",
+        "context": [
+          {
+            "id": "fixture-2",
+            "source": "hành động này khiến cô hoảng hốt nói lớn, bây giờ"
+          },
+          {
+            "id": "fixture-3",
+            "source": "chờ đã, cael, anh đang đưa em đi đâu vậy, lời vừa dứt đối phương đã đáp lại ngay, tới  giường ngủ"
+          },
+          {
+            "id": "fixture-4",
+            "source": "nghe vậy evelyn đã luôn miệng gào thét, bỏ em xuống đi"
+          },
+          {
+            "id": "fixture-5",
+            "source": "dù vậy cael vẫn lạnh lùng từ chối, không"
+          },
+          {
+            "id": "fixture-7",
+            "source": "chỉ trong phút chốc evelyn đã bị đặt mạnh xuống giường"
+          },
+          {
+            "id": "fixture-8",
+            "source": "cô bất lực nhìn cael đang ngày càng áp sát lại gần"
+          },
+          {
+            "id": "fixture-9",
+            "source": "bầu không khí giữa hai người khi này đang vô cùng căng thẳng"
+          },
+          {
+            "id": "fixture-10",
+            "source": "evelyn ngơ ngác nhìn người đối diện bằng đôi mắt long lanh"
+          }
+        ]
+      },
+      "reference_options": []
+    },
+    {
+      "ordinal": 24,
+      "category": "feeding action",
+      "locator": "24:0",
+      "line": {
+        "id": "fixture-25",
+        "source": "bỗng cael đưa đến thìa thức ăn, anh nhẹ giọng dỗ dành, evelyn, sau khi em ăn xong, ta sẽ  đưa em về dinh thự, đây",
+        "context": [
+          {
+            "id": "fixture-21",
+            "source": "vậy nên, hãy làm rõ hiểu lầm này và nói chuyện với nhau đi"
+          },
+          {
+            "id": "fixture-22",
+            "source": "cứ như vậy hai người đã quấn quýt bên nhau cả đêm"
+          },
+          {
+            "id": "fixture-23",
+            "source": "khi ánh nắng sớm xuyên qua khung cửa sổ"
+          },
+          {
+            "id": "fixture-24",
+            "source": "evelyn mệt mỏi ngồi trên giường với suy nghĩ quẩn quanh trong tâm trí, mình đã bị ăn sạch  sành sanh"
+          },
+          {
+            "id": "fixture-26",
+            "source": "nói a đi"
+          },
+          {
+            "id": "fixture-27",
+            "source": "hành động này khiến cô sững sờ"
+          },
+          {
+            "id": "fixture-28",
+            "source": "evelyn ấm ức nhìn người đối diện rồi trách cứ, anh thật là quá đáng, sao anh có thể tiếp tục  cho đến khi em không còn nhúc nhích nổi nữa vậy hả"
+          },
+          {
+            "id": "fixture-29",
+            "source": "nghe vậy cael đã vội vàng giải oan, em là người đã cầu xin ta trước mà, ngay sau đó cô đã  phản bác ngay, em làm thế khi nào chứ, em đã liên tục nói với anh đó là một sự hiểu lầm rồi  mà"
+          }
+        ]
+      },
+      "reference_options": []
+    },
+    {
+      "ordinal": 25,
+      "category": "short contextual dialogue",
+      "locator": "25:0",
+      "line": {
+        "id": "fixture-26",
+        "source": "nói a đi",
+        "context": [
+          {
+            "id": "fixture-22",
+            "source": "cứ như vậy hai người đã quấn quýt bên nhau cả đêm"
+          },
+          {
+            "id": "fixture-23",
+            "source": "khi ánh nắng sớm xuyên qua khung cửa sổ"
+          },
+          {
+            "id": "fixture-24",
+            "source": "evelyn mệt mỏi ngồi trên giường với suy nghĩ quẩn quanh trong tâm trí, mình đã bị ăn sạch  sành sanh"
+          },
+          {
+            "id": "fixture-25",
+            "source": "bỗng cael đưa đến thìa thức ăn, anh nhẹ giọng dỗ dành, evelyn, sau khi em ăn xong, ta sẽ  đưa em về dinh thự, đây"
+          },
+          {
+            "id": "fixture-27",
+            "source": "hành động này khiến cô sững sờ"
+          },
+          {
+            "id": "fixture-28",
+            "source": "evelyn ấm ức nhìn người đối diện rồi trách cứ, anh thật là quá đáng, sao anh có thể tiếp tục  cho đến khi em không còn nhúc nhích nổi nữa vậy hả"
+          },
+          {
+            "id": "fixture-29",
+            "source": "nghe vậy cael đã vội vàng giải oan, em là người đã cầu xin ta trước mà, ngay sau đó cô đã  phản bác ngay, em làm thế khi nào chứ, em đã liên tục nói với anh đó là một sự hiểu lầm rồi  mà"
+          },
+          {
+            "id": "fixture-30",
+            "source": "đến khi về đến nhà, evelyn vẫn không ngừng trách móc, đồ cầm thú"
+          }
+        ]
+      },
+      "reference_options": [
+        "Say ah",
+        "Open wide"
+      ]
+    },
+    {
+      "ordinal": 26,
+      "category": "context after feeding",
+      "locator": "26:0",
+      "line": {
+        "id": "fixture-27",
+        "source": "hành động này khiến cô sững sờ",
+        "context": [
+          {
+            "id": "fixture-23",
+            "source": "khi ánh nắng sớm xuyên qua khung cửa sổ"
+          },
+          {
+            "id": "fixture-24",
+            "source": "evelyn mệt mỏi ngồi trên giường với suy nghĩ quẩn quanh trong tâm trí, mình đã bị ăn sạch  sành sanh"
+          },
+          {
+            "id": "fixture-25",
+            "source": "bỗng cael đưa đến thìa thức ăn, anh nhẹ giọng dỗ dành, evelyn, sau khi em ăn xong, ta sẽ  đưa em về dinh thự, đây"
+          },
+          {
+            "id": "fixture-26",
+            "source": "nói a đi"
+          },
+          {
+            "id": "fixture-28",
+            "source": "evelyn ấm ức nhìn người đối diện rồi trách cứ, anh thật là quá đáng, sao anh có thể tiếp tục  cho đến khi em không còn nhúc nhích nổi nữa vậy hả"
+          },
+          {
+            "id": "fixture-29",
+            "source": "nghe vậy cael đã vội vàng giải oan, em là người đã cầu xin ta trước mà, ngay sau đó cô đã  phản bác ngay, em làm thế khi nào chứ, em đã liên tục nói với anh đó là một sự hiểu lầm rồi  mà"
+          },
+          {
+            "id": "fixture-30",
+            "source": "đến khi về đến nhà, evelyn vẫn không ngừng trách móc, đồ cầm thú"
+          },
+          {
+            "id": "fixture-31",
+            "source": "đồ biến thái, lúc này cael bất lực cho hay, em cũng mạnh miệng gớm nhỉ, đối với một người  đã vồ lấy ta trong đêm đầu tiên của chúng ta"
+          }
+        ]
+      },
+      "reference_options": []
+    },
+    {
+      "ordinal": 30,
+      "category": "long clauses / formatting failure",
+      "locator": "30:0",
+      "line": {
+        "id": "fixture-31",
+        "source": "đồ biến thái, lúc này cael bất lực cho hay, em cũng mạnh miệng gớm nhỉ, đối với một người  đã vồ lấy ta trong đêm đầu tiên của chúng ta",
+        "context": [
+          {
+            "id": "fixture-27",
+            "source": "hành động này khiến cô sững sờ"
+          },
+          {
+            "id": "fixture-28",
+            "source": "evelyn ấm ức nhìn người đối diện rồi trách cứ, anh thật là quá đáng, sao anh có thể tiếp tục  cho đến khi em không còn nhúc nhích nổi nữa vậy hả"
+          },
+          {
+            "id": "fixture-29",
+            "source": "nghe vậy cael đã vội vàng giải oan, em là người đã cầu xin ta trước mà, ngay sau đó cô đã  phản bác ngay, em làm thế khi nào chứ, em đã liên tục nói với anh đó là một sự hiểu lầm rồi  mà"
+          },
+          {
+            "id": "fixture-30",
+            "source": "đến khi về đến nhà, evelyn vẫn không ngừng trách móc, đồ cầm thú"
+          },
+          {
+            "id": "fixture-32",
+            "source": "vậy lúc đó em ghét việc đó lắm sao, những lời này đã khiến evelyn ngượng đỏ mặt, cô nhỏ  giọng lẩm bẩm, chuyện đó là, nó thật tuyệt vời"
+          },
+          {
+            "id": "fixture-33",
+            "source": "bất chợt cael hôn lên mí mắt cô rồi thủ thỉ, cá nhân ta"
+          },
+          {
+            "id": "fixture-34",
+            "source": "ta đã thực sự rất hạnh phúc khi em đến tìm ta vào sáng sớm như thế này"
+          },
+          {
+            "id": "fixture-35",
+            "source": "ngủ ngon nhé, hẹn gặp lại em vào ngày mai, evelyn"
+          }
+        ]
+      },
+      "reference_options": []
+    },
+    {
+      "ordinal": 38,
+      "category": "speaker relations",
+      "locator": "38:0",
+      "line": {
+        "id": "fixture-39",
+        "source": "cô bất lực kêu gào, ta đã nghĩ đó là một nơi hoàn hảo mà, và",
+        "context": [
+          {
+            "id": "fixture-35",
+            "source": "ngủ ngon nhé, hẹn gặp lại em vào ngày mai, evelyn"
+          },
+          {
+            "id": "fixture-36",
+            "source": "hành động vừa rồi đã làm evelyn sững người hồi lâu"
+          },
+          {
+            "id": "fixture-37",
+            "source": "không bao lâu sau màn đêm đã buông xuống, emily nghi hoặc lên tiếng, nhưng tại sao  người nhất định phải xông vào phòng ngủ vậy tiểu thư"
+          },
+          {
+            "id": "fixture-38",
+            "source": "trong khi đó evelyn lại ủ rũ ngồi một chỗ"
+          },
+          {
+            "id": "fixture-40",
+            "source": "hugo hoàn toàn không ngăn ta lại khi chỉ đường mà, chúng ta cùng phe với nhau mà"
+          },
+          {
+            "id": "fixture-41",
+            "source": "chuyện quái quỷ gì vậy chứ"
+          },
+          {
+            "id": "fixture-42",
+            "source": "mình đã nghĩ nếu mình cứ bám riết lấy anh ta trong phòng ngủ, anh ta sẽ thấy mình thật  phiền phức và bảo mình cút ra ngoài ngay lập tức"
+          },
+          {
+            "id": "fixture-43",
+            "source": "những suy nghĩ về cael không ngừng ùa về trong tâm trí evelyn, đối với ta, ta thực sự đã rất  hạnh phúc khi thấy em đến tìm ta vào sáng sớm như thế này, ngủ ngon nhé, hẹn gặp lại em  vào ngày mai, evelyn, chuyện này cứ như là, anh ta thật sự thích mình vậy"
+          }
+        ]
+      },
+      "reference_options": []
+    },
+    {
+      "ordinal": 48,
+      "category": "Hugo / dialogue",
+      "locator": "48:0",
+      "line": {
+        "id": "fixture-49",
+        "source": "lời vừa dứt, hugo đã nhanh chóng cho hay, mọi thứ đã hoàn tất rồi ạ",
+        "context": [
+          {
+            "id": "fixture-45",
+            "source": "làm sao mình biết được khi nào anh ta sẽ đột ngột trở mặt với mình chứ"
+          },
+          {
+            "id": "fixture-46",
+            "source": "cha mẹ và em trai mình sẽ trở về dinh thự chỉ trong một tuần nữa, vì vậy mình phải bí mật  giải quyết chuyện này trước khi mọi thứ trở nên tồi tệ hơn"
+          },
+          {
+            "id": "fixture-47",
+            "source": "mình phải làm gì bây giờ"
+          },
+          {
+            "id": "fixture-48",
+            "source": "trong khi đó, bên phía cael, anh lại chậm rãi lên tiếng, các khâu chuẩn bị đã sẵn sàng chưa"
+          },
+          {
+            "id": "fixture-50",
+            "source": "mối tình đầu, người phụ nữ đầu tiên và người tình đầu tiên của ngài công tước hardeon đã  được hé lộ, đó chính là tiểu thư evelyn thuộc gia tộc bá tước florence"
+          },
+          {
+            "id": "fixture-51",
+            "source": "nàng được mệnh danh là đệ nhất mỹ nhân của đế quốc, rạng rỡ như hoa và thanh tú như  cánh bướm, cả hai dự kiến sẽ tổ chức hôn lễ vào cuối mùa xuân tới"
+          },
+          {
+            "id": "fixture-52",
+            "source": "cậu ấy không khỏi phấn khích mà khoe, tôi đã chuẩn bị bản thảo theo đúng những nội dung  đó rồi ạ"
+          },
+          {
+            "id": "fixture-53",
+            "source": "đó là thông báo kết hôn sẽ được đăng trên tờ báo của đế quốc ạ"
+          }
+        ]
+      },
+      "reference_options": []
+    },
+    {
+      "ordinal": 72,
+      "category": "Jacqueline / reproach",
+      "locator": "72:0",
+      "line": {
+        "id": "fixture-73",
+        "source": "jacqueline ở một bên lại còn đổ thêm dầu vào lửa, không phải lỗi của chị sao, mọi người  đều đang bàn tán về việc chị tát vị hôn phu của mình rồi đá anh ta đấy",
+        "context": [
+          {
+            "id": "fixture-69",
+            "source": "evelyn càng đọc càng ngại ngùng vì nội dung của nó, sao anh ta có thể để họ xuất bản  những thứ vô nghĩa sến súa như thế này cơ chứ"
+          },
+          {
+            "id": "fixture-70",
+            "source": "giọng của damian vang lên ngay sau lưng khiến cô sợ hãi khựng cả người, evelyn"
+          },
+          {
+            "id": "fixture-71",
+            "source": "ông ta chỉ tay vào evelyn giọng điệu gay gắt quát mắng, việc có làm bôi nhọ danh tiếng của cha cũng phải có giới hạn thôi chứ, con vừa mới hủy hôn xong, sao con có thể thông báo kết hôn ngay lập tức như vậy, con không biết xấu hổ là gì à"
+          },
+          {
+            "id": "fixture-72",
+            "source": "evelyn cúi đầu nhận lỗi giọng điệu đầy oan ức, con thực sự xin lỗi vì chuyện này đã xảy ra  quá đột ngột, nhưng, chuyện hủy hôn không phải lỗi của con"
+          },
+          {
+            "id": "fixture-74",
+            "source": "cậu ta giọng điệu đầy ẩn ý quanh sang phía damian, nhờ ơn chị mà danh tiếng của gia đình  này đã nát bét rồi, evelyn bực bội lườm cậu ta, jacqueline, đừng xen vào chuyện này"
+          },
+          {
+            "id": "fixture-75",
+            "source": "damian quát lớn cắt ngang cuộc tranh cãi của họ, ông ta bắt đầu xả một tràng lớn mắng mỏ,  đủ rồi, sau những gì đã gây ra mà con còn dám quát tháo em trai mình sao, ta còn nghe nói  con đã thản nhiên đi qua đêm không chút suy nghĩ nữa đấy"
+          },
+          {
+            "id": "fixture-76",
+            "source": "nghe những lời quát tháo của ông ta evelyn ấm ức chất vấn, tại sao"
+          },
+          {
+            "id": "fixture-77",
+            "source": "tại sao mọi người chỉ luôn nhắm vào một mình con chứ, cha chẳng bao giờ để tâm khi jacqueline đi qua đêm hay gây rắc rối cả"
+          }
+        ]
+      },
+      "reference_options": []
+    },
+    {
+      "ordinal": 74,
+      "category": "Damian / sensitive family address",
+      "locator": "74:0",
+      "line": {
+        "id": "fixture-75",
+        "source": "damian quát lớn cắt ngang cuộc tranh cãi của họ, ông ta bắt đầu xả một tràng lớn mắng mỏ,  đủ rồi, sau những gì đã gây ra mà con còn dám quát tháo em trai mình sao, ta còn nghe nói  con đã thản nhiên đi qua đêm không chút suy nghĩ nữa đấy",
+        "context": [
+          {
+            "id": "fixture-71",
+            "source": "ông ta chỉ tay vào evelyn giọng điệu gay gắt quát mắng, việc có làm bôi nhọ danh tiếng của cha cũng phải có giới hạn thôi chứ, con vừa mới hủy hôn xong, sao con có thể thông báo kết hôn ngay lập tức như vậy, con không biết xấu hổ là gì à"
+          },
+          {
+            "id": "fixture-72",
+            "source": "evelyn cúi đầu nhận lỗi giọng điệu đầy oan ức, con thực sự xin lỗi vì chuyện này đã xảy ra  quá đột ngột, nhưng, chuyện hủy hôn không phải lỗi của con"
+          },
+          {
+            "id": "fixture-73",
+            "source": "jacqueline ở một bên lại còn đổ thêm dầu vào lửa, không phải lỗi của chị sao, mọi người  đều đang bàn tán về việc chị tát vị hôn phu của mình rồi đá anh ta đấy"
+          },
+          {
+            "id": "fixture-74",
+            "source": "cậu ta giọng điệu đầy ẩn ý quanh sang phía damian, nhờ ơn chị mà danh tiếng của gia đình  này đã nát bét rồi, evelyn bực bội lườm cậu ta, jacqueline, đừng xen vào chuyện này"
+          },
+          {
+            "id": "fixture-76",
+            "source": "nghe những lời quát tháo của ông ta evelyn ấm ức chất vấn, tại sao"
+          },
+          {
+            "id": "fixture-77",
+            "source": "tại sao mọi người chỉ luôn nhắm vào một mình con chứ, cha chẳng bao giờ để tâm khi jacqueline đi qua đêm hay gây rắc rối cả"
+          },
+          {
+            "id": "fixture-78",
+            "source": "ông ta nghe những lời chất vấn của cô thay vì giải thích lại đổ ngược lại lỗi cho cô, thay vì  hối lỗi về sai lầm của mình, con lại định kéo cả em trai con xuống sao, jacqueline lên tiếng  đáp trả lời chất vấn bằng giọng điệu hống hách, này, phụ nữ mà cũng đòi giống như đàn  ông à"
+          },
+          {
+            "id": "fixture-79",
+            "source": "jane im lặng từ lúc nãy đến giờ mới dè dặt lên tiếng khuyên can, evelyn, làm ơn đi mà"
+          }
+        ]
+      },
+      "reference_options": []
+    },
+    {
+      "ordinal": 96,
+      "category": "question without literal question mark",
+      "locator": "96:0",
+      "line": {
+        "id": "fixture-97",
+        "source": "nhưng bố mình không phải là một người đàn ông dễ đối phó, vì ông ấy là người coi trọng thể diện, nên ông ấy có lẽ sẽ cố gắng ngăn cản chuyện này và nói rằng cuộc hôn nhân này thật vô lý, đúng không nhỉ",
+        "context": [
+          {
+            "id": "fixture-93",
+            "source": "evelyn ngước lên nhìn bọn họ bằng ánh mắt ái ngại"
+          },
+          {
+            "id": "fixture-94",
+            "source": "trên bàn ăn không ai nói câu nào không khí vô cùng ngột ngạt"
+          },
+          {
+            "id": "fixture-95",
+            "source": "cael cất lời trước những lời của anh khiến damian ngay lập tức phun hết rượu vừa uống, bài  báo trên tờ tin tức đã không thể lột tả hết được vẻ đẹp của evelyn, evelyn cũng ngượng đỏ  chín mặt khi nghe, người đàn ông này đang nói cái gì trước mặt cha mẹ mình vậy"
+          },
+          {
+            "id": "fixture-96",
+            "source": "cô nhìn anh đang bình thản cất lời bảo vệ mình trong lòng đầy cảm kích, có chút choáng  ngợp khi anh ấy chốt hạ mọi chuyện bằng một thông báo công khai, nhưng, thực ra mình rất  biết ơn vì anh ấy đã đứng về phía mình"
+          },
+          {
+            "id": "fixture-98",
+            "source": "cael cất lời dò hỏi ý kiến của damian, chắc hẳn ngài đã xem bài báo rồi, gia tộc florence nghĩ  sao về chuyện này, evelyn trong đầu đã xuất hiện viễn cảnh sau câu hỏi này, được rồi, giờ  thì cha sẽ phản đối cuộc hôn nhân này cho xem"
+          },
+          {
+            "id": "fixture-99",
+            "source": "xin lỗi, cái gì cơ"
+          },
+          {
+            "id": "fixture-100",
+            "source": "cael tiếp tục cất lời, lần này anh đưa ra một đề nghị cho ông ta, tất nhiên, trong mắt ngài, ta  hẳn là một người con rể còn nhiều thiếu sót, vì vậy, ta có một đề nghị dành cho ngài,  damian nghe giọng sắc mặt ngay lập tức đổ mồ hôi hột, cậu ấy thật đáng sợ, cái gì vậy"
+          },
+          {
+            "id": "fixture-101",
+            "source": "trong một tháng tới"
+          }
+        ]
+      },
+      "reference_options": []
+    },
+    {
+      "ordinal": 94,
+      "category": "names / long narration",
+      "locator": "94:0",
+      "line": {
+        "id": "fixture-95",
+        "source": "cael cất lời trước những lời của anh khiến damian ngay lập tức phun hết rượu vừa uống, bài  báo trên tờ tin tức đã không thể lột tả hết được vẻ đẹp của evelyn, evelyn cũng ngượng đỏ  chín mặt khi nghe, người đàn ông này đang nói cái gì trước mặt cha mẹ mình vậy",
+        "context": [
+          {
+            "id": "fixture-91",
+            "source": "anh vẫn tay đặt lên vai cô, ánh mắt nhìn thẳng vào ông ta tuyên bố, ta đến muộn rồi, nhưng  ta thực sự rất muốn ghé thăm điền trang của bá tước, ta ở đây để thông báo về cuộc hôn  nhân của ta với evelyn"
+          },
+          {
+            "id": "fixture-92",
+            "source": "damian ngồi trên bàn uống rượu, còn jane ở bên cạnh đang thở dài"
+          },
+          {
+            "id": "fixture-93",
+            "source": "evelyn ngước lên nhìn bọn họ bằng ánh mắt ái ngại"
+          },
+          {
+            "id": "fixture-94",
+            "source": "trên bàn ăn không ai nói câu nào không khí vô cùng ngột ngạt"
+          },
+          {
+            "id": "fixture-96",
+            "source": "cô nhìn anh đang bình thản cất lời bảo vệ mình trong lòng đầy cảm kích, có chút choáng  ngợp khi anh ấy chốt hạ mọi chuyện bằng một thông báo công khai, nhưng, thực ra mình rất  biết ơn vì anh ấy đã đứng về phía mình"
+          },
+          {
+            "id": "fixture-97",
+            "source": "nhưng bố mình không phải là một người đàn ông dễ đối phó, vì ông ấy là người coi trọng thể diện, nên ông ấy có lẽ sẽ cố gắng ngăn cản chuyện này và nói rằng cuộc hôn nhân này thật vô lý, đúng không nhỉ"
+          },
+          {
+            "id": "fixture-98",
+            "source": "cael cất lời dò hỏi ý kiến của damian, chắc hẳn ngài đã xem bài báo rồi, gia tộc florence nghĩ  sao về chuyện này, evelyn trong đầu đã xuất hiện viễn cảnh sau câu hỏi này, được rồi, giờ  thì cha sẽ phản đối cuộc hôn nhân này cho xem"
+          },
+          {
+            "id": "fixture-99",
+            "source": "xin lỗi, cái gì cơ"
+          }
+        ]
+      },
+      "reference_options": []
+    }
+  ],
+  "synthetic_cases": [
+    {
+      "source": "Dr. Cael trả 3.5 USD tại https://example.com/a.b",
+      "translation": "Dr. Cael pays 3.5 USD at https://example.com/a.b"
+    },
+    {
+      "source": "xin chào, {name}",
+      "translation": "hello, {name}"
+    }
+  ]
+}

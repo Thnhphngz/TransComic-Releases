@@ -1,0 +1,2 @@
+"""TransComic desktop application."""
+
