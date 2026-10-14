@@ -128,6 +128,7 @@ class Runtime:
         return exe
 
     def command(self,argv,log,timeout=1800,offline=False):
+        print('RUN '+log.name+' — log: '+str(log),flush=True)
         env=dict(os.environ)
         if offline:env['TRANSCOMIC_RELEASE_OFFLINE_TESTS']='1'
         with log.open('wb') as stream:
@@ -289,7 +290,7 @@ class AutomaticSystem:
         with process_lock(self.root):
             plan=self.plan();self.describe(plan,mode)
             if not plan['changed']:
-                print('NO RELEASEABLE CHANGES');return plan
+                return plan
             record=plan['record'];version=plan['version']
             if not plan['pending']:
                 # Preserve every published journal, not an empty/reset state.
@@ -362,7 +363,7 @@ class AutomaticSystem:
             'source_changes':plan['review']['changes'],'resume_reserved_version':plan['pending'],
             'remote_operations':['create fixed-repo tag/draft','upload canonical installer/manifest/checksums','verify','publish','verify anonymous latest and baseline'] if mode=='auto' and plan['changed'] else [],
             'historical_acceptance':'USER CONFIRMED: install 0.1.0; native 0.1.0 → 0.1.1 → 1.0.0; history preserved. Not automated E2E evidence.',
-            'new_version_native_update':'PENDING USER TEST','translation_api_calls':0},ensure_ascii=False,indent=2))
+            'new_version_native_update':'PENDING USER TEST','translation_api_calls':0},ensure_ascii=False,indent=2),flush=True)
         if not plan['changed']:print('NO RELEASEABLE CHANGES')
 
 def main(argv=None):

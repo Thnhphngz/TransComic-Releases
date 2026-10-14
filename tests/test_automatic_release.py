@@ -31,7 +31,7 @@ class FakeRuntime(auto.Runtime):
         (folder/name).write_bytes(data)
         raw=canonical(manifest(r['version'],name,len(data),hashlib.sha256(data).hexdigest(),r['created_at']))
         (folder/'transcomic-update.json').write_bytes(raw)
-        (folder/'SHA256SUMS.txt').write_text(hashlib.sha256(data).hexdigest()+'  '+name+'\n'+hashlib.sha256(raw).hexdigest()+'  transcomic-update.json\n',encoding='ascii')
+        (folder/'SHA256SUMS.txt').write_bytes((hashlib.sha256(data).hexdigest()+'  '+name+'\n'+hashlib.sha256(raw).hexdigest()+'  transcomic-update.json\n').encode('ascii'))
         (work/'full.xml').write_text('<testsuites><testsuite tests="1" failures="0" errors="0"/></testsuites>')
     def verify_local(self,r,work):
         self.events.append('verify_local')
@@ -252,3 +252,81 @@ def test_two_actual_bats_only_one_can_release(project):
         first.communicate(timeout=30);assert first.returncode==0
     finally:
         if first.poll() is None:first.kill();first.communicate()
+
+def test_real_scoped_publisher_resumes_uncertain_upload_without_duplicate(project,monkeypatch):
+    """Real command policy/coordinator/publisher against a fake gh REST server."""
+    from scripts import first_internal_release as first
+    root,runtime,system=project;change(root);record=system.run('build-only')
+    work=root/record['work'];folder=root/'releases'/record['version']
+    monkeypatch.setattr(first,'ROOT',root);monkeypatch.setattr(first,'_AUTOMATIC_SCOPES',{})
+    monkeypatch.setattr(first,'require_current_tests',lambda scope:None)  # Fixture test evidence, never a CLI switch.
+    scope=first.automatic_scope(record['version']);scope.out.mkdir(parents=True,exist_ok=True)
+    (scope.out/'release-notes.md').write_text('Vietnamese notes fixture',encoding='utf8')
+    runtime.tools={'gh':{'path':str(root/'gh.exe')}}
+    original_verify=runtime.verify_local
+    def verified(r,w):
+        original_verify(r,w)
+        return [package.Asset.inspect(n,folder/n,root) for n in package.names(r['version'])]
+    runtime.verify_local=verified
+    original_run=subprocess.run;state={'tag':False,'release':None,'uploads':{},'uncertain':True,'publish_count':0}
+    prefix='repos/'+auto.REPO
+    def respond(argv,**kwargs):
+        if argv[0]!=str(root/'gh.exe'):return original_run(argv,**kwargs)
+        endpoint=argv[2];method=argv[argv.index('--method')+1] if '--method' in argv else 'GET'
+        value=None;code=0
+        if endpoint==prefix+'/releases?per_page=100':value=[] if state['release'] is None else [state['release']]
+        elif endpoint==prefix+'/git/ref/tags/v1.0.1':
+            if not state['tag']:return subprocess.CompletedProcess(argv,1,b'HTTP/2.0 404 Not Found\r\n\r\n{}',b'')
+            value={'object':{'sha':'b'*40,'type':'commit'}}
+        elif endpoint==prefix+'/git/refs' and method=='POST':
+            assert not state['tag'];state['tag']=True;value={'ref':'refs/tags/v1.0.1','object':{'sha':'b'*40,'type':'commit'}}
+        elif endpoint==prefix+'/releases' and method=='POST':
+            assert state['release'] is None
+            request=json.loads(Path(argv[argv.index('--input')+1]).read_text())
+            value=dict(request,id=7,url='https://api.github.com/'+prefix+'/releases/7',
+                html_url='https://github.com/'+auto.REPO+'/releases/tag/untagged-fixture',assets=[])
+            state['release']=value
+        elif endpoint.startswith('https://uploads.github.com/'+prefix+'/releases/7/assets?name='):
+            name=endpoint.rsplit('=',1)[-1];assert name not in state['uploads'],'Duplicate upload!'
+            raw=Path(argv[argv.index('--input')+1]).read_bytes();state['uploads'][name]=raw
+            value={'name':name,'id':80+len(state['uploads']),'size':len(raw),'state':'uploaded','digest':'sha256:'+hashlib.sha256(raw).hexdigest(),
+                'browser_download_url':'https://github.com/'+auto.REPO+'/releases/download/untagged-fixture/'+name}
+            state['release']['assets'].append(value)
+            if state['uncertain']:
+                state['uncertain']=False;raise subprocess.TimeoutExpired('gh',1)
+        elif endpoint.startswith(prefix+'/releases/assets/'):
+            asset=next(a for a in state['release']['assets'] if str(a['id'])==endpoint.rsplit('/',1)[-1])
+            return subprocess.CompletedProcess(argv,0,state['uploads'][asset['name']],b'')
+        elif endpoint==prefix+'/releases/7':
+            if method=='PATCH':
+                state['publish_count']+=1;state['release'].update(draft=False,html_url=release_url('v1.0.1'),published_at='2026-10-15T00:00:00Z')
+                for a in state['release']['assets']:a['browser_download_url']=asset_url('v1.0.1',a['name'])
+            value=state['release']
+        else:pytest.fail('Unapproved fake endpoint: '+endpoint)
+        raw=json.dumps(value).encode()
+        if '--include' in argv:raw=b'HTTP/2.0 200 OK\r\n\r\n'+raw
+        return subprocess.CompletedProcess(argv,code,raw,b'')
+    monkeypatch.setattr(first.subprocess,'run',respond)
+    with pytest.raises(UpdateError,match='OUTCOME_UNKNOWN'):auto.Runtime.publish(runtime,record,work,system.journal)
+    assert len(state['uploads'])==1 and system.journal.load()['state']=='UNKNOWN_REMOTE_OUTCOME'
+    published=auto.Runtime.publish(runtime,system.journal.load(),work,system.journal)
+    assert published['state']=='PUBLISHED' and len(state['uploads'])==3 and state['publish_count']==1
+    receipts=package.load(scope.out/'mutation-receipts.json');assert len(receipts)==6  # tag/draft/3 assets/publish
+    assert all(v['confirmed'] is True for v in receipts.values())
+    notes=(scope.out/'release-notes.md').read_text().rstrip()+'\n\n<!-- transcomic-build-id: '+record['build_id']+' -->\n'
+    commands=first.FirstReleaseCommands(root/'gh.exe',record['source_commit'],'b'*40,record['build_id'],notes,verified(record,work),scope=scope)
+    commands.release_id=7;installer=package.names(record['version'])[0]
+    argv=[commands.gh,'api','https://uploads.github.com/'+prefix+'/releases/7/assets?name='+installer,'--method','POST','-H','Content-Type: application/octet-stream','--input',str(folder/installer)]
+    with pytest.raises(UpdateError,match='RECEIPT_PRESENT'):commands(argv,root)
+    assert len(state['uploads'])==3
+
+def test_readonly_previous_release_does_not_overwrite_historical_evidence(tmp_path,monkeypatch):
+    from scripts import first_internal_release as first
+    monkeypatch.setattr(first,'ROOT',tmp_path);monkeypatch.setattr(first,'_AUTOMATIC_SCOPES',{})
+    scope=first.automatic_scope('1.0.1');notes='<!-- transcomic-build-id: '+'c'*64+' -->'
+    c=first.FirstReleaseCommands(tmp_path/'gh.exe','a'*40,'b'*40,'c'*64,notes,[],scope=scope,read_only=True)
+    publisher=first.FirstReleasePublisher(c)
+    release={'id':7,'tag_name':'v1.0.1','draft':False,'prerelease':False,'body':notes,'assets':[],
+        'html_url':release_url('v1.0.1'),'url':'https://api.github.com/repos/'+auto.REPO+'/releases/7','target_commitish':'b'*40}
+    monkeypatch.setattr(publisher,'api',lambda endpoint:json.dumps([release]).encode())
+    assert publisher.read('1.0.1')['id']==7 and not scope.out.exists()

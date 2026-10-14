@@ -330,7 +330,8 @@ class FirstReleasePublisher(GitHubPublisher):
         if len(matches)>1:raise UpdateError('DUPLICATE_RELEASE_IDENTITY')
         if not matches:return None
         release=matches[0];self.commands.bind_release(release)
-        (self.scope.out/('remote-read-'+str(len(self.commands.events))+'.json')).write_text(json.dumps(release,indent=2),encoding='utf8')
+        if not self.commands.read_only:
+            (self.scope.out/('remote-read-'+str(len(self.commands.events))+'.json')).write_text(json.dumps(release,indent=2),encoding='utf8')
         return release
 
     def verify(self, version, release, assets, published=False):
