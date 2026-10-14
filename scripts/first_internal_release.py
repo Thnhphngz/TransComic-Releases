@@ -52,6 +52,25 @@ def identity_in_notes(notes):
     return found[0]
 
 
+def draft_validation_identity(release):
+    """GitHub drafts can have untagged web URLs. Verify IDs via API; only
+    construct future canonical URLs for PRE-publication schema validation.
+    Published releases are always verified with their actual untouched URLs.
+    """
+    if release.get('draft') is not True:return release
+    result=dict(release,html_url=release_url(TAG))
+    result['assets']=[]
+    for asset in release.get('assets',[]):
+        name=asset.get('name')
+        if name not in NAMES:raise UpdateError('UNEXPECTED_DRAFT_ASSET')
+        actual=asset.get('browser_download_url','')
+        untagged=re.escape('https://github.com/'+REPO+'/releases/download/')+r'untagged-[A-Za-z0-9_-]{1,100}/'+re.escape(name)
+        if actual!=asset_url(TAG,name) and not re.fullmatch(untagged,actual):
+            raise UpdateError('DRAFT_ASSET_URL_OUTSIDE_PINNED_REPOSITORY')
+        result['assets'].append(dict(asset,browser_download_url=asset_url(TAG,name)))
+    return result
+
+
 def source_identity():
     value = SourceIdentity(str(ROOT), git('rev-parse', 'HEAD'), git('branch', '--show-current'),
                            bool(git('status', '--porcelain')), verified=True)
@@ -140,6 +159,8 @@ class FirstReleaseCommands:
         if argv[:2] != [self.gh, 'api']:
             raise UpdateError('FIRST_RELEASE_GH_ONLY')
         endpoint=argv[2];tail=argv[3:];prefix='repos/'+REPO
+        if endpoint==prefix+'/releases?per_page=100' and tail==['--method','GET']:
+            return False
         if endpoint in (prefix+'/releases/tags/'+TAG, prefix+'/git/ref/tags/'+TAG) and tail in (['--include'], ['--method','GET']):
             return False
         if re.fullmatch(re.escape(prefix)+r'/releases/assets/[0-9]+', endpoint):
@@ -182,14 +203,23 @@ class FirstReleaseCommands:
             if raw.startswith(b'HTTP/'):
                 _,sep,raw=raw.partition(b'\r\n\r\n')
                 if not sep:_,sep,raw=result.stdout.partition(b'\n\n')
-            release=json.loads(raw)
-            if release.get('tag_name')!=TAG or release.get('html_url')!=release_url(TAG):
-                raise UpdateError('REMOTE_RELEASE_IDENTITY_MISMATCH')
-            if identity_in_notes(release.get('body'))!=self.build_id:
-                raise UpdateError('CONFLICTING_RELEASE_BUILD_ID')
-            self.release_id=release['id']
-            self.asset_ids={a['id'] for a in release.get('assets',[])}
+            self.bind_release(json.loads(raw))
         return CommandResult(result.returncode,result.stdout)
+
+    def bind_release(self, release):
+        rid=release.get('id')
+        if type(rid) is not int or rid<=0 or (self.release_id is not None and self.release_id!=rid):
+            raise UpdateError('REMOTE_RELEASE_ID_CHANGED')
+        url=release.get('html_url','')
+        untagged=re.escape('https://github.com/'+REPO+'/releases/tag/')+r'untagged-[A-Za-z0-9_-]{1,100}'
+        valid_url=url==release_url(TAG) or (release.get('draft') is True and re.fullmatch(untagged,url))
+        if (release.get('tag_name')!=TAG or not valid_url or release.get('prerelease') is not False or
+            release.get('url')!='https://api.github.com/repos/'+REPO+'/releases/'+str(rid) or
+            release.get('target_commitish')!=self.distribution):
+            raise UpdateError('REMOTE_RELEASE_IDENTITY_MISMATCH')
+        if identity_in_notes(release.get('body'))!=self.build_id or release.get('body','').rstrip()!=self.notes.rstrip():
+            raise UpdateError('CONFLICTING_RELEASE_BUILD_ID_OR_NOTES')
+        self.release_id=rid;self.asset_ids={a['id'] for a in release.get('assets',[])}
 
 
 class FirstReleasePublisher(GitHubPublisher):
@@ -198,6 +228,27 @@ class FirstReleasePublisher(GitHubPublisher):
         if type(commands) is not FirstReleaseCommands:raise UpdateError('CONCRETE_FIRST_RELEASE_COMMANDS_REQUIRED')
         super().__init__(commands.gh,ROOT,policy='internal')
         self.commands=commands
+
+    def read(self, version):
+        if version!=VERSION:raise UpdateError('ONLY_V0_1_1_AUTHORIZED')
+        # /releases/tags is documented for published releases; authenticated
+        # list includes drafts. Never infer draft absence from tag-route 404.
+        releases=json.loads(self.api('repos/'+REPO+'/releases?per_page=100'))
+        if not isinstance(releases,list) or len(releases)>=100:
+            raise UpdateError('RELEASE_INVENTORY_UNCERTAIN')
+        matches=[r for r in releases if r.get('tag_name')==TAG]
+        if len(matches)>1:raise UpdateError('DUPLICATE_RELEASE_IDENTITY')
+        if not matches:return None
+        release=matches[0];self.commands.bind_release(release)
+        (OUT/('remote-read-'+str(len(self.commands.events))+'.json')).write_text(json.dumps(release,indent=2),encoding='utf8')
+        return release
+
+    def verify(self, version, release, assets, published=False):
+        if version!=VERSION:raise UpdateError('ONLY_V0_1_1_AUTHORIZED')
+        self.commands.bind_release(release)
+        self.check_tag(version,self.commands.distribution)
+        validated=release if published else draft_validation_identity(release)
+        return super().verify(version,validated,assets,published=published)
 
     def draft(self, version, distribution_sha, public_identity):
         if version!=VERSION or distribution_sha!=self.commands.distribution:
