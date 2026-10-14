@@ -8,7 +8,7 @@ from .metadata import UpdateError
 
 class AuthenticodeAdapter:
     def __init__(self,signtool,powershell,thumbprint,subject,commands=None):
-        if not re.fullmatch('[0-9A-Fa-f]{40}',thumbprint or '') or not subject:raise UpdateError('AUTHENTICODE_NOT_CONFIGURED')
+        if not re.fullmatch('[0-9A-Fa-f]{40}',thumbprint or '') or not subject:raise UpdateError('AUTHENTICODE_CERTIFICATE_NOT_READY')
         self.signtool=safe_path(signtool);self.powershell=safe_path(powershell)
         self.thumbprint=thumbprint.upper();self.subject=subject;self.commands=commands_or_default(commands)
 

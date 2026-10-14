@@ -39,7 +39,8 @@ class Cancelled(UpdateError): pass
 
 class UpdateService:
     def __init__(self, directory=None, client=None, clock=time.time, keys=None, testing=False):
-        self.directory=Path(directory) if directory is not None else update_directory()
+        from ..release_adapters import safe_path
+        self.directory=safe_path(Path(directory) if directory is not None else update_directory())
         if self.directory.resolve().is_relative_to(Path(__file__).resolve().parents[2]):
             raise UpdateError('Updates must be outside source/program directory')
         if self.directory.is_symlink(): raise UpdateError('Update directory may not be a symlink')
@@ -51,20 +52,34 @@ class UpdateService:
         self._download_lock=threading.Lock()
         self.cache_path=self.directory/'check-cache.json'
 
+    def validate_candidate(self,release,envelope):
+        return candidate(release,envelope,self.keys,self.testing)
+
+    def verify_trust(self,item):
+        if item.signature_status!='VERIFIED_ED25519' or verify_signature(item.payload,item.signature,self.keys)!='VERIFIED_ED25519':raise UpdateError(NOT_READY)
+
+    def check_extra_assets(self,client,release,item,manifest,cancel):pass
+
     def _cache(self):
         try:
+            from ..release_adapters import safe_path
+            safe_path(self.cache_path,self.directory)
             if self.cache_path.is_symlink() or self.cache_path.stat().st_size>1024*1024: return {}
             data=strict_json(self.cache_path.read_bytes())
             return data if isinstance(data,dict) else {}
         except (OSError,UpdateError): return {}
 
     def _save(self, cache):
+        from ..release_adapters import safe_path
+        safe_path(self.directory)
         self.directory.mkdir(parents=True,exist_ok=True)
-        temp=self.directory/(uuid.uuid4().hex+'.tmp')
+        safe_path(self.cache_path,self.directory)
+        temp=safe_path(self.directory/(uuid.uuid4().hex+'.tmp'),self.directory)
         try:
-            with temp.open('x',encoding='utf-8') as f: json.dump(cache,f)
+            with temp.open('x',encoding='utf-8') as f:json.dump(cache,f);f.flush();os.fsync(f.fileno())
+            safe_path(self.cache_path,self.directory)
             os.replace(temp,self.cache_path)
-        finally: temp.unlink(missing_ok=True)
+        finally:safe_path(temp,self.directory).unlink(missing_ok=True)
 
     def _client(self):
         return self.client or httpx.Client(timeout=httpx.Timeout(20,connect=8),follow_redirects=False,trust_env=False,
@@ -96,7 +111,7 @@ class UpdateService:
         if cache.get('state') in ('NO_RELEASE','RATE_LIMITED','ERROR'):
             return CheckResult(cache['state'],cache.get('message',''),stamp,cached=cached)
         try:
-            item=candidate(cache['release'],cache['envelope'],self.keys,self.testing)
+            item=self.validate_candidate(cache['release'],cache['envelope'])
             state='UPDATE_AVAILABLE' if SemVer.parse(item.version)>SemVer.parse(VERSION) else 'UP_TO_DATE'
             return CheckResult(state,'Có phiên bản mới' if state=='UPDATE_AVAILABLE' else 'Đang dùng phiên bản hiện tại hoặc mới hơn',stamp,item,cached)
         except (KeyError,ValueError,TypeError): return CheckResult('ERROR','Metadata cập nhật không hợp lệ',stamp,cached=cached)
@@ -143,7 +158,8 @@ class UpdateService:
                     if asset['size']>128*1024: raise UpdateError('Manifest too large')
                     raw=b''.join(self._stream(client,asset['browser_download_url'],cancel,128*1024))
                     if len(raw)!=asset['size']: raise UpdateError('Manifest size mismatch')
-                    envelope=strict_json(raw);candidate(release,envelope,self.keys,self.testing)
+                    envelope=strict_json(raw);item=self.validate_candidate(release,envelope)
+                    self.check_extra_assets(client,release,item,raw,cancel)
                     cache={'state':'VALID','checked_at':now,'etag':response.headers.get('etag',''),'release':release,'envelope':envelope}
             self._save(cache);return self._result(cache)
         except Cancelled:
@@ -159,15 +175,18 @@ class UpdateService:
             self._lock.release()
 
     def verify_file(self,path,item):
+        from ..release_adapters import safe_path
+        path=safe_path(path,self.directory)
         if path.is_symlink() or not path.is_file() or path.stat().st_size!=item.size: raise UpdateError('Installer size mismatch')
         with path.open('rb') as f: digest=hashlib.file_digest(f,'sha256').hexdigest()
         if digest!=item.sha256: raise UpdateError('Installer checksum mismatch')
         p=item.payload
         if (p.get('installer_filename'),p.get('installer_size'),p.get('sha256'),p.get('release_tag'))!=(item.filename,item.size,item.sha256,item.tag):
             raise UpdateError('Download metadata changed')
-        if verify_signature(p,item.signature,self.keys)!='VERIFIED_ED25519': raise UpdateError(NOT_READY)
+        self.verify_trust(item)
 
     def download(self,item,progress=lambda p:None,cancel=None):
+        from ..release_adapters import safe_path
         if not self._download_lock.acquire(blocking=False): raise UpdateError('Download already running')
         cancel=cancel or threading.Event();part=None;client=self._client()
         try:
@@ -177,13 +196,13 @@ class UpdateService:
                 raise UpdateError('Download metadata changed')
             expected=f'TransComic-Setup-{item.version}-windows-x64.'+('testdata' if self.testing else 'exe')
             if item.filename!=expected or item.download_url!=asset_url(item.tag,item.filename): raise UpdateError('Invalid download identity')
-            if item.signature_status!='VERIFIED_ED25519' or verify_signature(item.payload,item.signature,self.keys)!='VERIFIED_ED25519': raise UpdateError(NOT_READY)
+            self.verify_trust(item)
             if not 0<item.size<=MAX_DOWNLOAD: raise UpdateError('Download too large')
-            self.directory.mkdir(parents=True,exist_ok=True)
-            target=self.directory/item.filename
+            safe_path(self.directory);self.directory.mkdir(parents=True,exist_ok=True)
+            target=safe_path(self.directory/item.filename,self.directory)
             if target.exists():
                 self.verify_file(target,item);return target
-            part=self.directory/(uuid.uuid4().hex+'.part')
+            part=safe_path(self.directory/(uuid.uuid4().hex+'.part'),self.directory)
             started=time.monotonic();count=0
             with part.open('xb') as file:
                 for chunk in self._stream(client,item.download_url,cancel,item.size):
@@ -195,9 +214,10 @@ class UpdateService:
             if cancel.is_set():raise Cancelled('Download cancelled')
             # Rename without replacing an already-existing installer on Windows.
             if target.exists(): raise UpdateError('Download destination already exists')
+            safe_path(target,self.directory);safe_path(part,self.directory)
             part.rename(target);return target
         except httpx.HTTPError as exc: raise UpdateError('Download network failure') from exc
         finally:
-            if part is not None: part.unlink(missing_ok=True)
+            if part is not None:safe_path(part,self.directory).unlink(missing_ok=True)
             if self.client is None: client.close()
             self._download_lock.release()

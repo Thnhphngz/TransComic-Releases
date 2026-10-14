@@ -16,18 +16,21 @@ from .version import APP_ID,VERSION
 
 
 class ProductionReleaseOperations:
-    def __init__(self,builder,iscc,publisher,key_directory,password_callback,authenticode,source,tool_versions):
+    def __init__(self,builder,iscc,publisher,key_directory,password_callback,authenticode,source,tool_versions,policy='signed-stable'):
         self.builder=builder;self.iscc=iscc;self.publisher=publisher;self.key_directory=key_directory
         self.password_callback=password_callback;self.authenticode=authenticode;self.source=source;self.tool_versions=tool_versions
+        if policy not in ('signed-stable','internal') or getattr(publisher,'policy',policy)!=policy:raise UpdateError('RELEASE_POLICY_MISMATCH')
+        self.policy=policy
 
     def perform(self,phase,record):
         if phase==ReleaseState.PRECHECK:self.source.require_clean()
         elif phase==ReleaseState.TESTED:self.builder.test()
         elif phase==ReleaseState.BUILT:
             executable=self.builder.build(record['version'],self.source)
-            if self.authenticode is None:raise UpdateError('AUTHENTICODE_NOT_CONFIGURED')
-            self.authenticode.sign(executable)
-            self.authenticode.sign(executable.parent/'TransComic-UpdateHelper.exe')
+            if self.policy=='signed-stable':
+                if self.authenticode is None:raise UpdateError('AUTHENTICODE_CERTIFICATE_NOT_READY')
+                self.authenticode.sign(executable)
+                self.authenticode.sign(executable.parent/'TransComic-UpdateHelper.exe')
             record['build_stage']=str(self.builder.stage);record['built_executable']=str(executable)
             record['version_overlay']=self.builder.build_provenance
         elif phase==ReleaseState.PACKAGED:
@@ -35,8 +38,9 @@ class ProductionReleaseOperations:
             self.installer=self.package.package(record['version'])
             record['packaged_installer']=str(self.installer)
         elif phase==ReleaseState.SIGNED:
-            if self.authenticode is None:raise UpdateError('AUTHENTICODE_NOT_CONFIGURED')
-            self.authenticode.sign(self.installer)  # hash AFTER Authenticode changes executable bytes
+            if self.policy=='signed-stable':
+                if self.authenticode is None:raise UpdateError('AUTHENTICODE_CERTIFICATE_NOT_READY')
+                self.authenticode.sign(self.installer)  # hash AFTER Authenticode changes executable bytes
             asset=Asset.inspect(version_outputs(record['version'])['installer'],self.installer,self.builder.output)
             internal=build_identity(self.source,record['version'],self.tool_versions,asset.sha256)
             internal.update(self.builder.build_provenance)
@@ -47,7 +51,10 @@ class ProductionReleaseOperations:
                      'installer_filename':asset.name,'installer_size':asset.size,'sha256':asset.sha256,'release_tag':'v'+record['version'],
                      'release_url':release_url('v'+record['version']),'minimum_updater_version':VERSION,'minimum_windows':'10',
                      'metadata_format':2,'signed_at':datetime.now(timezone.utc).isoformat().replace('+00:00','Z'),'provenance':public}
-            envelope=production_sign_encrypted(self.key_directory,self.password_callback(),payload)
+            if self.policy=='internal':
+                from .update.internal import manifest
+                envelope=manifest(record['version'],asset.name,asset.size,asset.sha256,payload['signed_at'],public)
+            else:envelope=production_sign_encrypted(self.key_directory,self.password_callback(),payload)
             directory=self.installer.parent;manifest=directory/MANIFEST_NAME
             with manifest.open('xb') as stream:stream.write(canonical(envelope))
             signed=Asset.inspect(MANIFEST_NAME,manifest,directory)
@@ -58,7 +65,9 @@ class ProductionReleaseOperations:
             record['public_provenance']=public
         elif phase==ReleaseState.DRAFT_CREATED:
             self.remote=self.publisher.read(record['version'])
-            if self.remote is None:self.remote=self.publisher.draft(record['version'],record['distribution_commit'],record['public_provenance'])
+            if self.remote is None:
+                if self.policy=='internal':self.publisher.prepare_internal_tag(record['version'],record['distribution_commit'])
+                self.remote=self.publisher.draft(record['version'],record['distribution_commit'],record['public_provenance'])
             elif self.remote.get('draft') is not True:raise UpdateError('EXISTING_RELEASE_REQUIRES_RECONCILIATION')
             else:
                 try:notes=json.loads(self.remote.get('body','{}'))
@@ -129,7 +138,9 @@ class ReleaseCoordinator:
     def _execute(self,operations,current=VERSION,choice='patch',build_id='mock-build',distribution_commit=None):
         with self.journal.exclusive():
             record=self.journal.load()
-            if record and record['state']!=ReleaseState.PUBLISHED and record.get('origin_id',record['build_id'])!=build_id:raise UpdateError('PENDING_SOURCE_IDENTITY_CHANGED')
+            policy=getattr(operations,'policy','signed-stable')
+            if record and record.get('distribution_policy',policy)!=policy:raise UpdateError('RELEASE_STATE_UNCERTAIN: policy changed during reservation')
+            if record and record['state']!=ReleaseState.PUBLISHED and record.get('origin_id',record['build_id'])!=build_id:raise UpdateError('RELEASE_STATE_UNCERTAIN: PENDING_SOURCE_IDENTITY_CHANGED')
             if record and record['state'] in (ReleaseState.UNKNOWN_REMOTE_OUTCOME,ReleaseState.PUBLISHED,ReleaseState.FAILED) and record['last_completed'] in (ReleaseState.REMOTE_VERIFIED,ReleaseState.PUBLISHED):
                 evidence=operations.reconcile(record)
                 confirmed=self.journal.reconcile(record,evidence)
@@ -138,6 +149,7 @@ class ReleaseCoordinator:
                 else:return confirmed
             if record:operations.restore(record)
             record=self.journal.reserve(current,choice,build_id)
+            record['distribution_policy']=policy
             if distribution_commit:record['distribution_commit']=distribution_commit
             try:
                 phases=[ReleaseState.PRECHECK,ReleaseState.TESTED,ReleaseState.BUILT,ReleaseState.PACKAGED,ReleaseState.SIGNED,

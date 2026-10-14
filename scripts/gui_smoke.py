@@ -5,7 +5,10 @@ import argparse
 import json
 import asyncio
 from pathlib import Path
-from tempfile import TemporaryDirectory
+try:
+    from scripts.test_runtime import TemporaryDirectory
+except ModuleNotFoundError:
+    from test_runtime import TemporaryDirectory
 
 from PySide6.QtCore import QTimer
 from PySide6.QtTest import QTest

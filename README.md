@@ -98,8 +98,10 @@ Chỉ khi bấm **Xuất tài liệu**, ứng dụng mới tạo file đầu ra.
 ## Kiểm thử
 
 ```powershell
-python -m pytest -q --basetemp .pytest_local
+python -m pytest -q
 ```
+
+Pytest tự dùng runtime ngoài workspace (`<ổ chứa project>:\TransComic-TestRuntime` trên Windows; fallback thư mục temp hệ thống). Có thể đặt `TRANSCOMIC_TEST_RUNTIME` tới một thư mục riêng ngoài project. Mỗi process có cache, `tmp_path` và TEMP/TMP riêng; không dùng lại `--basetemp .pytest_*`. Smoke harness dùng runtime/gui; logs/XML và ảnh nghiệm thu được giữ trong `artifacts`. Không thay đường dẫn SQLite/DPAPI production.
 
 Các test dùng HTTP mock, không gọi Kira API thật. Để chạy giao diện trực tiếp: `python run_transcomic.py`. Smoke Console Windows với file Word, DB tạm và HTTP mock: `python -m scripts.console_gui_smoke`; chạy chính entry point này và xuất ảnh Light/Dark vào `artifacts/gui/console`. Script `scripts/live_kira_three.py` dành riêng cho đợt đã duyệt; ledger đã khóa không cho chạy thêm request. Không xóa/reset ledger để thử lại.
 
@@ -122,3 +124,21 @@ Retry sẵn sàng chia pool với batch mới, chạy sớm và được đối 
 Tìm/thay hỗ trợ file hiện tại, toàn workspace hoặc checkbox chọn file, lọc cột và ngôn ngữ. Replace All nhiều file có preview loại file/dòng, kiểm tra revision nguyên tử và Undo. Sidebar, panel Tài liệu, splitter, cửa sổ, theme/font được khôi phục; mở lại workspace trống và giữ lịch sử.
 
 Xem [báo cáo 28 mục và bằng chứng](docs/retry-speed-workspace.md); [retry-management.md](docs/retry-management.md) là báo cáo đợt trước. Benchmark mock sau 429 giảm 6,48 → 2,40 giây; sáu lượt API thật không gặp 429 nên chưa xác minh phục hồi trên máy chủ thật. Không build EXE.
+
+## Internal Update và Xóa toàn bộ
+
+Trong Hàng đợi & lịch sử, **Xóa toàn bộ** xóa các lượt/batch/attempt và ẩn mục nhập khỏi danh sách; giữ tài liệu, bản dịch đã lưu, API key, settings và file nguồn/xuất. Có xác nhận số mục, mặc định Hủy; chặn khi worker/request còn hoạt động.
+
+Ứng dụng hiện dùng **Internal Update**: repository GitHub cố định, HTTPS, manifest/checksum, size và SHA-256; không cần Ed25519 key hoặc SignTool. Hash từ cùng Release kiểm tra tính nhất quán, không xác minh publisher như chữ ký số. Native helper đã triển khai, chỉ cài sau xác minh và Safe Exit; cập nhật thật trên laptop 2 còn chờ kiểm thử. Signed Stable được giữ riêng, không fallback unsigned.
+
+`release_transcomic.bat` hiện chạy preflight/dry-run Internal, đề xuất version carry 0–9; build, installer, GitHub writes cần quyền riêng và activation đã review. Xem [hướng dẫn và kết quả kiểm thử](docs/internal-update-and-queue-clear.md).
+
+## Build cục bộ đầu tiên — 0.1.0 devtest
+
+Kiểm tra cập nhật thủ công có bản Internal hợp lệ sẽ mở popup Liquid Glass với **Tải và cài đặt** / **Để sau**. Nút tải dùng downloader và native helper đã xác minh. Auto-check chỉ cập nhật trạng thái. Sidebar **Dịch file SRT** hiện là trang thông báo chức năng đang được cập nhật.
+
+Sau full regression đạt, build riêng bằng `python scripts/build_local.py --output artifacts/first-local-build/<thư-mục-mới>`. Script tạo snapshot allowlist rồi chạy PyInstaller và ISCC; không chạy installer, tăng version hoặc ghi GitHub. Đây là entry point BUILD_LOCAL devtest; `release_transcomic.bat` vẫn là entry point phát hành hoàn chỉnh. Xem [artifact và báo cáo kiểm thử](docs/first-local-build.md). Cài đặt/auto-update/phát hành cần quyền riêng.
+
+## Lần phát hành Internal 0.1.1 được cấp quyền
+
+`release_transcomic.bat --publish-first-internal-0.1.1` chỉ phục vụ lần phát hành `v0.1.1` đã được cấp quyền, trên repo phân phối cố định. Entry này dùng lại ReleaseCoordinator, ReleaseJournal và GitHubPublisher, yêu cầu source sạch, build input khớp, tests và compatibility proof đã review. Không cho đổi version/repo, push source, xóa hoặc ghi đè asset; kết quả remote không rõ phải reconcile. Lệnh BAT mặc định vẫn chỉ preflight; các adapter generic không được mở khóa. Hướng dẫn và hash baseline nằm ở [two-laptop-update-test.md](docs/two-laptop-update-test.md).

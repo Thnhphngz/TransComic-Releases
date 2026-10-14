@@ -1,7 +1,10 @@
 """Native Windows entry point, user historical DOCX, local validation only."""
 import json,os,runpy,traceback
 from pathlib import Path
-from tempfile import TemporaryDirectory
+try:
+    from scripts.test_runtime import TemporaryDirectory
+except ModuleNotFoundError:
+    from test_runtime import TemporaryDirectory
 from PySide6.QtCore import QTimer,Qt
 from PySide6.QtWidgets import QApplication,QDialog,QMessageBox,QListWidget,QPushButton
 from PySide6.QtTest import QTest

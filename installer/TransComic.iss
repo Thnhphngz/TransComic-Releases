@@ -1,5 +1,7 @@
 #define MyAppName "TransComic"
-#error Stage A locked: no installer build permitted until reviewed Stage B
+#ifndef BUILD_LOCAL
+  #error Stage A locked: only authorized BUILD_LOCAL compilation is enabled
+#endif
 ; Stage B generates this include from transcomic/version.py.
 #include "generated-version.iss"
 #define MyAppExeName "TransComic.exe"
@@ -21,6 +23,7 @@ MinVersion=10.0
 RestartIfNeededByRun=no
 CloseApplications=no
 RestartApplications=no
+AppMutex=TransComic.Desktop.Running
 UsePreviousAppDir=yes
 SetupIconFile=TransComic.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}

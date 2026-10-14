@@ -47,3 +47,7 @@ private-signing/
 venv/
 *.part
 *.tmp
+# Portable encrypted signing recovery files and test private material
+*.tc-keybackup
+*.testkey
+/.release-state/

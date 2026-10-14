@@ -6,7 +6,10 @@ import os
 import runpy
 import time
 from pathlib import Path
-from tempfile import TemporaryDirectory
+try:
+    from scripts.test_runtime import TemporaryDirectory
+except ModuleNotFoundError:
+    from test_runtime import TemporaryDirectory
 import httpx
 from PySide6.QtCore import QTimer,Qt
 from PySide6.QtWidgets import QApplication

@@ -1,3 +1,7 @@
+try:
+    from scripts.test_runtime import TemporaryDirectory
+except ModuleNotFoundError:
+    from test_runtime import TemporaryDirectory
 """Native Qt, same-process window/search stress and OS-exit child probe. HTTP mock only."""
 import asyncio
 import json
@@ -136,6 +140,6 @@ if __name__=='__main__':
             print(json.dumps({'safe_exit_completed':True,'process_exit_verified_by_parent':True,
                 'elapsed':time.monotonic()-info['start'],'requests':1,'unknown_preserved':True}),flush=True)
     else:
-        with tempfile.TemporaryDirectory() as directory:
+        with TemporaryDirectory() as directory:
             os.environ['LOCALAPPDATA']=directory;os.environ['QT_QPA_PLATFORM']='windows'
             application.MainWindow=Smoke;runpy.run_path(str(ROOT/'run_transcomic.py'),run_name='__main__')

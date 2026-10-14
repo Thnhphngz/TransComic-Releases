@@ -5,7 +5,10 @@ import os
 import runpy
 import time
 from pathlib import Path
-from tempfile import TemporaryDirectory
+try:
+    from scripts.test_runtime import TemporaryDirectory
+except ModuleNotFoundError:
+    from test_runtime import TemporaryDirectory
 import httpx
 from docx import Document
 from PySide6.QtCore import QTimer, QMimeData, QUrl, Qt, QPoint

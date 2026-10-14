@@ -3,7 +3,10 @@ import json
 import os
 from pathlib import Path
 import runpy
-from tempfile import TemporaryDirectory
+try:
+    from scripts.test_runtime import TemporaryDirectory
+except ModuleNotFoundError:
+    from test_runtime import TemporaryDirectory
 
 import httpx
 from PySide6.QtCore import QTimer, Qt

@@ -6,7 +6,8 @@ import os
 from pathlib import Path
 from uuid import uuid4
 from .release import version_outputs
-from .update.metadata import UpdateError, bumped, strict_json
+from .release_version import bumped
+from .update.metadata import UpdateError, strict_json
 
 
 class ReleaseState(StrEnum):
@@ -79,12 +80,13 @@ class ReleaseJournal:
     def reconcile(self,record,remote):
         # A successful CLI return alone is not evidence. Independent remote verification supplies these fields.
         if not remote or remote.get('tag')!='v'+record['version'] or remote.get('build_id')!=record['build_id'] or remote.get('assets_verified') is not True:
-            raise UpdateError('REMOTE_OUTCOME_UNRESOLVED')
+            raise UpdateError('RELEASE_STATE_UNCERTAIN')
+        if (remote.get('published') is True)==(remote.get('draft') is True):raise UpdateError('RELEASE_STATE_UNCERTAIN')
         if remote.get('published') is True:
             record=dict(record,state=ReleaseState.PUBLISHED,last_completed=ReleaseState.PUBLISHED)
         elif remote.get('draft') is True:
             record=dict(record,state=ReleaseState.DRAFT_CREATED,last_completed=ReleaseState.DRAFT_CREATED)
-        else:raise UpdateError('REMOTE_OUTCOME_UNRESOLVED')
+        else:raise UpdateError('RELEASE_STATE_UNCERTAIN')
         self.save(record);return record
 
     def next_release(self,record,remote,build_id,choice='patch'):

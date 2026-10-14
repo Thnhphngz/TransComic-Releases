@@ -1,6 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
-raise RuntimeError('STAGE_A_LOCKED: PyInstaller build is not authorized')
 from pathlib import Path
+import json
+marker=Path(SPECPATH)/'.build-local.json'
+if not marker.is_file() or json.loads(marker.read_text(encoding='utf8')).get('permission')!='BUILD_LOCAL':
+    raise RuntimeError('STAGE_A_LOCKED: use the isolated reviewed BUILD_LOCAL entry point')
 from transcomic.version import VERSION
 from scripts.release_config import exe_version_resource
 from PySide6 import __file__ as qt_module
@@ -51,7 +54,7 @@ exe = EXE(
     entitlements_file=None,
 )
 
-# External helper ships beside the app; this same spec remains locked at its first line.
+# External helper ships beside the app; helper runtime remains install-locked.
 helper_analysis = Analysis(
     [str(root/'scripts/update_helper.py')],
     pathex=[str(root)], binaries=[], hiddenimports=[], hookspath=[],

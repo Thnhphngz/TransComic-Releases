@@ -544,8 +544,36 @@ class Store:
             from .status import usable
             rows = self.lines(doc["id"])
             for latest in jobs or [None]:
+                if latest is None and self.setting('queue_hidden_'+doc['id'])=='1':continue
                 result.append({**doc, "entry_id": latest["id"] if latest else "import:"+doc["id"], "job_id": latest["id"] if latest else None, "model": latest["model"] if latest else "—", "state": latest["state"] if latest else "imported", "source_lang": latest["source_lang"] if latest else doc["source_lang"], "target_lang": latest["target_lang"] if latest else doc["target_lang"], "done": sum(usable(r) for r in rows), "total": sum(translatable(r["source"]) for r in rows), "created_at": latest["created_at"] if latest else doc["created_at"]})
         return result
+
+    def clear_queue_history(self,expected_entries,safe=lambda:False):
+        """Delete the confirmed queue graph; documents/manuscripts/credentials survive."""
+        if not self.lock.acquire(blocking=False):raise ValueError('SQLite đang ghi; hãy thử lại sau.')
+        try:
+            if self.db.in_transaction or not safe():raise ValueError('Hãy dừng quá trình dịch và chờ các tác vụ hiện tại kết thúc trước khi xóa toàn bộ.')
+            actual={item['entry_id'] for item in self.history()}
+            if actual!=set(expected_entries):raise ValueError('Danh sách đã thay đổi; hãy xác nhận lại.')
+            if not actual:return 0
+            with self.transaction():
+                if not safe():raise ValueError('Tác vụ đang chạy; không thể xóa.')
+                if self.db.execute("SELECT 1 FROM jobs WHERE state IN ('running','pausing','stopping') LIMIT 1").fetchone() or self.db.execute("SELECT 1 FROM batches WHERE state='inflight' LIMIT 1").fetchone():raise ValueError('Request chưa kết thúc; không thể xóa.')
+                if self.db.execute("SELECT 1 FROM request_attempts WHERE state!='finished' LIMIT 1").fetchone():raise ValueError('Attempt chưa kết thúc; không thể xóa.')
+                jobs={item['job_id'] for item in self.history() if item['job_id']}
+                docs={item['id'] for item in self.history()}
+                runs={self.job(job_id)['run_id'] for job_id in jobs if self.job(job_id)['run_id']}
+                for job_id in jobs:
+                    self.db.execute('DELETE FROM api_text_versions WHERE attempt_id IN (SELECT a.id FROM request_attempts a JOIN batches b ON b.id=a.original_batch_id WHERE b.job_id=?)',(job_id,))
+                    self.db.execute('DELETE FROM request_attempts WHERE original_batch_id IN (SELECT id FROM batches WHERE job_id=?)',(job_id,))
+                    self.db.execute('DELETE FROM batches WHERE job_id=?',(job_id,))
+                    self.db.execute('DELETE FROM jobs WHERE id=?',(job_id,))
+                for run_id in runs:
+                    self.db.execute('DELETE FROM translation_runs WHERE id=? AND NOT EXISTS (SELECT 1 FROM jobs WHERE run_id=?)',(run_id,run_id))
+                for doc_id in docs:self.db.execute('INSERT OR REPLACE INTO settings(key,value) VALUES (?,?)',('queue_hidden_'+doc_id,'1'))
+                if self.db.execute('PRAGMA foreign_key_check').fetchone():raise ValueError('Foreign key integrity check failed')
+            return len(actual)
+        finally:self.lock.release()
 
     def delete_history(self, entry_ids):
         wanted = set(entry_ids)

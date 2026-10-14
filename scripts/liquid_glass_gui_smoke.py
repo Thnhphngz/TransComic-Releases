@@ -8,7 +8,10 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from tempfile import TemporaryDirectory
+try:
+    from scripts.test_runtime import TemporaryDirectory
+except ModuleNotFoundError:
+    from test_runtime import TemporaryDirectory
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import httpx
 

@@ -3,7 +3,10 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from tempfile import TemporaryDirectory
+try:
+    from scripts.test_runtime import TemporaryDirectory
+except ModuleNotFoundError:
+    from test_runtime import TemporaryDirectory
 import httpx
 from transcomic.storage import Store
 from transcomic.documents import decode_txt

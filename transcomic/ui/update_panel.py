@@ -1,10 +1,11 @@
 """Settings card using existing V3 widgets; HTTPS work stays outside Qt thread."""
 from __future__ import annotations
 import threading
+import sys
 from datetime import datetime
 from PySide6.QtCore import QObject, Signal, QTimer, QUrl, Qt
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QPlainTextEdit, QProgressBar
+from PySide6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QPlainTextEdit, QProgressBar,QApplication,QDialog
 from .glass import GlassButton, PrimaryGlassButton
 from ..version import VERSION, RELEASE_REPOSITORY
 from ..update.service import UpdateService, Cancelled
@@ -19,21 +20,29 @@ class UpdateSignals(QObject):
 class UpdatePanel(QFrame):
     def __init__(self,window,service=None):
         super().__init__(window);self.window=window;self.setObjectName('card')
-        self.service=service or UpdateService();self.machine=InstallMachine()
+        from ..update.internal import InternalUpdateService
+        self.service=service or InternalUpdateService();self.machine=InstallMachine()
         self.item=None;self.busy=False;self.cancel_event=threading.Event();self.worker=None
         self.downloaded_path=None;self.shutdown_event=threading.Event()
+        self.manual_check_pending=False;self.update_dialog=None
+        self.handoff_pending=False;self.handoff_session=None;self._update_timers=[]
         self.signals=UpdateSignals(self);self.signals.result.connect(self.receive,Qt.QueuedConnection)
         self.signals.progress.connect(self.show_progress,Qt.QueuedConnection)
         layout=QVBoxLayout(self);layout.setContentsMargins(20,18,20,18)
         title=QLabel('CẬP NHẬT ỨNG DỤNG');title.setObjectName('section');layout.addWidget(title)
-        self.current=QLabel(f'Hiện tại: {VERSION} · Kênh Stable');layout.addWidget(self.current)
+        self.current=QLabel(f'Hiện tại: {VERSION} · Internal');layout.addWidget(self.current)
         source=QLabel('Nguồn: '+RELEASE_REPOSITORY);source.setObjectName('muted');layout.addWidget(source)
         self.auto=QCheckBox('Tự kiểm tra — tối đa một lần mỗi 24 giờ')
         self.auto.setChecked(window.store.setting('update_auto_check','1')=='1')
         self.auto.toggled.connect(self.set_auto);layout.addWidget(self.auto)
         self.status=QLabel('Chưa kiểm tra');self.status.setWordWrap(True);layout.addWidget(self.status)
+        try:
+            from ..update.windows_helper import update_receipt_message
+            receipt_message=update_receipt_message(self.service.directory) if getattr(sys,'frozen',False) and not self.service.testing else ''
+            if receipt_message:self.status.setText(receipt_message)
+        except (OSError,ValueError):pass
         self.last=QLabel('Lần kiểm tra gần nhất: chưa có');layout.addWidget(self.last)
-        self.safety=QLabel('Chế độ phát triển — Chưa hỗ trợ cài đặt thực tế\n'+NOT_READY)
+        self.safety=QLabel('Internal · HTTPS + SHA-256 · Chỉ cài sau khi thoát an toàn')
         self.safety.setWordWrap(True);layout.addWidget(self.safety)
         self.changelog=QPlainTextEdit();self.changelog.setReadOnly(True);self.changelog.setMaximumHeight(85)
         self.changelog.setPlaceholderText('Ghi chú phát hành sẽ xuất hiện tại đây');layout.addWidget(self.changelog)
@@ -79,12 +88,16 @@ class UpdatePanel(QFrame):
         self.worker=threading.Thread(target=run,daemon=True,name='TransComicUpdate');self.worker.start()
 
     def check_now(self,manual=True):
-        if self.busy:return
+        if self.busy or self.update_dialog is not None:return
+        self.manual_check_pending=manual
         self.machine.state=State.CHECKING
         self.status.setText('Đang kiểm tra…');self.start_work(lambda cancel:self.service.check(manual,cancel))
 
     def download_now(self):
-        if not self.item or self.item.signature_status!='VERIFIED_ED25519' or self.busy:return
+        if self.window._closed or self.window._exit_pending:return
+        if not self.item or self.item.signature_status not in ('VERIFIED_ED25519','VERIFIED_INTERNAL_HTTPS_SHA256') or self.busy:return
+        if self.downloaded_path is not None and not self.service.testing:
+            self.begin_native_install();return
         item=self.item;self.status.setText('Đang tải…')
         self.machine.state=State.DOWNLOADING
         def run(cancel):
@@ -93,14 +106,35 @@ class UpdatePanel(QFrame):
         self.start_work(run)
 
     def receive(self,result):
-        if self.window._closed:return
+        if self.window._closed:
+            if isinstance(result,dict) and result.get('kind')=='handoff_ready':result['session'].abort()
+            return
+        manual=self.manual_check_pending;self.manual_check_pending=False
         self.busy=False;self.check.setEnabled(True);self.cancel.setEnabled(False)
         if isinstance(result,dict):
+            if result['kind']=='handoff_ready':
+                self.handoff_pending=False;self.window._exit_pending=False
+                self.handoff_session=result['session']
+                if not native_install_idle(self.window) or self.cancel_event.is_set():
+                    self.abort_handoff();return
+                self.window._update_exit_requested=True
+                self.window.close()
+                return
+            if self.handoff_pending:
+                self.abort_handoff()
             if result['kind']=='downloaded':
                 from pathlib import Path
                 self.downloaded_path=Path(result['path'])
                 self.machine.state=State.READY_TO_INSTALL
-                self.status.setText('Đã tải và xác minh — Stage A không chạy bộ cài')
+                if self.cancel_event.is_set():
+                    self.machine.state=State.CANCELLED
+                    self.status.setText('File đã tải nhưng cài đặt đã hủy · không chạy bộ cài.')
+                    self.download.setEnabled(True)
+                elif self.service.testing:
+                    self.status.setText('Đã tải và xác minh — mô phỏng, không chạy bộ cài')
+                else:
+                    self.status.setText('Đã tải và xác minh · đang kiểm tra bàn giao an toàn…')
+                    self.begin_native_install()
             elif result['kind']=='cancelled':
                 self.machine.state=State.CANCELLED
                 self.status.setText('Đã hủy tải; dữ liệu người dùng được giữ nguyên')
@@ -109,23 +143,79 @@ class UpdatePanel(QFrame):
                 self.status.setText('Tải không thành công hoặc xác minh không đạt')
         else:
             self.machine.state=State(result.state) if result.state in State._value2member_map_ else State.IDLE
+            if self.item!=result.candidate:self.downloaded_path=None
             self.item=result.candidate;self.status.setText(result.message)
+            if result.cached:self.status.setText(result.message+' · Kết quả từ cache')
             self.last.setText('Lần kiểm tra gần nhất: '+datetime.fromtimestamp(result.checked_at).strftime('%d/%m/%Y %H:%M'))
             self.notes.setEnabled(bool(self.item));self.download.setEnabled(False)
             if self.item:
-                self.current.setText(f'Hiện tại: {VERSION} · Mới nhất: {self.item.version} · Stable')
+                self.current.setText(f'Hiện tại: {VERSION} · Mới nhất: {self.item.version} · '+('Internal' if self.item.signature_status=='VERIFIED_INTERNAL_HTTPS_SHA256' else 'Signed Stable'))
                 self.changelog.setPlainText(self.item.changelog)
                 self.bytes.setText(f'Dung lượng: {self.item.size:,} byte · Không tự tải')
-                self.safety.setText(self.item.signature_status+'\nChế độ phát triển — Chưa hỗ trợ cài đặt thực tế')
-                self.download.setEnabled(result.state=='UPDATE_AVAILABLE' and self.item.signature_status=='VERIFIED_ED25519')
+                self.safety.setText(self.item.signature_status+'\nChỉ cập nhật bản đã cài; yêu cầu đóng và lưu dữ liệu an toàn')
+                self.download.setEnabled(result.state=='UPDATE_AVAILABLE' and self.item.signature_status in ('VERIFIED_ED25519','VERIFIED_INTERNAL_HTTPS_SHA256'))
                 if result.state=='UPDATE_AVAILABLE' and not result.cached:
                     self.window.statusBar().showMessage('Có phiên bản TransComic mới · xem Cài đặt',8000)
             else:self.changelog.clear()
+            if manual and result.state=='UPDATE_AVAILABLE' and self.item and self.item.signature_status=='VERIFIED_INTERNAL_HTTPS_SHA256':
+                self.offer_update(result.cached)
+
+    def offer_update(self,cached=False):
+        if self.update_dialog is not None or self.window._closed or self.window._exit_pending or QApplication.activeModalWidget() is not None:return
+        from .update_dialog import UpdateDialog
+        item=self.item;dialog=UpdateDialog(self.window,item,cached);self.update_dialog=dialog
+        def finished(choice):
+            self.update_dialog=None
+            if choice==QDialog.Accepted and not self.window._closed and not self.window._exit_pending and self.item is item:
+                self.window.pages.setCurrentIndex(3);self.download_now()
+        dialog.finished.connect(finished)
+        dialog.open()
 
     def show_progress(self,p):
         if self.window._closed:return
         self.progress.setValue(int(100*p.downloaded/max(1,p.total)))
         self.bytes.setText(f'{p.downloaded:,} / {p.total:,} byte · {p.bytes_per_second/1024:.1f} KB/s')
+
+    def begin_native_install(self):
+        if self.window._closed or self.window._exit_pending or self.service.testing or self.handoff_pending or self.handoff_session is not None:return
+        if not getattr(sys,'frozen',False):
+            self.status.setText('Đã tải và xác minh · tự cập nhật chỉ dùng trong bản đã cài bằng bộ cài.')
+            return
+        if not native_install_idle(self.window):
+            self.status.setText('Hãy dừng công việc, chờ request hoàn tất và kết thúc sửa ô trước khi cài cập nhật.')
+            self.download.setEnabled(True);return
+        from ..update.windows_helper import HelperHandoff,prepare_install_plan,current_process_identity,registered_installation
+        from ..update.install import SafetySnapshot
+        service,item,path=self.service,self.item,self.downloaded_path
+        if item is None or path is None or item.signature_status!='VERIFIED_INTERNAL_HTTPS_SHA256':return
+        self.handoff_pending=True;self.window.setEnabled(False)
+        self._update_timers=[]
+        for name in ('local_timer','queue_timer','refresh_timer','layout_save_timer'):
+            timer=getattr(self.window,name,None)
+            if timer and timer.isActive():self._update_timers.append(timer);timer.stop()
+        def prepare(cancel):
+            installation=registered_installation()
+            service.confirm_install(item,cancel)
+            # This plan is an intent only; the helper cannot execute until a
+            # separate COMMIT sent after Store/log close and process exit.
+            raw,plan=prepare_install_plan(service,item,path,installation,current_process_identity(),
+                SafetySnapshot(app_closed=True,safe_exit_verified=True))
+            session=HelperHandoff(service.directory,installation,None,policy='internal').launch(raw,cancel)
+            if cancel.is_set():session.abort();raise Cancelled('Handoff cancelled')
+            return {'kind':'handoff_ready','session':session}
+        self.start_work(prepare)
+        self.window._exit_pending=True
+
+    def abort_handoff(self):
+        self.cancel_event.set()
+        if self.handoff_session is not None:self.handoff_session.abort();self.handoff_session=None
+        self.handoff_pending=False;self.window._exit_pending=False;self.window._update_exit_requested=False
+        if not self.window._closed:
+            self.window.setEnabled(True)
+            for timer in self._update_timers:timer.start()
+            self._update_timers=[]
+            self.status.setText('Chưa cài cập nhật · bàn giao chưa an toàn hoặc đã hủy; dữ liệu được giữ nguyên.')
+            self.download.setEnabled(bool(self.item and self.downloaded_path))
 
     def emit_progress(self,p):
         if not self.shutdown_event.is_set():
@@ -148,11 +238,12 @@ class UpdatePanel(QFrame):
         from ..update.windows_helper import ProductionUpdateHelper,InstallPlan,FakeWindowsRuntime
         if not self.service.testing or type(runtime) is not FakeWindowsRuntime or not self.item or not self.downloaded_path:
             raise ValueError('Verified mock update and concrete mock runtime required')
-        release=self.service._cache()['release'];item=self.item
+        item=self.item
         installation=__import__('pathlib').Path(process.image).parent
-        helper=ProductionUpdateHelper(self.service.directory,installation,runtime,self.service.keys)
-        plan=InstallPlan(item.version,self.downloaded_path,item.size,item.sha256,release,
-                         {'payload':item.payload,'signature':item.signature},process)
+        internal=item.signature_status=='VERIFIED_INTERNAL_HTTPS_SHA256'
+        from ..update.windows_helper import prepare_install_plan
+        raw,plan=prepare_install_plan(self.service,item,self.downloaded_path,installation,process,snapshot,handoff)
+        helper=ProductionUpdateHelper(self.service.directory,installation,runtime,self.service.keys,policy='internal' if internal else 'signed-stable')
         result=helper.run(plan,snapshot,self.cancel_event,handoff=handoff)
         self.status.setText('Mô phỏng helper Windows thành công; chưa cài thực tế')
         return result
@@ -163,3 +254,17 @@ class UpdatePanel(QFrame):
         self.cancel_event.set();self.status.setText('Để sau — không tải hoặc cài tự động')
     def shutdown(self):
         self.shutdown_event.set();self.auto_timer.stop();self.cancel_event.set()
+        if self.update_dialog is not None:self.update_dialog.reject()
+
+
+def native_install_idle(window):
+    """No scheduling, cancellation or request fencing is permitted for install."""
+    from ..update.install import window_safety
+    if window._closed:return False
+    snapshot=window_safety(window)
+    scheduler=window.scheduler
+    return not (any(getattr(snapshot,n) for n in ('translating','paused','inflight','transaction','editing')) or
+        getattr(scheduler,'active_http',0) or getattr(window,'import_busy',False) or
+        getattr(window,'export_busy',False) or getattr(window,'queue_clear_busy',False) or
+        getattr(window,'_exit_cancelled',False) or hasattr(window,'_exit_fence_thread') or
+        any(t.is_alive() for t in getattr(window,'background_threads',[])))

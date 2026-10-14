@@ -7,7 +7,10 @@ import sys
 import threading
 import time
 import traceback
-from tempfile import TemporaryDirectory
+try:
+    from scripts.test_runtime import TemporaryDirectory
+except ModuleNotFoundError:
+    from test_runtime import TemporaryDirectory
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT));sys.path.insert(0,str(ROOT/'tests'))
 import httpx
@@ -22,7 +25,7 @@ from transcomic.update.metadata import UpdateError
 from test_updater_stage_a import fixture_release
 import transcomic.app as application
 
-OUT=ROOT/'artifacts/release-stage-b2-1/windows'/os.environ.get('QT_SCALE_FACTOR','1')
+OUT=ROOT/'artifacts'/os.environ.get('TRANSCOMIC_SMOKE_EVIDENCE','release-stage-b2-1')/'windows'/os.environ.get('QT_SCALE_FACTOR','1')
 OUT.mkdir(parents=True,exist_ok=True)
 send=httpx.Client.send
 def guard(self,*args,**kwargs):

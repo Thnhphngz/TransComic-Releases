@@ -199,6 +199,7 @@ def test_bat_from_other_directory_with_space_and_no_activation(tmp_path):
     work=tmp_path/'directory with spaces';work.mkdir()
     result=subprocess.run(['cmd','/c',str(root/'release_transcomic.bat')],cwd=work,capture_output=True,timeout=90)
     assert result.returncode==0 and b'DRY RUN' in result.stdout
+    assert result.stderr==b'', 'BAT must execute without cmd parsing errors'
     assert (root/'transcomic/version.py').read_bytes()==before
     assert json.loads((root/'artifacts/release-stage-b2-1/preflight.json').read_text(encoding='utf-8'))['production_locked']
     result=subprocess.run([__import__('sys').executable,str(root/'scripts/release_transcomic.py'),'--publish'],cwd=work,capture_output=True)

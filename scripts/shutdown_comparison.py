@@ -1,7 +1,10 @@
 """Offline Qt comparison of the original exit polling rule and bounded cancellation."""
 import asyncio,json,os,sys,time
 from pathlib import Path
-from tempfile import TemporaryDirectory
+try:
+    from scripts.test_runtime import TemporaryDirectory
+except ModuleNotFoundError:
+    from test_runtime import TemporaryDirectory
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QTimer

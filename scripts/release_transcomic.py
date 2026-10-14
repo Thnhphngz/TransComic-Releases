@@ -11,7 +11,9 @@ import sys
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from transcomic.version import VERSION, RELEASE_REPOSITORY, APP_ID
-from transcomic.update.metadata import bumped, SemVer, UpdateError, MANIFEST_NAME
+from transcomic.release_version import bumped, validate_release_version, preview_version
+from transcomic.release_journal import ReleaseJournal
+from transcomic.update.metadata import SemVer, UpdateError, MANIFEST_NAME
 from scripts.release_config import discover, static_configuration
 
 PHASES=('preflight','test','build','package','verify','draft release','upload assets','verify remote assets','publish','final report')
@@ -25,6 +27,7 @@ class ReadOnlyCommands:
         allowed=[['gh','auth','status'],['gh','repo','view',RELEASE_REPOSITORY,'--json','nameWithOwner,visibility,url'],
                  ['git','-C',str(ROOT),'status','--porcelain'],['git','-C',str(ROOT),'rev-parse','HEAD'],
                  ['gh','release','list','--repo',RELEASE_REPOSITORY,'--json','tagName','--limit','1000'],
+                 ['gh','api','--include','repos/'+RELEASE_REPOSITORY+'/releases/latest'],
                  ['git','-C',str(ROOT),'remote','get-url','origin']]
         if args not in allowed: production_action()
         try:
@@ -48,6 +51,7 @@ def scan_sensitive(root=ROOT):
     return risk
 
 def verify_release_plan(current,new,tags,tests_ok,assets,commit):
+    validate_release_version(new)
     if SemVer.parse(new)<=SemVer.parse(current): raise UpdateError('Duplicate/downgrade version')
     if 'v'+new in tags: raise UpdateError('Release version already exists')
     if any(SemVer.parse(t,tag=True)>=SemVer.parse(new) for t in tags): raise UpdateError('Version is not newer than remote')
@@ -57,7 +61,7 @@ def verify_release_plan(current,new,tags,tests_ok,assets,commit):
     if not re.fullmatch('[0-9a-f]{40}',commit or ''): raise UpdateError('Exact build commit required')
     return {'tag':'v'+new,'commit':commit,'repository':RELEASE_REPOSITORY,'production_locked':True}
 
-def preflight(choice='patch',commands=None,which=shutil.which,find_spec=importlib.util.find_spec):
+def preflight(choice='patch',commands=None,which=shutil.which,find_spec=importlib.util.find_spec,journal_path=None):
     commands=commands or ReadOnlyCommands()
     tools={k:bool(which(k)) for k in ('python','git','gh','ISCC')}
     tools['PyInstaller']=find_spec('PyInstaller') is not None
@@ -78,7 +82,28 @@ def preflight(choice='patch',commands=None,which=shutil.which,find_spec=importli
         ok,raw=commands(['gh','release','list','--repo',RELEASE_REPOSITORY,'--json','tagName','--limit','1000'])
         try: tags=[r['tagName'] for r in json.loads(raw)];remote_known=ok and len(tags)<1000
         except (ValueError,KeyError,TypeError): pass
+    latest_status='UNVERIFIED'
+    if repo_ok:
+        ok,raw=commands(['gh','api','--include','repos/'+RELEASE_REPOSITORY+'/releases/latest'])
+        # 404 is absence only when an independently successful, complete list is empty.
+        if ok and raw.startswith('HTTP/') and ' 200 ' in raw.splitlines()[0]:latest_status='PRESENT_RECONCILIATION_REQUIRED'
+        elif remote_known and not tags and raw.startswith('HTTP/') and ' 404 ' in raw.splitlines()[0]:latest_status='NO_PUBLISHED_RELEASE'
     risk=scan_sensitive();gates=[]
+    if latest_status!='NO_PUBLISHED_RELEASE':gates.append('RELEASE_STATE_UNCERTAIN')
+    reservation=None
+    try:
+        path=Path(journal_path) if journal_path is not None else ROOT/'.release-state'/'journal.json'
+        from transcomic.release_adapters import safe_path
+        reservation=ReleaseJournal(safe_path(path)).load()  # read only; no exclusive()/reserve()
+        if reservation:
+            version=reservation['version']
+            preview_version(VERSION,choice,reservation,remote_known=remote_known)
+            # CLI tag/list evidence cannot verify signed assets or manual remote edits.
+            if 'v'+version in tags:gates.append('RELEASE_STATE_UNCERTAIN')
+        elif tags:
+            gates.append('RELEASE_STATE_UNCERTAIN')  # latest remote requires independent reconciliation
+        elif not remote_known:gates.append('RELEASE_STATE_UNCERTAIN')
+    except (UpdateError,OSError,KeyError,TypeError):gates.append('RELEASE_STATE_UNCERTAIN')
     required_files=['run_transcomic.py','pyproject.toml','TransComic.spec','installer/TransComic.iss','transcomic/version.py','docs/release-workflow.md','docs/updater-stage-a.md']
     project_files={name:(ROOT/name).is_file() for name in required_files}
     if not all(project_files.values()):gates.append('PROJECT_FILES_MISSING')
@@ -100,6 +125,10 @@ def preflight(choice='patch',commands=None,which=shutil.which,find_spec=importli
     gates+=['SOURCE_REPOSITORY_IDENTITY_REQUIRES_REVIEW','WHEEL_HASH_LOCK_REQUIRES_B2_VERIFICATION','TESTS_NOT_RUN_IN_PREFLIGHT','PRODUCTION_SIGNATURE_NOT_CONFIGURED','STAGE_A_LOCKED']
     return {'stage':'B1','dry_run':True,'production_locked':True,'repository':RELEASE_REPOSITORY,
         'current_version':VERSION,'proposed_version':version,'version_modified':False,'python':sys.version.split()[0],
+        'version_policy':'TransComic MINOR/PATCH 0..9 carry; generic SemVer unchanged',
+        'journal_reserved_version':reservation.get('version') if reservation else None,
+        'journal_mutated':False,'remote_tags':tags,
+        'latest_release_status':latest_status,
         'virtual_environment':sys.prefix!=sys.base_prefix,'tools':tools,'tool_inventory':inventory,'static_configuration':configuration,'source_origin_present':bool(origin_ok and origin.strip()),'gh_authenticated':auth,'repository_verified':repo_ok,
         'source_git_repository':git_ok,'source_dirty':bool(dirty.strip()),'build_commit':commit.strip() if commit_ok else None,
         'remote_versions_checked':remote_known,'sensitive_file_risks':risk,'packaging_policy':'explicit program/SVG allowlist; no user data, tests, logs, artifacts or credentials',
@@ -113,20 +142,48 @@ def main(argv=None):
     if hasattr(sys.stdout,'reconfigure'):sys.stdout.reconfigure(encoding='utf-8',errors='replace')
     parser=argparse.ArgumentParser(description='STAGE B1 — PREFLIGHT ONLY')
     parser.add_argument('--bump',default='patch',help='patch/minor/major or explicit higher stable version (simulation only)')
+    parser.add_argument('--maintenance',choices=('dry-run','cache'),help='After preflight: review cache, or apply verified cache cleanup only')
+    parser.add_argument('--policy',choices=('internal','signed-stable'),default='internal')
+    parser.add_argument('--output',type=Path,help='Read-only preflight report directory within workspace')
+    parser.add_argument('--publish-first-internal-0.1.1',dest='publish_first',action='store_true',
+                        help='Only the explicitly authorized first v0.1.1 Internal release; requires clean source and gates')
     args=parser.parse_args(argv)
+    if args.publish_first:
+        if args.bump!='patch' or args.maintenance or args.policy!='internal' or args.output:
+            parser.error('First release does not accept version, maintenance, policy or output overrides')
+        from scripts.first_internal_release import main as first_release
+        return first_release()
     print('STAGE B1 — PREFLIGHT ONLY\nKhông build hoặc phát hành trong giai đoạn này\nDRY RUN')
     try: report=preflight(args.bump)
     except (UpdateError,OSError): print('Preflight failed safely; no production action executed');return 2
     from scripts.release_environment import environment_report
     report['stage']='B2.1'
     report['environment']=environment_report(ROOT)
-    report['blocked_by']+=['PRODUCTION_SIGNING_NOT_READY','AUTHENTICODE_NOT_CONFIGURED']
+    report['distribution_policy']=args.policy
+    if args.policy=='signed-stable':
+        report['blocked_by']+=['PRODUCTION_SIGNING_NOT_READY','AUTHENTICODE_CERTIFICATE_NOT_READY','PRODUCTION_KEY_RECOVERY_NOT_READY']
+    else:
+        report['blocked_by']=[g for g in report['blocked_by'] if g!='PRODUCTION_SIGNATURE_NOT_CONFIGURED']
+        report['environment']['tools']['SignTool']['blocks_b2_2']=False
+        report['environment']['tools']['SignTool']['required_action']='Optional for future Signed Stable; not required for Internal'
+        report['manifest_template'].update(distribution_policy='internal',channel='internal',metadata_format=2)
+        report['manifest_template'].pop('signature',None)
+    report['first_build_requires_separate_approval']=False
+    report['local_build_authorized']=True
+    report['remote_writes_authorized']=False
+    report['native_install_verified']=False
+    report['native_update_verified']=False
+    report['blocked_by']+=['NATIVE_INSTALL_NOT_VERIFIED','NATIVE_UPDATE_NOT_VERIFIED','REMOTE_WRITE_APPROVAL_REQUIRED']
     for item in ('source','distribution'):
         state=report['environment'][item]['status']
         if state in ('SOURCE_PROVENANCE_NOT_READY','DISTRIBUTION_REPO_NEEDS_INITIAL_COMMIT','DISTRIBUTION_STATE_UNVERIFIED'):report['blocked_by'].append(state)
-    folder=ROOT/'artifacts'/'release-stage-b2-1';folder.mkdir(parents=True,exist_ok=True)
+    from transcomic.release_adapters import safe_path
+    folder=safe_path(args.output,ROOT) if args.output else ROOT/'artifacts'/'release-stage-b2-1';folder.mkdir(parents=True,exist_ok=True)
     (folder/'preflight.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     print(json.dumps(report,ensure_ascii=True,indent=2))
+    if args.maintenance:
+        from scripts.cleanup_project import main as maintenance
+        return maintenance(['--apply'] if args.maintenance=='cache' else [])
     return 0
 
 if __name__=='__main__': raise SystemExit(main())

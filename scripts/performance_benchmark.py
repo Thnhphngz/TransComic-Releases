@@ -1,3 +1,7 @@
+try:
+    from scripts.test_runtime import TemporaryDirectory
+except ModuleNotFoundError:
+    from test_runtime import TemporaryDirectory
 """Offline measurements against copied, previously verified results; never sends HTTP."""
 import json
 import sqlite3
@@ -21,7 +25,7 @@ def timed(fn, n=5):
 
 
 def run():
-    with tempfile.TemporaryDirectory() as directory:
+    with TemporaryDirectory() as directory:
         source=sqlite3.connect(f'file:{(ROOT / "artifacts/wrong-language/live/verified.sqlite3").as_posix()}?mode=ro', uri=True)
         copy=sqlite3.connect(Path(directory)/'benchmark.db'); source.backup(copy); copy.close(); source.close()
         store=Store(Path(directory)/'benchmark.db')

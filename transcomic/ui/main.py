@@ -142,6 +142,12 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         self.pages.setCurrentIndex(0)
         self.setup_stage2()
         self.setup_v2()
+        srt_page=QWidget();srt_layout=QVBoxLayout(srt_page)
+        srt_layout.addStretch()
+        for text in ('Dịch file SRT','Chức năng đang được cập nhật','Tính năng dịch phụ đề SRT sẽ được bổ sung trong phiên bản tiếp theo.'):
+            label=QLabel(text);label.setAlignment(Qt.AlignCenter);label.setWordWrap(True)
+            label.setObjectName('section' if text=='Dịch file SRT' else 'muted');srt_layout.addWidget(label)
+        srt_layout.addStretch();self.pages.addWidget(srt_page)
         self.pages.currentChanged.connect(lambda _: self.update_branding())
         self.change_font(self.font_spin.value())
         for shortcut, replace in [("Ctrl+F", False), ("Ctrl+H", True)]:
@@ -593,13 +599,30 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         remove_many = button("Xóa các mục đã chọn")
         remove_many.clicked.connect(lambda: self.delete_history(True))
         row.addWidget(remove_many)
-        row.addStretch()
+        self.clear_all_jobs_button=button('Xóa toàn bộ')
+        self.clear_all_jobs_button.clicked.connect(self.clear_all_queue)
+        # A second row keeps deletion actions visible on narrow windows.
+        delete_row=QHBoxLayout()
+        row.removeWidget(remove);row.removeWidget(remove_many)
+        delete_row.addWidget(remove);delete_row.addWidget(remove_many)
+        delete_row.addWidget(self.clear_all_jobs_button);delete_row.addStretch()
+        self.clear_all_jobs_button.setEnabled(False)
         queue.addLayout(row)
+        queue.addLayout(delete_row)
         layout.addWidget(queue_card, 1)
         self.job_list.itemDoubleClicked.connect(lambda _: self.show_job_document())
         return page
 
+    def confirm_clear_all(self,count):
+        from .queue_clear import ClearDialog
+        return ClearDialog(self,count).exec()==QDialog.Accepted
+
+    def clear_all_queue(self):
+        from .queue_clear import clear_all
+        clear_all(self)
+
     def delete_history(self, checked=True):
+        if getattr(self,'queue_clear_busy',False):return
         if getattr(self, 'export_busy', False) or getattr(self, 'import_busy', False):
             QMessageBox.information(self, 'Đang xử lý tài liệu', 'Chờ nhập/xuất hoàn tất trước khi xóa lịch sử.'); return
         entries = [self.job_list.item(i).data(Qt.UserRole) for i in range(self.job_list.count()) if self.job_list.item(i).checkState() == Qt.Checked] if checked else [self.job_list.currentItem().data(Qt.UserRole)] if self.job_list.currentItem() else []
@@ -757,6 +780,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             return None
 
     def start_translation(self):
+        if getattr(self,'queue_clear_busy',False):return
         if hasattr(self, "target_chips") and not any(c.isChecked() and c.isEnabled() for c in self.target_chips.values()):
             QMessageBox.information(self, "Ngôn ngữ đích", "Chọn ít nhất một ngôn ngữ đích khác nguồn."); return
         if not self.doc_id:
@@ -789,6 +813,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         self.refresh()
 
     def pause_or_resume(self):
+        if getattr(self,'queue_clear_busy',False):return
         if not self.scheduler or not self.scheduler._thread or not self.scheduler._thread.is_alive():
             return
         if self.scheduler._paused.is_set():
@@ -807,6 +832,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         self.retry_selected(all_errors=True)
 
     def retry_selected(self, _checked=False, *, all_errors=False):
+        if getattr(self,'queue_clear_busy',False):return
         if not self.doc_id:
             return
         selected = [r for r in self.model.all_rows if r["state"] in ("error", "unknown", "wrong_target_language")] if all_errors else self.model.selected_rows()
@@ -1092,6 +1118,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
                 item.setCheckState(Qt.Checked if entry["entry_id"] in checked else Qt.Unchecked)
                 if entry["entry_id"] == selected_job:
                     self.job_list.setCurrentRow(self.job_list.count()-1)
+            self.clear_all_jobs_button.setEnabled(self.job_list.count()>0 and not getattr(self,'queue_clear_busy',False))
 
     def show_job_document(self):
         item = self.job_list.currentItem()
@@ -1106,6 +1133,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             self.pages.setCurrentIndex(0)
 
     def resume_job(self):
+        if getattr(self,'queue_clear_busy',False):return
         item = self.job_list.currentItem()
         if not item:
             return
@@ -1169,6 +1197,9 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         try:
             self._close_event(event)
         except Exception as exc:
+            panel=getattr(self,'update_panel',None)
+            if panel and (panel.handoff_pending or panel.handoff_session is not None):
+                panel.abort_handoff();self._exit_authorized=False
             import traceback
             frames=[{'file_name':Path(f.filename).name,'reason':f.name,'line_count':f.lineno} for f in traceback.extract_tb(exc.__traceback__)]
             self.store.log.emit('shutdown_error',exception=type(exc).__name__,stack_trace=frames)
@@ -1177,6 +1208,17 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             event.ignore()
 
     def _close_event(self, event):
+        panel=getattr(self,'update_panel',None)
+        if panel and panel.handoff_pending:
+            panel.cancel_event.set()
+            self.statusBar().showMessage('Đang hủy bàn giao cập nhật; chờ helper dừng an toàn…')
+            event.ignore();return
+        update_exit=bool(getattr(self,'_update_exit_requested',False) and panel and panel.handoff_session)
+        update_close_started=time.monotonic() if update_exit else None
+        if update_exit:
+            from .update_panel import native_install_idle
+            if not native_install_idle(self):
+                panel.abort_handoff();event.ignore();return
         if getattr(self,'_exit_dialog_active',False):
             event.ignore(); return
         if self._closed:
@@ -1187,7 +1229,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             event.ignore()
             return
         if not self._exit_authorized:
-            choice = self.confirm_exit(running)
+            choice = 'safe' if update_exit else self.confirm_exit(running)
             if choice == "cancel":
                 event.ignore()
                 return
@@ -1219,12 +1261,23 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         if self.tray:
             self.tray.hide()
         self.exit_timer.stop()
-        self._closed = True
         for name in ('local_timer','queue_timer','refresh_timer','layout_save_timer'):
             timer=getattr(self,name,None)
             if timer:timer.stop()
         if hasattr(self,'update_panel'):self.update_panel.shutdown()
         self.store.close()
+        self._closed = True
+        if update_exit:
+            from ..update.install import SafetySnapshot
+            logger=self.store.log
+            try:
+                panel.handoff_session.commit(SafetySnapshot(app_closed=True,safe_exit_verified=True),
+                    logger.closed and not logger.thread.is_alive() and not logger.failure and
+                    time.monotonic()-update_close_started<=.9)
+            except Exception:
+                # EOF prevents execution. Safe Exit failure never becomes a
+                # successful installer authorization, even after DB close.
+                panel.handoff_session.abort()
         super().closeEvent(event)
 
     def confirm_exit(self, running):
@@ -1253,10 +1306,11 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             self.exit_timer.stop()
 
     def _finish_safe_exit(self):
-        # Yield the GIL without waiting for a worker. Qt test/native event pumps
-        # can otherwise repeatedly reacquire it while cleanup needs Python/SQLite.
+        # A zero-duration Windows yield may immediately return to Qt's event pump.
+        # Give the Python/asyncio cleanup thread a bounded scheduling opportunity;
+        # this is not a worker join or an extension of the shutdown deadline.
         import time
-        time.sleep(0)
+        time.sleep(.001)
         if not getattr(self, '_exit_cancelled', False) and time.monotonic() >= getattr(self, '_exit_deadline', float('inf')):
             self._exit_cancelled = True
             if self.scheduler and hasattr(self.scheduler, 'cancel_inflight'): self.scheduler.cancel_inflight()

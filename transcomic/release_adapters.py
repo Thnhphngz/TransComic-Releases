@@ -127,6 +127,7 @@ class BuildAdapter:
         text,count=re.subn(r"(?m)^VERSION\s*=\s*['\"][^'\"]+['\"]",'VERSION = '+repr(version),text)
         if count!=1:raise UpdateError('SINGLE_VERSION_SOURCE_REQUIRED')
         version_file.write_text(text,encoding='utf8');(stage/'installer/generated-version.iss').write_text(info['iss'],encoding='utf8')
+        (stage/'.build-local.json').write_text(json.dumps({'permission':'BUILD_LOCAL','version':version,'source_commit':source.commit}),encoding='utf8')
         self.build_provenance={'source_commit':source.commit,'source_tree_state':'clean_source_with_declared_generated_version_overlay',
                                'generated_version':version,'generated_version_sha256':hashlib.sha256(version_file.read_bytes()).hexdigest()}
         self.stage=stage
@@ -145,7 +146,7 @@ class PackageAdapter:
         info=version_outputs(version)
         include=self.root/'installer/generated-version.iss'
         if not include.is_file() or include.read_text(encoding='utf8')!=info['iss']:raise UpdateError('INSTALLER_VERSION_INCLUDE_REQUIRED')
-        execute(self.commands,[str(self.iscc),'/O'+str(self.output),'/F'+Path(info['installer']).stem,
+        execute(self.commands,[str(self.iscc),'/O'+str(self.output),'/DBUILD_LOCAL','/F'+Path(info['installer']).stem,
                               str(self.root/'installer/TransComic.iss')],self.root,900)
         return self.output/info['installer']
 
@@ -176,11 +177,13 @@ def inventory(version,assets):
 class GitHubPublisher:
     repository=RELEASE_REPOSITORY
 
-    def __init__(self,gh,work,commands=None,keys=None,approved_source_fields=frozenset()):
+    def __init__(self,gh,work,commands=None,keys=None,approved_source_fields=frozenset(),policy='signed-stable'):
         self.gh=safe_path(gh);self.work=safe_path(work);self.commands=commands_or_default(commands)
         if commands is None and keys is not None:raise UpdateError('Production trust must be pinned')
         self.keys=PRODUCTION_KEYS if keys is None else keys
         self.approved_source_fields=approved_source_fields
+        if policy not in ('internal','signed-stable'):raise UpdateError('UNKNOWN_RELEASE_POLICY')
+        self.policy=policy
 
     def api(self,endpoint,method='GET',fields=(),limit=1024*1024):
         if not endpoint.startswith('repos/'+RELEASE_REPOSITORY+'/'):raise UpdateError('FIXED_RELEASE_REPO_REQUIRED')
@@ -214,6 +217,16 @@ class GitHubPublisher:
         except ValueError:raise UpdateError('REMOTE_TAG_INVALID') from None
         if ref.get('object',{}).get('type')!='commit' or ref['object'].get('sha')!=distribution_sha:raise UpdateError('DISTRIBUTION_TAG_COMMIT_MISMATCH')
         return True
+
+    def prepare_internal_tag(self,version,distribution_sha):
+        """Prepared write adapter; commands still locked. Never move/delete an existing tag."""
+        if self.policy!='internal' or not re.fullmatch('[0-9a-f]{40}',distribution_sha):raise UpdateError('DISTRIBUTION_COMMIT_REQUIRED')
+        endpoint='repos/'+self.repository+'/git/ref/tags/'+version_outputs(version)['tag']
+        result=self.commands([str(self.gh),'api',endpoint,'--include'],self.work,90,1024*1024)
+        if result.stdout.startswith(b'HTTP/') and b' 404 ' in result.stdout.splitlines()[0]:
+            self.api('repos/'+self.repository+'/git/refs','POST',['ref=refs/tags/'+version_outputs(version)['tag'],'sha='+distribution_sha])
+        elif result.code:raise UpdateError('RELEASE_STATE_UNCERTAIN: tag lookup failed')
+        self.check_tag(version,distribution_sha)
 
     def draft(self,version,distribution_sha,public_identity):
         self.check_tag(version,distribution_sha)  # no auto-create/move tag, never use private source SHA
@@ -259,9 +272,13 @@ class GitHubPublisher:
             if notes.get('build_id')!=public.get('build_id'):raise UpdateError('REMOTE_BUILD_IDENTITY_MISMATCH')
         # Verify the local signed envelope against a published-shape identity before allowing draft publication.
         identity=dict(release,draft=False,published_at=release.get('published_at') or 'PREPUBLICATION_VERIFICATION')
-        item=candidate(identity,envelope,self.keys)
+        if self.policy=='internal':
+            from .update.internal import candidate as internal_candidate
+            item=internal_candidate(identity,envelope)
+        else:item=candidate(identity,envelope,self.keys)
         installer=expected[version_outputs(version)['installer']]
-        if item.signature_status!='VERIFIED_ED25519' or item.sha256!=installer.sha256 or item.size!=installer.size:raise UpdateError('SIGNED_ASSET_BINDING_INVALID')
+        trust='VERIFIED_INTERNAL_HTTPS_SHA256' if self.policy=='internal' else 'VERIFIED_ED25519'
+        if item.signature_status!=trust or item.sha256!=installer.sha256 or item.size!=installer.size:raise UpdateError('SIGNED_ASSET_BINDING_INVALID')
         sums=''.join(expected[n].sha256+'  '+n+'\n' for n in (installer.name,MANIFEST_NAME)).encode()
         if expected['SHA256SUMS.txt'].path.read_bytes()!=sums:raise UpdateError('CHECKSUM_FILE_MISMATCH')
         for item in remote:

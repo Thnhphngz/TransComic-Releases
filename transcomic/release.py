@@ -13,7 +13,8 @@ from pathlib import Path
 from uuid import uuid4
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from .version import VERSION, APP_ID, RELEASE_REPOSITORY
-from .update.metadata import bumped, SemVer, UpdateError, canonical, candidate, MANIFEST_NAME, release_url, asset_url
+from .release_version import bumped, validate_release_version
+from .update.metadata import SemVer, UpdateError, canonical, candidate, MANIFEST_NAME, release_url, asset_url
 from .update.signing import sign_payload, TrustPolicy
 
 PHASES = ('preflight', 'test', 'build', 'package', 'sign', 'verify', 'draft', 'upload', 'remote_verify', 'publish', 'published_verify', 'ledger')
@@ -36,7 +37,7 @@ class Provenance:
 
 
 def version_outputs(version):
-    parsed = SemVer.parse(version)
+    parsed = validate_release_version(version)
     if parsed.pre or parsed.build:
         raise UpdateError('Canonical stable version required')
     return {'version': version, 'tag': 'v'+version, 'name': 'TransComic '+version,
@@ -208,31 +209,31 @@ class ReleaseWorkflow:
                 if asdict(provenance) == record['provenance']:
                     return record
                 if current != record['version']:
-                    raise UpdateError('Next release source version must equal confirmed published version')
+                    raise UpdateError('RELEASE_STATE_UNCERTAIN: Next release source version must equal confirmed published version')
                 record = None  # confirmed previous publish; reserve next version from updated source
             elif record['provenance'] != asdict(provenance):
-                raise UpdateError('Pending release source identity changed')
+                raise UpdateError('RELEASE_STATE_UNCERTAIN: Pending release source identity changed')
             if record and record['state'] == 'RELEASED':
-                raise UpdateError('Published remote missing; reconciliation required')
+                raise UpdateError('RELEASE_STATE_UNCERTAIN: Published remote missing; reconciliation required')
         if record is None:
             version = bumped(current, choice)
             version_outputs(version)
             if any(SemVer.parse(t, tag=True) >= SemVer.parse(version) for t in self.publisher.releases):
-                raise UpdateError('Duplicate or older remote version')
+                raise UpdateError('RELEASE_STATE_UNCERTAIN: Duplicate or older remote version')
             record = {'mock': True, 'repository': RELEASE_REPOSITORY, 'version': version,
                       'provenance': asdict(provenance), 'state': 'PENDING', 'assets': {}}
             self.ledger.save(record)  # reserve version BEFORE any action; failed/unknown never double bumps
         assets = self.pipeline.artifacts(record)
         hashes = {n: {'size': len(v), 'sha256': hashlib.sha256(v).hexdigest()} for n, v in assets.items()}
         if record['assets'] and record['assets'] != hashes:
-            raise UpdateError('Resume artifacts changed; explicit reconciliation required')
+            raise UpdateError('RELEASE_STATE_UNCERTAIN: Resume artifacts changed; explicit reconciliation required')
         record['assets'] = hashes
         self.ledger.save(record)
         tag = 'v'+record['version']
         remote = self.publisher.read(tag)
         if remote:
             if remote['provenance'] != record['provenance'] or not remote['draft']:
-                raise UpdateError('Conflicting draft or published release')
+                raise UpdateError('RELEASE_STATE_UNCERTAIN: Conflicting draft or published release')
         else:
             self.publisher.draft(record)
         self.publisher.upload(tag, assets)

@@ -58,7 +58,7 @@ class WorkspaceV2Mixin:
 
     @staticmethod
     def navigation_items():
-        return [('✦  Dịch', 0), ('▤  Hàng đợi', 5), ('◷  Lịch sử', 1),
+        return [('✦  Dịch', 0), ('▧  Dịch file SRT', 6), ('▤  Hàng đợi', 5), ('◷  Lịch sử', 1),
                 ('◆  API', 2), ('⌘  Console', 4), ('⚙  Cài đặt', 3)]
 
     def setup_v2(self):
@@ -263,7 +263,7 @@ class WorkspaceV2Mixin:
         self.brand_label.setText('TransComic')
         self.brand_label.setToolTip('TransComic · Translation Studio')
         from PySide6.QtGui import QIcon
-        for control, (title, _), asset in zip(self.nav_buttons, self.navigation_items(), ['translate', 'queue', 'history', 'key', 'console', 'settings']):
+        for control, (title, _), asset in zip(self.nav_buttons, self.navigation_items(), ['translate','subtitles', 'queue', 'history', 'key', 'console', 'settings']):
             control.setCheckable(True); control.setChecked(self.pages.currentIndex() == _)
             control.setToolTip(title[2:].strip()); control.setText('' if compact else title[2:].strip())
             control.setIcon(QIcon(str(Path(__file__).parent/'assets'/f'nav-{asset}.svg'))); control.setIconSize(QSize(19, 19))

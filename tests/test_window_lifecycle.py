@@ -3,6 +3,7 @@ import json
 import threading
 
 import pytest
+from qt_wait import wait_until
 from PySide6.QtCore import QRect, QTimer
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -144,10 +145,7 @@ def test_cancel_and_safe_exit_do_not_resend_inflight(tmp_path, monkeypatch):
     window.close()
     assert window._exit_pending and window.scheduler._stopped.is_set()
     release.set()
-    for _ in range(30):
-        QTest.qWait(30)
-        if window._closed:
-            break
+    wait_until(lambda: window._closed, 900, 30)
     assert window._closed and confirmations == [True]
     assert len(calls) == 1
     reopened = Store(tmp_path / "lifecycle.db")

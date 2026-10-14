@@ -24,3 +24,6 @@ version = {attr = "transcomic.version.VERSION"}
 [tool.setuptools.package-data]
 "transcomic.ui" = ["assets/*.svg"]
 
+[tool.pytest.ini_options]
+cache_dir = "${TRANSCOMIC_PYTEST_CACHE}"
+

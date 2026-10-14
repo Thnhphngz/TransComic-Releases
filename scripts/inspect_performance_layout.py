@@ -1,6 +1,9 @@
 import os
 os.environ['QT_QPA_PLATFORM']='offscreen'
-from tempfile import TemporaryDirectory
+try:
+    from scripts.test_runtime import TemporaryDirectory
+except ModuleNotFoundError:
+    from test_runtime import TemporaryDirectory
 from pathlib import Path
 from PySide6.QtWidgets import QApplication
 from transcomic.storage import Store
