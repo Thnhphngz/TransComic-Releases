@@ -1,7 +1,7 @@
-"""Single version source. Stage A never increments this file."""
+"""Single application version source; release numbering uses explicit intents."""
 APP_NAME = 'TransComic'
 APP_ID = 'TransComic.Desktop'
-VERSION = '0.1.0'
+VERSION = '1.0.0'
 UPDATER_VERSION = VERSION
 CHANNEL = 'stable'
 PLATFORM = 'windows'

@@ -1,3 +1,4 @@
+from update_versions import CURRENT, NEXT
 """Verified app/helper handoff, interrupted install recovery and staging overlay."""
 from dataclasses import replace
 import json
@@ -10,7 +11,7 @@ from transcomic.update.install import SafetySnapshot
 from transcomic.update.windows_helper import (AppProcessIdentity,FakeWindowsRuntime,ProductionUpdateHelper,
                                              prepare_install_plan,HandoffSafety)
 
-def prepared(tmp_path,version='0.2.0'):
+def prepared(tmp_path,version=NEXT):
     release,envelope,contents=fixture(version);client=service(tmp_path/'updates',release,contents)
     item=client.check(True).candidate;path=client.download(item)
     installation=tmp_path/'installed';installation.mkdir()
@@ -20,7 +21,7 @@ def prepared(tmp_path,version='0.2.0'):
 
 @pytest.mark.parametrize('fault',['none','busy','logger','candidate','tamper','identity','same','older'])
 def test_handoff_binding_and_safe_exit(tmp_path,fault):
-    args=list(prepared(tmp_path,'0.1.0' if fault=='same' else '0.0.9' if fault=='older' else '0.2.0'))
+    args=list(prepared(tmp_path,CURRENT if fault=='same' else '0.0.9' if fault=='older' else NEXT))
     handoff=None
     if fault=='busy':args[-1]=replace(args[-1],inflight=True)
     if fault=='logger':handoff=HandoffSafety(logger_flushing=True)
@@ -43,7 +44,7 @@ def test_helper_uncertain_outcome_blocks_blind_replay(tmp_path,fault):
     runtime=FakeWindowsRuntime();runtime.identity=args[4];runtime.fail=fault
     helper=ProductionUpdateHelper(args[0].directory,args[3],runtime,policy='internal')
     with pytest.raises(UpdateError):helper.run(plan,args[-1],threading.Event())
-    receipt=json.loads((helper.updates/'install-0.2.0.json').read_text())
+    receipt=json.loads((helper.updates/('install-'+NEXT+'.json')).read_text())
     assert receipt['state']==('INSTALLED_RESTART_PENDING' if fault=='restart' else 'INSTALL_OUTCOME_UNKNOWN')
     calls=list(runtime.calls);runtime.fail=None
     with pytest.raises(UpdateError,match='MANUAL_RECONCILIATION'):helper.run(plan,args[-1],threading.Event())
@@ -55,15 +56,15 @@ def test_staging_version_overlay_does_not_mutate_source(tmp_path):
     # Existing build entry requires outputs inside the actual workspace.
     from uuid import uuid4
     output=ROOT/'artifacts/release-preparation'/('overlay-test-'+uuid4().hex)
-    stage,report=prepare(ROOT,output,'0.1.1')
-    assert report['source_version']=='0.1.0' and report['version']=='0.1.1'
+    stage,report=prepare(ROOT,output,NEXT)
+    assert report['source_version']==CURRENT and report['version']==NEXT
     assert report['version_overlay'] and not report['remote_release_allowed'] and not report['install_allowed']
     assert (ROOT/'transcomic/version.py').read_bytes()==original
-    assert "VERSION = '0.1.1'" in (stage/'transcomic/version.py').read_text()
+    assert ('VERSION = '+repr(NEXT)) in (stage/'transcomic/version.py').read_text()
     assert json.loads((stage/'.build-local.json').read_text())['permission']=='BUILD_LOCAL'
 
 def test_helper_rejects_downgrade_before_process_open(tmp_path):
-    args=prepared(tmp_path,'0.1.0');client,item,path,installation,process,snapshot=args
+    args=prepared(tmp_path,CURRENT);client,item,path,installation,process,snapshot=args
     from transcomic.update.windows_helper import InstallPlan
     plan=InstallPlan(item.version,path,item.size,item.sha256,client._cache()['release'],client._cache()['envelope'],process)
     runtime=FakeWindowsRuntime();runtime.identity=process

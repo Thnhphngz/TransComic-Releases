@@ -1,3 +1,4 @@
+from update_versions import CURRENT, NEXT
 import base64
 from dataclasses import replace
 import hashlib
@@ -254,7 +255,7 @@ def helper_plan(tmp_path):
     updates=tmp_path/'updates';updates.mkdir();installation=tmp_path/'installed';installation.mkdir()
     path=updates/envelope['payload']['installer_filename'];path.write_bytes(data)
     identity=AppProcessIdentity(42,123,str(installation/'TransComic.exe'))
-    plan=InstallPlan('0.2.0',path,len(data),hashlib.sha256(data).hexdigest(),release,envelope,identity)
+    plan=InstallPlan(release['tag_name'][1:],path,len(data),hashlib.sha256(data).hexdigest(),release,envelope,identity)
     runtime=FakeWindowsRuntime();runtime.identity=identity
     helper=ProductionUpdateHelper(updates,installation,runtime,keys)
     snapshot=SafetySnapshot(app_closed=True,process_exited=True,safe_exit_verified=True)
@@ -302,25 +303,25 @@ def test_all_production_commands_locked_even_environment_flags(monkeypatch,tmp_p
 def test_coordinator_checkpoint_resume_pipeline(tmp_path,phase):
     from transcomic.release_pipeline import ReleaseCoordinator,FakeReleaseOperations
     journal=ReleaseJournal(tmp_path/'journal.json');coordinator=ReleaseCoordinator(journal);operations=FakeReleaseOperations();operations.fail=phase
-    with pytest.raises(UpdateError):coordinator.simulate(operations)
+    with pytest.raises(UpdateError):coordinator.simulate(operations,current='0.1.0')
     assert journal.load()['state']==ReleaseState.FAILED
     operations.fail=None
-    assert coordinator.simulate(operations,choice='major')['version']=='0.1.1'
+    assert coordinator.simulate(operations,current='0.1.0',choice='major')['version']=='0.1.1'
     assert journal.load()['state']==ReleaseState.PUBLISHED
     assert operations.calls.count('publish')==1
-    before=len(operations.calls);assert coordinator.simulate(operations)['state']==ReleaseState.PUBLISHED
+    before=len(operations.calls);assert coordinator.simulate(operations,current='0.1.0')['state']==ReleaseState.PUBLISHED
     assert operations.calls[before:]==['reconcile']
 
 
 def test_coordinator_unknown_remote_outcome_local_save_failure_next_patch(tmp_path,monkeypatch):
     from transcomic.release_pipeline import ReleaseCoordinator,FakeReleaseOperations
     journal=ReleaseJournal(tmp_path/'journal.json');coordinator=ReleaseCoordinator(journal);operations=FakeReleaseOperations();operations.unknown_publish=True
-    with pytest.raises(UpdateError):coordinator.simulate(operations)
+    with pytest.raises(UpdateError):coordinator.simulate(operations,current='0.1.0')
     assert journal.load()['state']==ReleaseState.UNKNOWN_REMOTE_OUTCOME
     operations.unknown_publish=False;before=len(operations.calls)
-    assert coordinator.simulate(operations)['state']==ReleaseState.PUBLISHED
+    assert coordinator.simulate(operations,current='0.1.0')['state']==ReleaseState.PUBLISHED
     assert operations.calls[before:]==['reconcile']
-    assert coordinator.simulate(operations,build_id='new-clean-source')['version']=='0.1.2'
+    assert coordinator.simulate(operations,current='0.1.0',build_id='new-clean-source')['version']=='0.1.2'
     assert operations.calls.count('publish')==2
     with pytest.raises(UpdateError):coordinator.run(operations)
 

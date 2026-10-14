@@ -1,3 +1,4 @@
+from update_versions import CURRENT, NEXT
 """Native code preparation: local IPC/exit gates mocked, never run an installer."""
 from dataclasses import replace
 import json
@@ -96,7 +97,7 @@ def installed_fixture(tmp_path):
     import hashlib
     release,envelope,contents=fixture()
     old=envelope['payload']['installer_filename'];name=old.replace('.testdata','.exe')
-    data=contents[old];raw=canonical(manifest('0.2.0',name,len(data),hashlib.sha256(data).hexdigest(),'2026-10-15T00:00:00Z'))
+    data=contents[old];raw=canonical(manifest(NEXT,name,len(data),hashlib.sha256(data).hexdigest(),'2026-10-15T00:00:00Z'))
     contents={name:data,'transcomic-update.json':raw,'SHA256SUMS.txt':(hashlib.sha256(data).hexdigest()+'  '+name+'\n'+hashlib.sha256(raw).hexdigest()+'  transcomic-update.json\n').encode()}
     for asset in release['assets']:
         if asset['name']==old:asset['name']=name;asset['browser_download_url']=asset['browser_download_url'].replace(old,name)
@@ -117,6 +118,7 @@ def test_ui_handoff_commit_occurs_only_after_data_close(tmp_path,monkeypatch,lat
     panel.downloaded_path=panel.service.download(panel.item)
     installation=tmp_path/'app';identity=native.AppProcessIdentity(321,456,str(installation/'TransComic.exe'))
     monkeypatch.setattr(native,'registered_installation',lambda:installation)
+    monkeypatch.setattr(sys,'executable',str(installation/'TransComic.exe'))
     monkeypatch.setattr(native,'current_process_identity',lambda:identity)
     channel=Channel();launches=[]
     if late_busy=='slow_close':
@@ -211,7 +213,7 @@ def test_startup_ack_is_atomic_fixed_location_and_not_overwritten(tmp_path,monke
     token='a'*64
     native.acknowledge_restart(['--update-startup-token='+token])
     path=tmp_path/'TransComic/Updates'/('startup-'+token+'.json')
-    assert json.loads(path.read_bytes())=={'version':'0.1.0','pid':123,'creation_time':456,'image':identity.image}
+    assert json.loads(path.read_bytes())=={'version':CURRENT,'pid':123,'creation_time':456,'image':identity.image}
     assert not list(path.parent.glob('*.tmp'))
     with pytest.raises(UpdateError,match='STARTUP_RECEIPT_ALREADY_EXISTS'):
         native.acknowledge_restart(['--update-startup-token='+token])

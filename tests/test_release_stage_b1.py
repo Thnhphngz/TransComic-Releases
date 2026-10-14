@@ -34,15 +34,15 @@ def test_failure_resume_same_version_no_double_bump(tmp_path,phase):
     flow,source=workflow(tmp_path)
     adapter=flow.pipeline if phase in ('preflight','test','build','package','sign','verify') else flow.publisher
     adapter.fail=phase
-    with pytest.raises(UpdateError):flow.simulate(source)
+    with pytest.raises(UpdateError):flow.simulate(source,current='0.1.0')
     assert flow.ledger.load()['version']=='0.1.1'
     assert flow.ledger.load()['state']!='RELEASED'
     adapter.fail=None
-    result=flow.simulate(source,choice='major')
+    result=flow.simulate(source,current='0.1.0',choice='major')
     assert result['state']=='RELEASED' and result['version']=='0.1.1'
     assert sum(x[0]=='draft' for x in flow.publisher.calls)==(2 if phase=='draft' else 1)
     count=sum(x[0]=='publish' for x in flow.publisher.calls)
-    assert flow.simulate(source)==result
+    assert flow.simulate(source,current='0.1.0')==result
     assert sum(x[0]=='publish' for x in flow.publisher.calls)==count
 
 
@@ -50,18 +50,18 @@ def test_failure_resume_same_version_no_double_bump(tmp_path,phase):
 def test_remote_published_local_unknown_readonly_reconcile(tmp_path,failure):
     flow,source=workflow(tmp_path)
     flow.publisher.publish_unknown=failure=='unknown';flow.ledger.fail_final=failure=='save'
-    with pytest.raises((UpdateError,OSError)):flow.simulate(source)
+    with pytest.raises((UpdateError,OSError)):flow.simulate(source,current='0.1.0')
     assert not flow.publisher.releases['v0.1.1']['draft']
     assert flow.ledger.load()['state']=='PUBLISH_PENDING'
     flow.publisher.publish_unknown=False;flow.ledger.fail_final=False
     before=len(flow.publisher.calls)
-    assert flow.simulate(source)['state']=='RELEASED'
+    assert flow.simulate(source,current='0.1.0')['state']=='RELEASED'
     assert all(x[0]=='read' for x in flow.publisher.calls[before:])
 
 
 def test_next_release_patch_only_after_confirmed_prior_publish(tmp_path):
     flow,source=workflow(tmp_path)
-    assert flow.simulate(source)['version']=='0.1.1'
+    assert flow.simulate(source,current='0.1.0')['version']=='0.1.1'
     next_source=replace(source,source_commit='c'*40)
     with pytest.raises(UpdateError):flow.simulate(next_source,current='0.1.0')
     result=flow.simulate(next_source,current='0.1.1')
@@ -72,14 +72,14 @@ def test_next_release_patch_only_after_confirmed_prior_publish(tmp_path):
 @pytest.mark.parametrize('corrupt',['manifest_version','signature','provenance','data'])
 def test_local_asset_binding_before_any_remote_write(tmp_path,corrupt):
     flow,source=workflow(tmp_path);flow.pipeline.corrupt=corrupt
-    with pytest.raises(UpdateError):flow.simulate(source)
+    with pytest.raises(UpdateError):flow.simulate(source,current='0.1.0')
     assert flow.publisher.calls==[] and flow.ledger.load()['state']=='PENDING'
 
 
 @pytest.mark.parametrize('kind',['provenance','tag','size','name','bytes','published_missing'])
 def test_remote_conflicts_fail_closed(tmp_path,kind):
     flow,source=workflow(tmp_path)
-    assert flow.simulate(source)['state']=='RELEASED'
+    assert flow.simulate(source,current='0.1.0')['state']=='RELEASED'
     remote=flow.publisher.releases['v0.1.1']
     if kind=='provenance':remote['provenance']['source_commit']='c'*40
     if kind=='tag':flow.publisher.tags['v0.1.1']='c'*40
@@ -88,34 +88,34 @@ def test_remote_conflicts_fail_closed(tmp_path,kind):
         key=next(iter(remote['assets']));remote['assets'][key]=b'x'*len(remote['assets'][key])
     if kind=='name':remote['assets']['rogue']=b'x'
     if kind=='published_missing':del flow.publisher.releases['v0.1.1']
-    with pytest.raises(UpdateError):flow.simulate(source)
+    with pytest.raises(UpdateError):flow.simulate(source,current='0.1.0')
     assert sum(x[0]=='publish' for x in flow.publisher.calls)==1
 
 
 def test_pending_source_cannot_change_and_unknown_read_does_not_write(tmp_path):
     flow,source=workflow(tmp_path);flow.publisher.fail='upload'
-    with pytest.raises(UpdateError):flow.simulate(source)
-    with pytest.raises(UpdateError):flow.simulate(replace(source,source_commit='c'*40))
+    with pytest.raises(UpdateError):flow.simulate(source,current='0.1.0')
+    with pytest.raises(UpdateError):flow.simulate(replace(source,source_commit='c'*40),current='0.1.0')
     flow.publisher.fail='read';count=len(flow.publisher.calls)
-    with pytest.raises(UpdateError):flow.simulate(source)
+    with pytest.raises(UpdateError):flow.simulate(source,current='0.1.0')
     assert all(c[0]=='read' for c in flow.publisher.calls[count:])
 
 
 @pytest.mark.parametrize('tag',['v0.1.1','v1.0.0'])
 def test_duplicate_older_remote_version(tmp_path,tag):
     flow,source=workflow(tmp_path);flow.publisher.releases[tag]={'draft':False}
-    with pytest.raises(UpdateError):flow.simulate(source)
+    with pytest.raises(UpdateError):flow.simulate(source,current='0.1.0')
     assert not flow.ledger.path.exists()
 
 
 def test_existing_tag_wrong_commit_and_resume_artifact_change(tmp_path):
     flow,source=workflow(tmp_path);flow.publisher.tags['v0.1.1']='c'*40
-    with pytest.raises(UpdateError):flow.simulate(source)
+    with pytest.raises(UpdateError):flow.simulate(source,current='0.1.0')
     assert not flow.publisher.releases
     flow.publisher.tags.clear();flow.publisher.fail='upload'
-    with pytest.raises(UpdateError):flow.simulate(source)
+    with pytest.raises(UpdateError):flow.simulate(source,current='0.1.0')
     flow.pipeline=FakePipeline();flow.publisher.fail=None
-    with pytest.raises(UpdateError,match='artifacts changed'):flow.simulate(source)
+    with pytest.raises(UpdateError,match='artifacts changed'):flow.simulate(source,current='0.1.0')
 
 
 @pytest.mark.parametrize('repo,sha',[('Thnhphngz/TransComic-Releases','a'*40),('https://token@github.com/a/b','a'*40),('a/b','main'),('a/b','c'*39)])
@@ -127,7 +127,7 @@ def test_mock_adapters_only_and_bad_ledger(tmp_path):
     with pytest.raises(UpdateError):ReleaseWorkflow(MockLedger(tmp_path/'x'),object(),FakePipeline())
     flow,source=workflow(tmp_path);flow.ledger.path.parent.mkdir()
     flow.ledger.path.write_text('{"mock":false}')
-    with pytest.raises(UpdateError):flow.simulate(source)
+    with pytest.raises(UpdateError):flow.simulate(source,current='0.1.0')
     assert not flow.publisher.calls
 
 

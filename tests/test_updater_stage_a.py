@@ -1,3 +1,4 @@
+from update_versions import CURRENT, NEXT
 import base64
 import copy
 import hashlib
@@ -15,7 +16,7 @@ from transcomic.update.service import UpdateService, LATEST_URL, Cancelled, DAY
 from transcomic.update.install import *
 from scripts import release_transcomic as release_script
 
-def fixture_release(data=b'fixture data, not an executable',version='0.2.0',signed=True):
+def fixture_release(data=b'fixture data, not an executable',version=NEXT,signed=True):
     key=Ed25519PrivateKey.generate();keys={'ephemeral-test':key.public_key().public_bytes_raw()}
     tag='v'+version;name=f'TransComic-Setup-{version}-windows-x64.testdata'
     p={'app_id':APP_ID,'version':version,'channel':'stable','os':'windows','architecture':'x64',
@@ -60,7 +61,7 @@ def test_signature_and_duplicate_json():
     with pytest.raises(UpdateError):candidate(r,e,keys,True)
     with pytest.raises(UpdateError):strict_json(b'{"version":1,"version":2}')
 
-def make_service(tmp_path, data=b'fixture', version='0.2.0', status=200, handler=None):
+def make_service(tmp_path, data=b'fixture', version=NEXT, status=200, handler=None):
     r,e,m,keys,data=fixture_release(data,version)
     calls=[]
     def send(req):
@@ -71,7 +72,7 @@ def make_service(tmp_path, data=b'fixture', version='0.2.0', status=200, handler
     client=httpx.Client(transport=httpx.MockTransport(send))
     return UpdateService(tmp_path/'Updates',client,keys=keys,testing=True),calls,(r,e,m,keys,data)
 
-@pytest.mark.parametrize('version,state',[('0.0.9','UP_TO_DATE'),('0.1.0','UP_TO_DATE'),('0.2.0','UPDATE_AVAILABLE')])
+@pytest.mark.parametrize('version,state',[('0.0.9','UP_TO_DATE'),(CURRENT,'UP_TO_DATE'),(NEXT,'UPDATE_AVAILABLE')])
 def test_check_versions(tmp_path,version,state):
     service,calls,_=make_service(tmp_path,version=version)
     assert service.check().state==state and len(calls)==2
@@ -168,7 +169,7 @@ def fake_commands(args):
 def test_preflight_even_full_environment_stays_locked(missing):
     report=release_script.preflight(commands=fake_commands,which=lambda n:None if n==missing else n,find_spec=lambda n:None if n==missing else object())
     assert report['production_locked'] and not report['version_modified'] and report['repository']==RELEASE_REPOSITORY
-    assert report['phases']['publish']=='LOCKED' and report['current_version']=='0.1.0'
+    assert report['phases']['publish']=='LOCKED' and report['current_version']==CURRENT
     with pytest.raises(RuntimeError):release_script.production_action('publish')
 def test_readonly_commands_and_auth_redaction():
     calls=[]

@@ -524,7 +524,8 @@ class WindowsRuntime:
 
 class FakeWindowsRuntime:
     def __init__(self):
-        self.identity=None;self.process_exited=True;self.fail=None;self.version='0.2.0';self.calls=[]
+        from ..release_version import bumped
+        self.identity=None;self.process_exited=True;self.fail=None;self.version=bumped(VERSION,'minor');self.calls=[]
     def open_process(self,identity):
         self.calls.append('open')
         if self.identity!=identity:raise UpdateError('PROCESS_IDENTITY_MISMATCH')

@@ -122,6 +122,10 @@ class UpdatePanel(QFrame):
                 return
             if self.handoff_pending:
                 self.abort_handoff()
+            if result['kind']=='installed_edition_required':
+                self.status.setText('Đây là EXE chạy trực tiếp hoặc bản cài không khớp. Tự cập nhật chỉ hỗ trợ bản cài bằng Installer trong thư mục mặc định. Hãy dùng bản đã cài; không tự thay EXE hoặc báo đã cài cập nhật.')
+                self.download.setEnabled(False)
+                return
             if result['kind']=='downloaded':
                 from pathlib import Path
                 self.downloaded_path=Path(result['path'])
@@ -194,7 +198,13 @@ class UpdatePanel(QFrame):
             timer=getattr(self.window,name,None)
             if timer and timer.isActive():self._update_timers.append(timer);timer.stop()
         def prepare(cancel):
-            installation=registered_installation()
+            try:
+                installation=registered_installation()
+                from pathlib import Path
+                if Path(sys.executable).resolve()!=installation/'TransComic.exe':
+                    return {'kind':'installed_edition_required'}
+            except (ValueError,OSError):
+                return {'kind':'installed_edition_required'}
             service.confirm_install(item,cancel)
             # This plan is an intent only; the helper cannot execute until a
             # separate COMMIT sent after Store/log close and process exit.

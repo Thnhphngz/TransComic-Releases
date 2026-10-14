@@ -54,7 +54,7 @@ exe = EXE(
     entitlements_file=None,
 )
 
-# External helper ships beside the app; helper runtime remains install-locked.
+# External helper ships beside the app; native execution requires installed identity and Safe Exit.
 helper_analysis = Analysis(
     [str(root/'scripts/update_helper.py')],
     pathex=[str(root)], binaries=[], hiddenimports=[], hookspath=[],

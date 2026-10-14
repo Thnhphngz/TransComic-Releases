@@ -30,6 +30,7 @@ private-signing/
 
 # Generated test evidence and logs
 /artifacts/
+/releases/
 *.log
 
 # Signing secrets and credentials

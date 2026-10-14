@@ -1,3 +1,4 @@
+from update_versions import CURRENT, NEXT
 import json
 from pathlib import Path
 import threading
@@ -25,7 +26,7 @@ def wait(condition):
 
 @pytest.mark.parametrize('kind',['manual','auto','same','offline','no-release','invalid','cached'])
 def test_popup_only_manual_verified_internal(tmp_path,kind):
-    app,w=window(tmp_path);release,envelope,contents=fixture('0.1.0' if kind=='same' else '0.2.0')
+    app,w=window(tmp_path);release,envelope,contents=fixture(CURRENT if kind=='same' else NEXT)
     if kind=='invalid':release['draft']=True
     respond=(lambda req:httpx.Response(404)) if kind=='no-release' else (lambda req:(_ for _ in ()).throw(httpx.ConnectError('fixture'))) if kind=='offline' else None
     panel=w.update_panel;panel.service=service(tmp_path,release,contents,respond)

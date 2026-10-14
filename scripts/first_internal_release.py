@@ -1,4 +1,4 @@
-"""One authorized Internal v0.1.1 publication using existing release machinery.
+"""Explicitly scoped Internal publications using existing release machinery.
 
 Not imported by the app or included by the build allowlist. Default is read-only.
 The generic release adapters stay locked; this concrete adapter has no arbitrary
@@ -13,6 +13,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -30,6 +31,22 @@ REPO = 'Thnhphngz/TransComic-Releases'
 OUT = ROOT / 'artifacts/first-real-github-release-0.1.1'
 PREPARED = ROOT / 'artifacts/two-laptop-update-test'
 NAMES = ('TransComic-Setup-0.1.1-windows-x64.exe', 'transcomic-update.json', 'SHA256SUMS.txt')
+
+@dataclass(frozen=True)
+class ReleaseScope:
+    version: str
+    tag: str
+    out: Path
+    names: tuple
+
+FIRST_SCOPE=ReleaseScope(VERSION,TAG,OUT,NAMES)
+OFFICIAL_SCOPE=ReleaseScope('1.0.0','v1.0.0',ROOT/'artifacts/official-release-1.0.0',
+    ('TransComic-Setup-1.0.0-windows-x64.exe','transcomic-update.json','SHA256SUMS.txt'))
+
+def checked_scope(scope):
+    if scope is not FIRST_SCOPE and scope is not OFFICIAL_SCOPE:
+        raise UpdateError('UNAUTHORIZED_RELEASE_SCOPE')
+    return scope
 
 
 def sha(path):
@@ -52,22 +69,23 @@ def identity_in_notes(notes):
     return found[0]
 
 
-def draft_validation_identity(release):
+def draft_validation_identity(release,scope=FIRST_SCOPE):
     """GitHub drafts can have untagged web URLs. Verify IDs via API; only
     construct future canonical URLs for PRE-publication schema validation.
     Published releases are always verified with their actual untouched URLs.
     """
+    checked_scope(scope)
     if release.get('draft') is not True:return release
-    result=dict(release,html_url=release_url(TAG))
+    result=dict(release,html_url=release_url(scope.tag))
     result['assets']=[]
     for asset in release.get('assets',[]):
         name=asset.get('name')
-        if name not in NAMES:raise UpdateError('UNEXPECTED_DRAFT_ASSET')
+        if name not in scope.names:raise UpdateError('UNEXPECTED_DRAFT_ASSET')
         actual=asset.get('browser_download_url','')
         untagged=re.escape('https://github.com/'+REPO+'/releases/download/')+r'untagged-[A-Za-z0-9_-]{1,100}/'+re.escape(name)
-        if actual!=asset_url(TAG,name) and not re.fullmatch(untagged,actual):
+        if actual!=asset_url(scope.tag,name) and not re.fullmatch(untagged,actual):
             raise UpdateError('DRAFT_ASSET_URL_OUTSIDE_PINNED_REPOSITORY')
-        result['assets'].append(dict(asset,browser_download_url=asset_url(TAG,name)))
+        result['assets'].append(dict(asset,browser_download_url=asset_url(scope.tag,name)))
     return result
 
 
@@ -128,29 +146,35 @@ def local_gates(require_clean=True):
     return assets, build
 
 
-def require_current_tests():
-    proof = load(OUT/'gates.json')
+def require_current_tests(scope=FIRST_SCOPE):
+    checked_scope(scope)
+    proof = load(scope.out/'gates.json')
     if proof['source_commit'] != git('rev-parse', 'HEAD') or proof['source_dirty']:
         raise UpdateError('TEST_SOURCE_COMMIT_CHANGED')
     for name, expected in proof['source_hashes'].items():
         if sha(ROOT/name) != expected:
             raise UpdateError('TEST_SOURCE_CHANGED: '+name)
     for name, expected in proof['test_evidence'].items():
-        if sha(OUT/name) != expected:
+        if sha(scope.out/name) != expected:
             raise UpdateError('TEST_EVIDENCE_CHANGED')
-        suite = ET.parse(OUT/name).getroot().find('testsuite')
+        suite = ET.parse(scope.out/name).getroot().find('testsuite')
         if int(suite.attrib['failures']) or int(suite.attrib['errors']):
             raise UpdateError('RELEASE_TESTS_FAILED')
     if proof['baseline_compatibility'] is not True or proof['privacy_findings']:
         raise UpdateError('BASELINE_OR_PRIVACY_GATE_FAILED')
-    if sha(OUT/'release-notes.md')!=proof['publication_notes_sha256']:
+    if sha(scope.out/'release-notes.md')!=proof['publication_notes_sha256']:
         raise UpdateError('RELEASE_NOTES_CHANGED_AFTER_REVIEW')
+    if scope is OFFICIAL_SCOPE:
+        from scripts.official_release import GATE_NAMES
+        if set(proof.get('release_gates',{}))!=set(GATE_NAMES) or not all(v is True for v in proof['release_gates'].values()):
+            raise UpdateError('OFFICIAL_RELEASE_GATES_NOT_ALL_PASS')
     return proof
 
 
 class FirstReleaseCommands:
     """Concrete gh-only command policy; no caller-supplied command runner."""
-    def __init__(self, gh, commit, distribution, build_id, notes, assets):
+    def __init__(self, gh, commit, distribution, build_id, notes, assets,scope=FIRST_SCOPE,read_only=False):
+        self.scope=checked_scope(scope);self.read_only=read_only
         self.gh=str(safe_path(gh));self.commit=commit;self.distribution=distribution
         self.build_id=build_id;self.notes=notes;self.assets={a.name:a for a in assets}
         self.release_id=None;self.asset_ids=set();self.events=[]
@@ -161,16 +185,18 @@ class FirstReleaseCommands:
         endpoint=argv[2];tail=argv[3:];prefix='repos/'+REPO
         if endpoint==prefix+'/releases?per_page=100' and tail==['--method','GET']:
             return False
-        if endpoint in (prefix+'/releases/tags/'+TAG, prefix+'/git/ref/tags/'+TAG) and tail in (['--include'], ['--method','GET']):
+        if self.release_id is not None and endpoint==prefix+'/releases/'+str(self.release_id) and tail==['--method','GET']:
+            return False
+        if endpoint in (prefix+'/releases/tags/'+self.scope.tag, prefix+'/git/ref/tags/'+self.scope.tag) and tail in (['--include'], ['--method','GET']):
             return False
         if re.fullmatch(re.escape(prefix)+r'/releases/assets/[0-9]+', endpoint):
             if int(endpoint.rsplit('/',1)[1]) in self.asset_ids and tail==['-H','Accept: application/octet-stream']:
                 return False
-        if endpoint == prefix+'/git/refs' and tail == ['--method','POST','-F','ref=refs/tags/'+TAG,'-F','sha='+self.distribution]:
+        if endpoint == prefix+'/git/refs' and tail == ['--method','POST','-F','ref=refs/tags/'+self.scope.tag,'-F','sha='+self.distribution]:
             return True
         if endpoint == prefix+'/releases':
-            payload=OUT/'draft-request.json'
-            expected={'tag_name':TAG,'name':'TransComic '+VERSION,'target_commitish':self.distribution,
+            payload=self.scope.out/'draft-request.json'
+            expected={'tag_name':self.scope.tag,'name':'TransComic '+self.scope.version,'target_commitish':self.distribution,
                       'draft':True,'prerelease':False,'body':self.notes}
             if tail==['--method','POST','--input',str(payload)] and load(payload)==expected:return True
         if self.release_id is not None:
@@ -184,10 +210,11 @@ class FirstReleaseCommands:
 
     def __call__(self, argv, cwd, timeout=120, limit=1024*1024):
         write=self.validate(argv)
+        if write and self.read_only:raise UpdateError('PREVIOUS_RELEASE_READ_ONLY')
         if safe_path(cwd)!=ROOT:raise UpdateError('FIXED_RELEASE_WORKSPACE_REQUIRED')
         if write:
             if source_identity().commit!=self.commit:raise UpdateError('SOURCE_CHANGED_BEFORE_WRITE')
-            require_current_tests()
+            require_current_tests(self.scope)
             for asset in self.assets.values():
                 if Asset.inspect(asset.name,asset.path,ROOT)!=asset:raise UpdateError('ASSET_CHANGED_BEFORE_WRITE')
         try:
@@ -198,7 +225,7 @@ class FirstReleaseCommands:
         if len(result.stdout)>limit:raise UpdateError('COMMAND_OUTPUT_LIMIT_OUTCOME_UNKNOWN')
         self.events.append({'endpoint':argv[2].split('?')[0],'write':write,'exit_code':result.returncode,
                             'response_sha256':hashlib.sha256(result.stdout).hexdigest()})
-        if result.returncode==0 and '/releases/assets/' not in argv[2] and argv[2].endswith(('/releases','/releases/tags/'+TAG)):
+        if result.returncode==0 and '/releases/assets/' not in argv[2] and argv[2].endswith(('/releases','/releases/tags/'+self.scope.tag)):
             raw=result.stdout
             if raw.startswith(b'HTTP/'):
                 _,sep,raw=raw.partition(b'\r\n\r\n')
@@ -212,8 +239,8 @@ class FirstReleaseCommands:
             raise UpdateError('REMOTE_RELEASE_ID_CHANGED')
         url=release.get('html_url','')
         untagged=re.escape('https://github.com/'+REPO+'/releases/tag/')+r'untagged-[A-Za-z0-9_-]{1,100}'
-        valid_url=url==release_url(TAG) or (release.get('draft') is True and re.fullmatch(untagged,url))
-        if (release.get('tag_name')!=TAG or not valid_url or release.get('prerelease') is not False or
+        valid_url=url==release_url(self.scope.tag) or (release.get('draft') is True and re.fullmatch(untagged,url))
+        if (release.get('tag_name')!=self.scope.tag or not valid_url or release.get('prerelease') is not False or
             release.get('url')!='https://api.github.com/repos/'+REPO+'/releases/'+str(rid) or
             release.get('target_commitish')!=self.distribution):
             raise UpdateError('REMOTE_RELEASE_IDENTITY_MISMATCH')
@@ -227,35 +254,39 @@ class FirstReleasePublisher(GitHubPublisher):
         # Reviewed concrete activation, restricted to this one command policy.
         if type(commands) is not FirstReleaseCommands:raise UpdateError('CONCRETE_FIRST_RELEASE_COMMANDS_REQUIRED')
         super().__init__(commands.gh,ROOT,policy='internal')
-        self.commands=commands
+        self.commands=commands;self.scope=commands.scope
 
     def read(self, version):
-        if version!=VERSION:raise UpdateError('ONLY_V0_1_1_AUTHORIZED')
+        if version!=self.scope.version:raise UpdateError('ONLY_V0_1_1_AUTHORIZED')
+        if self.commands.release_id is not None:
+            release=json.loads(self.api('repos/'+REPO+'/releases/'+str(self.commands.release_id)))
+            self.commands.bind_release(release)
+            return release
         # /releases/tags is documented for published releases; authenticated
         # list includes drafts. Never infer draft absence from tag-route 404.
         releases=json.loads(self.api('repos/'+REPO+'/releases?per_page=100'))
         if not isinstance(releases,list) or len(releases)>=100:
             raise UpdateError('RELEASE_INVENTORY_UNCERTAIN')
-        matches=[r for r in releases if r.get('tag_name')==TAG]
+        matches=[r for r in releases if r.get('tag_name')==self.scope.tag]
         if len(matches)>1:raise UpdateError('DUPLICATE_RELEASE_IDENTITY')
         if not matches:return None
         release=matches[0];self.commands.bind_release(release)
-        (OUT/('remote-read-'+str(len(self.commands.events))+'.json')).write_text(json.dumps(release,indent=2),encoding='utf8')
+        (self.scope.out/('remote-read-'+str(len(self.commands.events))+'.json')).write_text(json.dumps(release,indent=2),encoding='utf8')
         return release
 
     def verify(self, version, release, assets, published=False):
-        if version!=VERSION:raise UpdateError('ONLY_V0_1_1_AUTHORIZED')
+        if version!=self.scope.version:raise UpdateError('ONLY_V0_1_1_AUTHORIZED')
         self.commands.bind_release(release)
         self.check_tag(version,self.commands.distribution)
-        validated=release if published else draft_validation_identity(release)
+        validated=release if published else draft_validation_identity(release,self.scope)
         return super().verify(version,validated,assets,published=published)
 
     def draft(self, version, distribution_sha, public_identity):
-        if version!=VERSION or distribution_sha!=self.commands.distribution:
+        if version!=self.scope.version or distribution_sha!=self.commands.distribution:
             raise UpdateError('ONLY_V0_1_1_AUTHORIZED')
         self.check_tag(version,distribution_sha)
-        payload=OUT/'draft-request.json'
-        raw=canonical({'tag_name':TAG,'name':'TransComic '+VERSION,'target_commitish':distribution_sha,
+        payload=self.scope.out/'draft-request.json'
+        raw=canonical({'tag_name':self.scope.tag,'name':'TransComic '+self.scope.version,'target_commitish':distribution_sha,
                        'draft':True,'prerelease':False,'body':self.commands.notes})
         if payload.exists():
             if payload.read_bytes()!=raw:raise UpdateError('DRAFT_REQUEST_CHANGED')
@@ -269,48 +300,55 @@ class FirstReleasePublisher(GitHubPublisher):
 
 class FirstReleaseOperations(ProductionReleaseOperations):
     policy='internal'
-    def __init__(self, source, publisher, assets, build_id):
+    def __init__(self, source, publisher, assets, build_id,local_checker=None,previous_verifier=None):
         self.source=source;self.publisher=publisher;self.assets=assets;self.build_id=build_id
+        self.scope=publisher.scope;self.check_local=local_checker or local_gates
+        self.previous_verifier=previous_verifier
 
     def perform(self, phase, record):
-        if record['version']!=VERSION:raise UpdateError('ONLY_V0_1_1_AUTHORIZED')
+        if record['version']!=self.scope.version:raise UpdateError('ONLY_V0_1_1_AUTHORIZED')
         if phase==ReleaseState.PRECHECK:
-            self.source.require_clean();local_gates();require_current_tests()
-        elif phase==ReleaseState.TESTED:require_current_tests()
-        elif phase in (ReleaseState.BUILT,ReleaseState.PACKAGED):local_gates()
+            self.source.require_clean();self.check_local();require_current_tests(self.scope)
+        elif phase==ReleaseState.TESTED:require_current_tests(self.scope)
+        elif phase in (ReleaseState.BUILT,ReleaseState.PACKAGED):self.check_local()
         elif phase==ReleaseState.SIGNED:
-            local_gates()
+            self.check_local()
             record['build_id']=self.build_id
             record['asset_inventory']={a.name:{'path':str(a.path),'size':a.size,'sha256':a.sha256} for a in self.assets}
-            record['source_commit']=self.source.commit;record['reused_verified_build']=True
+            record['source_commit']=self.source.commit;record['reused_verified_build']=self.scope is FIRST_SCOPE
+            record['verified_official_build']=self.scope is OFFICIAL_SCOPE
         elif phase==ReleaseState.DRAFT_CREATED:
-            self.remote=self.publisher.read(VERSION)
+            self.remote=self.publisher.read(self.scope.version)
             if self.remote is None:
-                self.publisher.prepare_internal_tag(VERSION,record['distribution_commit'])
-                self.remote=self.publisher.draft(VERSION,record['distribution_commit'],{})
+                self.publisher.prepare_internal_tag(self.scope.version,record['distribution_commit'])
+                self.remote=self.publisher.draft(self.scope.version,record['distribution_commit'],{})
             elif not self.remote.get('draft'):
                 raise UpdateError('EXISTING_RELEASE_REQUIRES_RECONCILIATION')
         elif phase==ReleaseState.ASSETS_UPLOADED:
             # Always re-read after an uncertain upload; inherited upload skips
             # only assets whose server digest and size both match exactly.
-            self.remote=self.publisher.read(VERSION)
-            self.publisher.upload(VERSION,self.remote,self.assets)
+            self.remote=self.publisher.read(self.scope.version)
+            self.publisher.upload(self.scope.version,self.remote,self.assets)
         elif phase==ReleaseState.REMOTE_VERIFIED:
-            self.remote=self.publisher.read(VERSION);self.publisher.verify(VERSION,self.remote,self.assets)
+            self.remote=self.publisher.read(self.scope.version);self.publisher.verify(self.scope.version,self.remote,self.assets)
 
     def restore(self, record):
-        if record['version']!=VERSION or record['origin_id']!=self.build_id:
+        if record['version']!=self.scope.version or record['origin_id']!=self.build_id:
             raise UpdateError('FIRST_RELEASE_JOURNAL_IDENTITY_CHANGED')
-        require_current_tests();local_gates()
-        self.remote=self.publisher.read(VERSION)
+        require_current_tests(self.scope);self.check_local()
+        self.remote=self.publisher.read(self.scope.version)
 
     def reconcile(self, record):
-        remote=self.publisher.read(VERSION)
+        if record['version']!=self.scope.version:
+            if self.scope is not OFFICIAL_SCOPE or record['version']!='0.1.1' or self.previous_verifier is None:
+                raise UpdateError('PREVIOUS_RELEASE_RECONCILIATION_REQUIRED')
+            return self.previous_verifier(record)
+        remote=self.publisher.read(self.scope.version)
         if remote is None:return None
-        self.publisher.verify(VERSION,remote,self.assets,published=remote.get('draft') is False)
+        self.publisher.verify(self.scope.version,remote,self.assets,published=remote.get('draft') is False)
         if identity_in_notes(remote.get('body'))!=self.build_id:
             raise UpdateError('REMOTE_BUILD_IDENTITY_MISMATCH')
-        return {'tag':TAG,'build_id':self.build_id,'assets_verified':True,
+        return {'tag':self.scope.tag,'build_id':self.build_id,'assets_verified':True,
                 'published':remote['draft'] is False,'draft':remote['draft'] is True}
 
 
@@ -318,11 +356,13 @@ class FirstReleaseCoordinator(ReleaseCoordinator):
     def run(self, operations):
         if type(operations) is not FirstReleaseOperations or operations.source!=source_identity():
             raise UpdateError('CONCRETE_AUTHORIZED_FIRST_RELEASE_REQUIRED')
+        self.scope=operations.scope
         existing=self.journal.load()
-        if existing and (existing['version']!=VERSION or existing['origin_id']!=operations.build_id):
+        previous=existing and self.scope is OFFICIAL_SCOPE and existing['version']=='0.1.1' and existing['state']==ReleaseState.PUBLISHED
+        if existing and not previous and (existing['version']!=self.scope.version or existing['origin_id']!=operations.build_id):
             raise UpdateError('FIRST_RELEASE_JOURNAL_CONFLICT')
         # Explicit version; never infer a next version from a published record.
-        return self._execute(operations,current='0.1.0',choice=VERSION,build_id=operations.build_id,
+        return self._execute(operations,current='0.1.1' if self.scope is OFFICIAL_SCOPE else '0.1.0',choice=self.scope.version,build_id=operations.build_id,
                              distribution_commit=operations.publisher.commands.distribution)
 
 

@@ -32,9 +32,9 @@ class ReadOnlyCommands:
         if args not in allowed: production_action()
         try:
             executable=discover().get(args[0],{}).get('path') or args[0]
-            result=self.run([executable,*args[1:]],capture_output=True,text=True,timeout=25,shell=False,cwd=ROOT)
+            result=self.run([executable,*args[1:]],capture_output=True,text=True,encoding='utf-8',timeout=25,shell=False,cwd=ROOT)
             return result.returncode==0,'' if args==allowed[0] else result.stdout
-        except (OSError,subprocess.TimeoutExpired): return False,''
+        except (OSError,UnicodeError,subprocess.TimeoutExpired): return False,''
 
 def scan_sensitive(root=ROOT):
     risk={name:0 for name in ('user_data','old_artifacts','credential_files','source_secret_literals')}
@@ -147,7 +147,13 @@ def main(argv=None):
     parser.add_argument('--output',type=Path,help='Read-only preflight report directory within workspace')
     parser.add_argument('--publish-first-internal-0.1.1',dest='publish_first',action='store_true',
                         help='Only the explicitly authorized first v0.1.1 Internal release; requires clean source and gates')
+    parser.add_argument('--publish-official-1.0.0',dest='publish_official',action='store_true',help='Publish only v1.0.0 after all thirteen official gates pass')
     args=parser.parse_args(argv)
+    if args.publish_official:
+        if args.publish_first or args.bump!='patch' or args.maintenance or args.policy!='internal' or args.output:
+            parser.error('Official publication does not accept other actions or version/policy overrides')
+        from scripts.official_release import main as official_release
+        return official_release()
     if args.publish_first:
         if args.bump!='patch' or args.maintenance or args.policy!='internal' or args.output:
             parser.error('First release does not accept version, maintenance, policy or output overrides')

@@ -1,3 +1,4 @@
+from update_versions import CURRENT, NEXT
 import hashlib
 import json
 from pathlib import Path
@@ -120,7 +121,7 @@ def test_ui_blocks_worker_and_confirmation_race(tmp_path,monkeypatch,busy):
     w.scheduler=None;w.background_threads=[];w._exit_authorized=True;w.close();QTest.qWait(50)
 
 
-def fixture(version='0.2.0'):
+def fixture(version=NEXT):
     data=b'not executable internal fixture';name=f'TransComic-Setup-{version}-windows-x64.testdata';tag='v'+version
     envelope=manifest(version,f'TransComic-Setup-{version}-windows-x64.exe',len(data),hashlib.sha256(data).hexdigest(),'2026-10-14T00:00:00Z')
     envelope['payload']['installer_filename']=name
@@ -139,7 +140,7 @@ def service(tmp_path,release,contents,respond=None):
     return InternalUpdateService(tmp_path/'updates',httpx.Client(transport=httpx.MockTransport(transport)),testing=True)
 
 
-@pytest.mark.parametrize('version,state',[('0.2.0','UPDATE_AVAILABLE'),('0.1.0','UP_TO_DATE')])
+@pytest.mark.parametrize('version,state',[(NEXT,'UPDATE_AVAILABLE'),('0.1.0','UP_TO_DATE')])
 def test_internal_check_download_without_signing_key(tmp_path,version,state):
     release,envelope,contents=fixture(version);client=service(tmp_path,release,contents)
     result=client.check(True);assert result.state==state and result.candidate.signature_status==INTERNAL_VERIFIED

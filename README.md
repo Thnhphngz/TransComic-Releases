@@ -142,3 +142,11 @@ Sau full regression đạt, build riêng bằng `python scripts/build_local.py -
 ## Lần phát hành Internal 0.1.1 được cấp quyền
 
 `release_transcomic.bat --publish-first-internal-0.1.1` chỉ phục vụ lần phát hành `v0.1.1` đã được cấp quyền, trên repo phân phối cố định. Entry này dùng lại ReleaseCoordinator, ReleaseJournal và GitHubPublisher, yêu cầu source sạch, build input khớp, tests và compatibility proof đã review. Không cho đổi version/repo, push source, xóa hoặc ghi đè asset; kết quả remote không rõ phải reconcile. Lệnh BAT mặc định vẫn chỉ preflight; các adapter generic không được mở khóa. Hướng dẫn và hash baseline nằm ở [two-laptop-update-test.md](docs/two-laptop-update-test.md).
+
+## Bản chính thức 1.0.0
+
+Source VERSION là1.0.0. Người dùng xác nhận updater0.1.0→0.1.1 thành công và lịch sử được giữ; không suy rộng thành bảo đảm mọi nâng cấp sau này.
+
+`python scripts/build_local.py --official-1.0.0 --output artifacts/official-release-1.0.0/build` chỉ build từ source1.0.0 đã commit sạch, không cài/phát hành. Gói bàn giao nằm ở `releases/1.0.0/`; thư mục này không được commit. EXE và helper phải đi cùng; EXE chạy trực tiếp không có portable updater. Tự cập nhật native chỉ dành cho installed edition đúng AppId/thư mục cài mặc định.
+
+`release_transcomic.bat --publish-official-1.0.0` dùng lại publisher/coordinator/journal hiện có, chỉ cho v1.0.0 sau đủ13 gate. Không tự phát hành1.0.1. Cờ rút gọn và thay repo/version bị chặn. Không ký publisher cho kênh Internal; HTTPS/SHA-256 kiểm tra consistency. SRT giữ nguyên sidebar **Dịch file SRT → Chức năng đang được cập nhật**, chưa hỗ trợ dịch phụ đề.
