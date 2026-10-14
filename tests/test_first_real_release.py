@@ -96,3 +96,19 @@ def test_draft_asset_url_cannot_leave_repository(tmp_path):
     release=draft(commands(tmp_path))
     release['assets']=[{'name':NAMES[0],'browser_download_url':'https://example.com/'+NAMES[0]}]
     with pytest.raises(UpdateError):draft_validation_identity(release)
+
+
+@pytest.mark.parametrize('argument',['--publish','--publish-first','--publish-first-internal',
+                                    '--publish-first-internal-0.1'])
+def test_abbreviated_publish_flag_is_rejected_before_any_gate_or_network(argument):
+    from scripts.release_transcomic import main
+    with pytest.raises(SystemExit) as error:main([argument])
+    assert error.value.code==2
+
+
+def test_only_fully_spelled_authorized_flag_selects_first_release(monkeypatch):
+    from scripts import first_internal_release,release_transcomic
+    calls=[]
+    monkeypatch.setattr(first_internal_release,'main',lambda:calls.append('selected') or 99)
+    assert release_transcomic.main(['--publish-first-internal-0.1.1'])==99
+    assert calls==['selected']

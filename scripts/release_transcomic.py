@@ -140,7 +140,7 @@ def preflight(choice='patch',commands=None,which=shutil.which,find_spec=importli
 
 def main(argv=None):
     if hasattr(sys.stdout,'reconfigure'):sys.stdout.reconfigure(encoding='utf-8',errors='replace')
-    parser=argparse.ArgumentParser(description='STAGE B1 — PREFLIGHT ONLY')
+    parser=argparse.ArgumentParser(description='Read-only preflight or explicitly scoped first v0.1.1 release',allow_abbrev=False)
     parser.add_argument('--bump',default='patch',help='patch/minor/major or explicit higher stable version (simulation only)')
     parser.add_argument('--maintenance',choices=('dry-run','cache'),help='After preflight: review cache, or apply verified cache cleanup only')
     parser.add_argument('--policy',choices=('internal','signed-stable'),default='internal')
