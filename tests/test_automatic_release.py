@@ -126,6 +126,12 @@ def test_existing_unjournaled_release_is_not_overwritten(project):
     with pytest.raises(UpdateError,match='ALREADY_EXISTS'):system.run('auto')
     assert 'publish' not in runtime.events
 
+def test_build_only_candidate_cannot_take_over_a_foreign_remote_tag(project):
+    root,runtime,system=project;change(root);system.run('build-only')
+    runtime.latest='1.0.1'
+    with pytest.raises(UpdateError,match='UNJOURNALED_TARGET'):system.run('auto')
+    assert 'publish' not in runtime.events
+
 def test_unknown_remote_keeps_version_and_blocks_source_change(project):
     root,runtime,system=project;change(root);runtime.fail='upload_unknown'
     with pytest.raises(UpdateError,match='OUTCOME_UNKNOWN'):system.run('auto')

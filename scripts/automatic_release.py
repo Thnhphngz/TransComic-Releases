@@ -270,6 +270,8 @@ class AutomaticSystem:
         pending=bool(record['state']!=ReleaseState.PUBLISHED or (record.get('automatic_v2') and not record.get('post_publication_verified')))
         if pending:
             if not record.get('automatic_v2'):raise UpdateError('LEGACY_PENDING_RELEASE_REQUIRES_RECONCILIATION')
+            target_present='v'+record['version'] in remote['tags'] or any(r['tag_name']=='v'+record['version'] for r in remote['releases'])
+            if target_present and not record.get('remote_started'):raise UpdateError('UNJOURNALED_TARGET_REMOTE_RECONCILIATION_REQUIRED')
             if latest not in (record['previous_published_version'],record['version']):raise UpdateError('JOURNAL_LATEST_CONFLICT')
             if current not in (record['previous_published_version'],record['version']):raise UpdateError('PENDING_VERSION_CHANGED')
             version=record['version'];changed=True
@@ -361,6 +363,8 @@ class AutomaticSystem:
         print(json.dumps({'mode':'AUTO RELEASE' if mode=='auto' else mode.upper(),'repository':str(self.root),'github_destination':REPO,
             'current_version':plan['current'],'proposed_version':plan['version'],'source_commit':plan['review']['head'],
             'source_changes':plan['review']['changes'],'resume_reserved_version':plan['pending'],
+            'journal_state':plan['record']['state'],'last_completed':plan['record']['last_completed'],
+            'release_readiness':'CHECKS_ONLY_TESTS_BUILD_PENDING' if mode=='check' else 'GATED_PIPELINE',
             'remote_operations':['create fixed-repo tag/draft','upload canonical installer/manifest/checksums','verify','publish','verify anonymous latest and baseline'] if mode=='auto' and plan['changed'] else [],
             'historical_acceptance':'USER CONFIRMED: install 0.1.0; native 0.1.0 → 0.1.1 → 1.0.0; history preserved. Not automated E2E evidence.',
             'new_version_native_update':'PENDING USER TEST','translation_api_calls':0},ensure_ascii=False,indent=2),flush=True)
