@@ -69,7 +69,11 @@ def main(argv=None):
     parser.add_argument('--output',type=Path)
     parser.add_argument('--candidate-version',help='Staging-only devtest version overlay; never changes source/journal')
     parser.add_argument('--official-1.0.0',dest='official_1_0_0',action='store_true',help='Build the authorized clean source version 1.0.0; no installation or publication')
+    parser.add_argument('--release-build',action='store_true',help='Canonical package from clean committed current VERSION; never publish or install')
     args=parser.parse_args(argv)
+    canonical_build=args.official_1_0_0 or args.release_build
+    if args.release_build and (args.official_1_0_0 or args.candidate_version or subprocess.check_output(['git','status','--porcelain'],cwd=ROOT).strip()):
+        parser.error('Canonical release build requires clean source and no overlay')
     if args.official_1_0_0:
         if VERSION!='1.0.0' or args.candidate_version or subprocess.check_output(['git','status','--porcelain'],cwd=ROOT).strip():
             parser.error('Official 1.0.0 requires clean committed source VERSION 1.0.0 and no version overlay')
@@ -79,14 +83,14 @@ def main(argv=None):
         if not compiler or inventory['platform']['system']!='Windows' or inventory['platform']['bits']!=64:raise ValueError('Windows x64 / Inno compiler missing')
         stage,report=prepare(ROOT,output,args.candidate_version);output=safe_path(output,ROOT);version=report['version']
         report['tools']=inventory
-        if args.official_1_0_0:
-            report.update(status='OFFICIAL LOCAL BUILD — NOT PUBLISHED',source_tree_state='clean_local_commit',official_version='1.0.0')
+        if canonical_build:
+            report.update(status='OFFICIAL LOCAL BUILD — NOT PUBLISHED',source_tree_state='clean_local_commit',official_version=version)
             (output/'build-inputs.json').write_text(json.dumps(report,indent=2),encoding='utf8')
         run_tool([sys.executable,'-m','PyInstaller','--noconfirm','--clean','--distpath',str(stage/'dist'),'--workpath',str(output/'work'),str(stage/'TransComic.spec')],stage,output/'pyinstaller.log',1800)
         for name in ('TransComic.exe','TransComic-UpdateHelper.exe'):
             p=stage/'dist'/name
             if not p.is_file() or pe_architecture(p)!='x64' or file_version(p)!=version+'.0':raise ValueError('EXE architecture/version mismatch')
-        filename=f'TransComic-Setup-{version}-'+('' if args.official_1_0_0 else 'devtest-')+'windows-x64.exe'
+        filename=f'TransComic-Setup-{version}-'+('' if canonical_build else 'devtest-')+'windows-x64.exe'
         run_tool([str(safe_path(compiler)),'/DBUILD_LOCAL','/O'+str(output/'installer'),'/F'+Path(filename).stem,str(stage/'installer/TransComic.iss')],stage,output/'iscc.log',900)
         installer=output/'installer'/filename
         if not installer.is_file() or pe_architecture(installer) not in ('x86','x64') or file_version(installer)!=version+'.0':raise ValueError('Installer metadata mismatch')
@@ -94,8 +98,8 @@ def main(argv=None):
         products=[stage/'dist/TransComic.exe',stage/'dist/TransComic-UpdateHelper.exe',installer]
         report['artifacts']=[{'path':str(p),'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'pe_arch':pe_architecture(p),'version':file_version(p)} for p in products]
         report['installer_executed']=False
-        if args.official_1_0_0:
-            report.update(status='OFFICIAL LOCAL BUILD — NOT PUBLISHED',source_tree_state='clean_local_commit',official_version='1.0.0')
+        if canonical_build:
+            report.update(status='OFFICIAL LOCAL BUILD — NOT PUBLISHED',source_tree_state='clean_local_commit',official_version=version)
         (output/'build-report.json').write_text(json.dumps(report,indent=2),encoding='utf8')
         print(json.dumps({'build_output':str(output),'artifacts':report['artifacts']},indent=2));return 0
     except Exception as exc:

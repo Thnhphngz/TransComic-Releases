@@ -26,3 +26,18 @@ def pytest_configure(config):
 
 def pytest_report_header(config):
     return 'TransComic external test runtime: '+str(RUN)
+
+@pytest.fixture(autouse=True)
+def offline_release_network_guard(monkeypatch):
+    """Automatic releases never spend translation API credits through tests."""
+    if os.environ.get('TRANSCOMIC_RELEASE_OFFLINE_TESTS')!='1':return
+    import httpx
+    sync=httpx.Client.send;asynchronous=httpx.AsyncClient.send
+    def guarded(client,*args,**kwargs):
+        if not isinstance(client._transport,httpx.MockTransport):raise AssertionError('Automatic release tests require MockTransport')
+        return sync(client,*args,**kwargs)
+    async def guarded_async(client,*args,**kwargs):
+        if not isinstance(client._transport,httpx.MockTransport):raise AssertionError('Automatic release tests require MockTransport')
+        return await asynchronous(client,*args,**kwargs)
+    monkeypatch.setattr(httpx.Client,'send',guarded)
+    monkeypatch.setattr(httpx.AsyncClient,'send',guarded_async)

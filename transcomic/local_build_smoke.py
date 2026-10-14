@@ -35,6 +35,10 @@ def mock_service(directory):
 
 def main():
     root=Path(os.environ.get('LOCALAPPDATA','')).resolve()
+    from .app import data_path
+    from .version import APP_ID
+    from .update.windows_helper import INSTALL_APP_ID
+    if data_path()!=root/'TransComic/transcomic.sqlite3' or APP_ID!='TransComic.Desktop' or INSTALL_APP_ID!='{CB58C770-47B7-42DC-A2CA-409DDF456487}':return 2
     # This mode cannot open the normal user database, even when called without isolation.
     if not root.is_relative_to(Path(tempfile.gettempdir()).resolve()) or not root.name.startswith('TransComic-build-smoke-') or not (root/'isolated-smoke.json').is_file():return 2
     if json.loads((root/'isolated-smoke.json').read_text())!={'mode':'isolated-build-smoke'}:return 2
@@ -107,7 +111,7 @@ def main():
                     'txt_docx_fixture':True,'docx_export_units':2,'source_files_unchanged':original_hashes=={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in (text,word)},
                     'themes':['light','dark'],'srt_placeholder':True,'workspace_preserved':True,'queue_clear':True,'search_replace_undo':True,
                     'manual_popup':True,'auto_no_popup':True,'later_no_download':True,'download_verified':True,'real_http_requests':0,'installer_processes':0,
-                    'isolated_database':str(store.path),'safe_exit_deadline_ms':900,'process_exit_observed_by_launcher':False}
+                    'isolated_database':str(store.path),'default_data_path_unchanged':True,'safe_exit_deadline_ms':900,'process_exit_observed_by_launcher':False}
             (root/'report.json').write_text(json.dumps(report,indent=2),encoding='utf8')
             window.confirm_exit=lambda running:'safe'
             window.close()

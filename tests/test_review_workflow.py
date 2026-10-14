@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import httpx
@@ -323,15 +324,26 @@ def test_review_fixture_prompt_context_ids_schema(case):
 
 def test_actual_docx_snapshot_context_export_unchanged_original(tmp_path):
     from scripts.docx_fixture_budget import LEDGER, reserve, complete
-    pass_number = reserve('pytest actual DOCX regression') if LEDGER.exists() else None
-    if LEDGER.exists() and pass_number is None:
-        pytest.skip('User authorized maximum three document tests; reserved budget exhausted')
-    source = Path(r"D:\word 50 cach\7-8.docx")
-    if not source.exists():
-        pytest.skip("User Word file not present on this machine; portable fixture tests still run")
+    if os.environ.get('TRANSCOMIC_RELEASE_OFFLINE_TESTS')=='1':
+        # Automatic releases exercise the same 125-unit/context/export assertions
+        # with a synthetic document, without consuming historical user permission.
+        from docx import Document
+        generated=Document()
+        for n in range(125):generated.add_paragraph('A spoon thìa on the table' if n==24 else f'Synthetic paragraph {n}')
+        source=tmp_path/'synthetic-125.docx';generated.save(source)
+        pass_number=None;expected_hash=hashlib.sha256(source.read_bytes()).hexdigest()
+    else:
+        pass_number = reserve('pytest actual DOCX regression') if LEDGER.exists() else None
+        if LEDGER.exists() and pass_number is None:
+            pytest.skip('User authorized maximum three document tests; reserved budget exhausted')
+        source = Path(r"D:\word 50 cach\7-8.docx")
+        if not source.exists():
+            pytest.skip("User Word file not present on this machine; portable fixture tests still run")
+        expected_hash=FIXTURE["source_sha256"]
     before = source.read_bytes()
     imported = import_docx(source)
-    assert hashlib.sha256(before).hexdigest() == FIXTURE["source_sha256"]
+    assert hashlib.sha256(before).hexdigest() == expected_hash
+    assert hashlib.sha256(imported.raw).hexdigest() == expected_hash
     store = Store(tmp_path / "actual.db")
     doc, _ = store.import_document(source, ImportedText(tuple(TextLine(u.text, "") for u in imported.units), "docx", imported.raw), document_format="docx", locators=[u.locator for u in imported.units])
     row = store.lines(doc)[25]

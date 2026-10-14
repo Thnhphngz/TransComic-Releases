@@ -1,22 +1,8 @@
 # TransComic · Đa ngôn ngữ và dịch tuần tự
 
-**Release B2.1:** [production adapters bị khóa, toolchain, trust chain và bằng chứng](docs/release-stage-b2-1.md). Không cài công cụ/tạo production key/build/cài/phát hành trong đợt này; source provenance, distribution initial commit và ký số vẫn là blockers trước B2.2.
+**Phát hành tự động V2:** Sửa và lưu source, chạy `release_transcomic.bat`. BAT tự kiểm tra, chọn version carry 0–9, commit cục bộ, test/build/package, publish và xác minh GitHub khi mọi gate PASS. `--check` chỉ đọc; `--build-only` không ghi GitHub. Không gọi API dịch thật. [Hướng dẫn](docs/release-workflow.md) · [Báo cáo triển khai](docs/automatic-release-system-v2.md).
 
-**Release & Update B1:** [mã mock, môi trường và bằng chứng mới](docs/release-stage-b1.md). Cùng `release_transcomic.bat` chỉ preflight; giữ version `0.1.0`, đề xuất PATCH `0.1.1`. Build, cài và phát hành thật vẫn khóa.
-
-**Ổn định trước phát hành:** [STABILITY PASS và bằng chứng](docs/stability-before-release.md). Hai full regression liên tiếp đạt 534 test + 1 skip; stress Qt Windows ở ba DPI đạt. Giai đoạn A vẫn khóa build/publish/cài thật.
-
-**Release & Update Giai đoạn A:** [kiến trúc, khóa phát hành và báo cáo](docs/updater-stage-a.md). `release_transcomic.bat` chỉ preflight/mô phỏng; Cài đặt có kiểm tra cập nhật chạy nền. Cài thật/build/upload/publish bị khóa trong mã. [Quy trình phát hành](docs/release-workflow.md).
-
-**Giao diện mới nhất:** [Liquid Glass V3 và báo cáo 23 mục](docs/liquid-glass-v3.md). Nút/dropdown/dialog dùng bộ màu Warm Copper, một Sky Switch, click X bỏ file khỏi workspace, chip đích nằm trên nút dịch và trống mỗi lần mở app; cột số dòng đo theo font. Bằng chứng GUI Windows Light/Dark và DPI 100/125/150% nằm trong báo cáo.
-
-**Backend từ đợt trước:** [chặn sai ngôn ngữ đích](docs/wrong-language-workflow.md). Kiểm tra trước khi lưu thành công, tự retry đúng dòng trong cùng ngân sách sáu attempts và chặn xuất cả nguồn fallback sai ngôn ngữ. Đã tái hiện đúng ba dòng 67–69 trong bản `17-18_EN.docx` cũ. Hồi quy của đợt đó: **401 test đạt, 1 skip**. API thật dùng 1/1/3 lượt trên `15-16`/`17-18`/`19-20`, tổng 5/9 lượt được duyệt. Ba bản EN đủ 374 dòng nằm tại `artifacts/wrong-language/live/verified`; riêng `19-20` ghép các đoạn API thành công từ ba lượt vì cả ba lượt còn 504. Đợt V3 chỉ sửa UI, không gọi API thật hoặc build EXE.
-
-Đợt trước: [báo cáo đa ngôn ngữ và dịch tuần tự](docs/multilingual-sequential.md). Registry 11 locale, thứ tự theo thao tác chọn, retry/đối soát trước khi chuyển ngôn ngữ. Đợt Kira DeepSeek đó dùng đúng ba bản dịch trọn file mỗi nguồn `3-4.docx`, `5-6.docx`, `7-8.docx`: 1.125/1.125 dòng, 393 request, 15 retry. Không còn dòng lỗi API; vẫn cần kiểm tra ngữ nghĩa. Ledger các đợt trước được giữ riêng.
-
-Hồi quy của đợt đa ngôn ngữ trước: **360 test đạt, 1 skip**; GUI Windows có kiểm tra scale 100/125/150% và màu selected khi hover. Các số liệu của đợt đó được giữ riêng trong báo cáo lịch sử.
-
-Ứng dụng Windows dùng PySide6 để nhập, chỉnh sửa, dịch qua Kira AI hoặc Google Gemini API chính thức và xuất TXT hoặc DOCX. Hỗ trợ nhiều file/thư mục, nhiều ngôn ngữ đích, hàng đợi chung và xuất hàng loạt. Dữ liệu, bản dịch và snapshot tài liệu nguồn được lưu trong `%LOCALAPPDATA%\TransComic\transcomic.sqlite3`.
+Các tài liệu Stage A/B1/B2.1 là lịch sử thiết kế; trạng thái preflight/locked trong đó không mô tả chế độ BAT hiện hành.
 
 ## Gemini và dịch hàng loạt
 
@@ -131,7 +117,7 @@ Trong Hàng đợi & lịch sử, **Xóa toàn bộ** xóa các lượt/batch/at
 
 Ứng dụng hiện dùng **Internal Update**: repository GitHub cố định, HTTPS, manifest/checksum, size và SHA-256; không cần Ed25519 key hoặc SignTool. Hash từ cùng Release kiểm tra tính nhất quán, không xác minh publisher như chữ ký số. Native helper đã triển khai, chỉ cài sau xác minh và Safe Exit; cập nhật thật trên laptop 2 còn chờ kiểm thử. Signed Stable được giữ riêng, không fallback unsigned.
 
-`release_transcomic.bat` hiện chạy preflight/dry-run Internal, đề xuất version carry 0–9; build, installer, GitHub writes cần quyền riêng và activation đã review. Xem [hướng dẫn và kết quả kiểm thử](docs/internal-update-and-queue-clear.md).
+`release_transcomic.bat` hiện chạy AUTO RELEASE theo quyền người dùng chủ động mở BAT; không có automation nền. Chỉ `--check` là read-only và `--build-only` dừng trước GitHub writes. Xem [hướng dẫn và kết quả kiểm thử](docs/internal-update-and-queue-clear.md).
 
 ## Build cục bộ đầu tiên — 0.1.0 devtest
 
@@ -139,14 +125,10 @@ Kiểm tra cập nhật thủ công có bản Internal hợp lệ sẽ mở popu
 
 Sau full regression đạt, build riêng bằng `python scripts/build_local.py --output artifacts/first-local-build/<thư-mục-mới>`. Script tạo snapshot allowlist rồi chạy PyInstaller và ISCC; không chạy installer, tăng version hoặc ghi GitHub. Đây là entry point BUILD_LOCAL devtest; `release_transcomic.bat` vẫn là entry point phát hành hoàn chỉnh. Xem [artifact và báo cáo kiểm thử](docs/first-local-build.md). Cài đặt/auto-update/phát hành cần quyền riêng.
 
-## Lần phát hành Internal 0.1.1 được cấp quyền
+## Phiên bản và cập nhật
 
-`release_transcomic.bat --publish-first-internal-0.1.1` chỉ phục vụ lần phát hành `v0.1.1` đã được cấp quyền, trên repo phân phối cố định. Entry này dùng lại ReleaseCoordinator, ReleaseJournal và GitHubPublisher, yêu cầu source sạch, build input khớp, tests và compatibility proof đã review. Không cho đổi version/repo, push source, xóa hoặc ghi đè asset; kết quả remote không rõ phải reconcile. Lệnh BAT mặc định vẫn chỉ preflight; các adapter generic không được mở khóa. Hướng dẫn và hash baseline nằm ở [two-laptop-update-test.md](docs/two-laptop-update-test.md).
+v0.1.1 và v1.0.0 đã phát hành; các BAT flags cố định theo version trước đây đã được thay bằng Automatic Release V2. Giữ các báo cáo lịch sử để đối chiếu. Nguồn VERSION vẫn là `transcomic/version.py`; không tự sửa version mỗi lần phát hành.
 
-## Bản chính thức 1.0.0
+Người dùng xác nhận laptop 2 đã cài 0.1.0, nâng 0.1.0 → 0.1.1 → 1.0.0 và giữ lịch sử sau cả hai lần nâng cấp. Đây là nghiệm thu người dùng, không phải automated E2E và không bảo đảm mọi bản tương lai.
 
-Source VERSION là1.0.0. Người dùng xác nhận updater0.1.0→0.1.1 thành công và lịch sử được giữ; không suy rộng thành bảo đảm mọi nâng cấp sau này.
-
-`python scripts/build_local.py --official-1.0.0 --output artifacts/official-release-1.0.0/build` chỉ build từ source1.0.0 đã commit sạch, không cài/phát hành. Gói bàn giao nằm ở `releases/1.0.0/`; thư mục này không được commit. EXE và helper phải đi cùng; EXE chạy trực tiếp không có portable updater. Tự cập nhật native chỉ dành cho installed edition đúng AppId/thư mục cài mặc định.
-
-`release_transcomic.bat --publish-official-1.0.0` dùng lại publisher/coordinator/journal hiện có, chỉ cho v1.0.0 sau đủ13 gate. Không tự phát hành1.0.1. Cờ rút gọn và thay repo/version bị chặn. Không ký publisher cho kênh Internal; HTTPS/SHA-256 kiểm tra consistency. SRT giữ nguyên sidebar **Dịch file SRT → Chức năng đang được cập nhật**, chưa hỗ trợ dịch phụ đề.
+Gói chính thức nằm ở `releases/<version>/`, không commit vào source. Installed edition dùng updater và Installer per-user mặc định. EXE chạy trực tiếp không có portable updater; không tự mở helper. Kênh Internal dùng HTTPS/SHA256, chưa xác thực publisher bằng chữ ký. SRT giữ **Dịch file SRT → Chức năng đang được cập nhật**.

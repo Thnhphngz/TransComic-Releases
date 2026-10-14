@@ -9,7 +9,7 @@ from transcomic.version import VERSION
 from transcomic.update.metadata import UpdateError
 
 def test_official_version_and_release_scope_are_fixed(tmp_path):
-    assert VERSION=='1.0.0'
+    assert OFFICIAL_SCOPE.version=='1.0.0'  # Historical publication scope, independent of future app releases.
     c=FirstReleaseCommands(tmp_path/'gh.exe','a'*40,'b'*40,'c'*64,'notes',[],scope=OFFICIAL_SCOPE)
     assert not c.validate([c.gh,'api','repos/Thnhphngz/TransComic-Releases/releases/tags/v1.0.0','--include'])
     for tag in ('v0.1.1','v1.0.1','v2.0.0'):

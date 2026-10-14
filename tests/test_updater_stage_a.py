@@ -195,14 +195,13 @@ def test_static_build_locks_and_no_version_duplicate():
     assert 'datas=[]' not in spec and '*.svg' in spec
 
 def test_bat_from_other_directory_with_space_and_no_activation(tmp_path):
-    # Actual BAT preflight, only read-only gh commands. No EXE fake artifact.
+    # Real BAT parsing from a directory with spaces; help never starts a release.
     root=release_script.ROOT;before=(root/'transcomic/version.py').read_bytes()
     work=tmp_path/'directory with spaces';work.mkdir()
-    result=subprocess.run(['cmd','/c',str(root/'release_transcomic.bat')],cwd=work,capture_output=True,timeout=90)
-    assert result.returncode==0 and b'DRY RUN' in result.stdout
+    result=subprocess.run(['cmd','/c',str(root/'release_transcomic.bat'),'--help'],cwd=work,capture_output=True,timeout=90)
+    assert result.returncode==0 and b'--build-only' in result.stdout and b'--check' in result.stdout
     assert result.stderr==b'', 'BAT must execute without cmd parsing errors'
     assert (root/'transcomic/version.py').read_bytes()==before
-    assert json.loads((root/'artifacts/release-stage-b2-1/preflight.json').read_text(encoding='utf-8'))['production_locked']
     result=subprocess.run([__import__('sys').executable,str(root/'scripts/release_transcomic.py'),'--publish'],cwd=work,capture_output=True)
     assert result.returncode==2
 

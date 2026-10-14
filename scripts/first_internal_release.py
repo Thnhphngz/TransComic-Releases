@@ -42,9 +42,19 @@ class ReleaseScope:
 FIRST_SCOPE=ReleaseScope(VERSION,TAG,OUT,NAMES)
 OFFICIAL_SCOPE=ReleaseScope('1.0.0','v1.0.0',ROOT/'artifacts/official-release-1.0.0',
     ('TransComic-Setup-1.0.0-windows-x64.exe','transcomic-update.json','SHA256SUMS.txt'))
+_AUTOMATIC_SCOPES={}
+
+def automatic_scope(version):
+    """Per-version command boundary for the user-invoked automatic entry."""
+    from transcomic.release_version import validate_release_version
+    validate_release_version(version)
+    if version not in _AUTOMATIC_SCOPES:
+        _AUTOMATIC_SCOPES[version]=ReleaseScope(version,'v'+version,ROOT/'artifacts/automatic-release'/version,
+            ('TransComic-Setup-'+version+'-windows-x64.exe','transcomic-update.json','SHA256SUMS.txt'))
+    return _AUTOMATIC_SCOPES[version]
 
 def checked_scope(scope):
-    if scope is not FIRST_SCOPE and scope is not OFFICIAL_SCOPE:
+    if scope is not FIRST_SCOPE and scope is not OFFICIAL_SCOPE and not any(scope is s for s in _AUTOMATIC_SCOPES.values()):
         raise UpdateError('UNAUTHORIZED_RELEASE_SCOPE')
     return scope
 
@@ -164,10 +174,12 @@ def require_current_tests(scope=FIRST_SCOPE):
         raise UpdateError('BASELINE_OR_PRIVACY_GATE_FAILED')
     if sha(scope.out/'release-notes.md')!=proof['publication_notes_sha256']:
         raise UpdateError('RELEASE_NOTES_CHANGED_AFTER_REVIEW')
-    if scope is OFFICIAL_SCOPE:
+    if scope is OFFICIAL_SCOPE or any(scope is s for s in _AUTOMATIC_SCOPES.values()):
         from scripts.official_release import GATE_NAMES
         if set(proof.get('release_gates',{}))!=set(GATE_NAMES) or not all(v is True for v in proof['release_gates'].values()):
             raise UpdateError('OFFICIAL_RELEASE_GATES_NOT_ALL_PASS')
+        if scope is not OFFICIAL_SCOPE and proof.get('version')!=scope.version:
+            raise UpdateError('AUTOMATIC_VERSION_PROOF_MISMATCH')
     return proof
 
 
@@ -184,6 +196,8 @@ class FirstReleaseCommands:
             raise UpdateError('FIRST_RELEASE_GH_ONLY')
         endpoint=argv[2];tail=argv[3:];prefix='repos/'+REPO
         if endpoint==prefix+'/releases?per_page=100' and tail==['--method','GET']:
+            return False
+        if re.fullmatch(re.escape(prefix)+r'/releases\?per_page=100&page=[1-9][0-9]{0,3}',endpoint) and tail==['--method','GET']:
             return False
         if self.release_id is not None and endpoint==prefix+'/releases/'+str(self.release_id) and tail==['--method','GET']:
             return False
@@ -217,6 +231,15 @@ class FirstReleaseCommands:
             require_current_tests(self.scope)
             for asset in self.assets.values():
                 if Asset.inspect(asset.name,asset.path,ROOT)!=asset:raise UpdateError('ASSET_CHANGED_BEFORE_WRITE')
+        intent=None
+        if write and any(self.scope is s for s in _AUTOMATIC_SCOPES.values()):
+            intent=safe_path(self.scope.out/'remote-intent.json',ROOT)
+            if intent.exists() and load(intent).get('outcome')=='PENDING':
+                raise UpdateError('REMOTE_INTENT_UNRESOLVED_OUTCOME_UNKNOWN')
+            receipts=self.scope.out/'mutation-receipts.json'
+            if receipts.exists() and argv[2] in load(receipts):
+                raise UpdateError('MUTATION_RECEIPT_PRESENT_RECONCILIATION_REQUIRED')
+            self._intent(intent,{'endpoint':argv[2],'build_id':self.build_id,'outcome':'PENDING'})
         try:
             result=subprocess.run(argv,cwd=cwd,capture_output=True,shell=False,timeout=timeout,
                                   creationflags=0x08000000)
@@ -231,9 +254,40 @@ class FirstReleaseCommands:
                 _,sep,raw=raw.partition(b'\r\n\r\n')
                 if not sep:_,sep,raw=result.stdout.partition(b'\n\n')
             self.bind_release(json.loads(raw))
+        if intent is not None and result.returncode==0:
+            try:
+                value=json.loads(result.stdout)
+                if argv[2]=='repos/'+REPO+'/git/refs':
+                    if value.get('ref')!='refs/tags/'+self.scope.tag or value.get('object',{}).get('sha')!=self.distribution:raise ValueError()
+                elif argv[2].startswith('https://uploads.github.com/'):
+                    name=argv[2].rsplit('?name=',1)[-1];asset=self.assets[name]
+                    if value.get('name')!=name or value.get('size')!=asset.size or value.get('digest')!='sha256:'+asset.sha256 or value.get('state')!='uploaded' or type(value.get('id')) is not int:raise ValueError()
+                else:
+                    self.bind_release(value)
+                    if '--method' in argv and argv[argv.index('--method')+1]=='PATCH' and value.get('draft') is not False:raise ValueError()
+            except (ValueError,KeyError,TypeError,AttributeError):raise UpdateError('REMOTE_RESPONSE_OUTCOME_UNKNOWN') from None
+            self.acknowledge_intent(intent,{'endpoint':argv[2],'build_id':self.build_id,'outcome':'CONFIRMED_RESPONSE'})
         return CommandResult(result.returncode,result.stdout)
 
+    @staticmethod
+    def _intent(path,value):
+        import os
+        from uuid import uuid4
+        part=path.with_name(path.name+'.'+uuid4().hex+'.part')
+        with part.open('x',encoding='utf8') as stream:
+            json.dump(value,stream);stream.flush();os.fsync(stream.fileno())
+        part.replace(path)
+
+    @classmethod
+    def acknowledge_intent(cls,path,value):
+        receipts=path.parent/'mutation-receipts.json'
+        previous=load(receipts) if receipts.exists() else {}
+        previous[value['endpoint']]={'build_id':value['build_id'],'confirmed':True}
+        cls._intent(receipts,previous)
+        cls._intent(path,value)
+
     def bind_release(self, release):
+        if not isinstance(release,dict):raise UpdateError('REMOTE_RELEASE_JSON_INVALID')
         rid=release.get('id')
         if type(rid) is not int or rid<=0 or (self.release_id is not None and self.release_id!=rid):
             raise UpdateError('REMOTE_RELEASE_ID_CHANGED')
@@ -264,9 +318,14 @@ class FirstReleasePublisher(GitHubPublisher):
             return release
         # /releases/tags is documented for published releases; authenticated
         # list includes drafts. Never infer draft absence from tag-route 404.
-        releases=json.loads(self.api('repos/'+REPO+'/releases?per_page=100'))
-        if not isinstance(releases,list) or len(releases)>=100:
-            raise UpdateError('RELEASE_INVENTORY_UNCERTAIN')
+        releases=[]
+        for page in range(1,10001):
+            endpoint='repos/'+REPO+'/releases?per_page=100'+('&page='+str(page) if page>1 else '')
+            batch=json.loads(self.api(endpoint))
+            if not isinstance(batch,list):raise UpdateError('RELEASE_INVENTORY_UNCERTAIN')
+            releases.extend(batch)
+            if len(batch)<100:break
+        else:raise UpdateError('RELEASE_INVENTORY_UNCERTAIN')
         matches=[r for r in releases if r.get('tag_name')==self.scope.tag]
         if len(matches)>1:raise UpdateError('DUPLICATE_RELEASE_IDENTITY')
         if not matches:return None

@@ -223,7 +223,7 @@ def test_static_allowlist_plugins_resources_lock_and_b1_label():
     assert not any(x in spec for x in ('*.db','*.docx','*.pem','collect_all(','datas=[(str(root)'))
     assert 'PrivilegesRequired=lowest' in iss and 'UsePreviousAppDir=yes' in iss
     assert '[UninstallDelete]' not in iss and 'Flags: unchecked' in iss
-    assert 'STAGE B1 — PREFLIGHT ONLY' in (root/'release_transcomic.bat').read_text(encoding='utf8')
+    assert 'scripts\\automatic_release.py' in (root/'release_transcomic.bat').read_text(encoding='utf8')
     inventory=discover();assert inventory['platform']['bits']==64
     assert 'PySide6==' in (root/'requirements-release.lock').read_text()
 
