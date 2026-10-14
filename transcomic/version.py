@@ -1,7 +1,7 @@
 """Single application version source; release numbering uses explicit intents."""
 APP_NAME = 'TransComic'
 APP_ID = 'TransComic.Desktop'
-VERSION = '1.0.1'
+VERSION = '1.0.2'
 UPDATER_VERSION = VERSION
 CHANNEL = 'stable'
 PLATFORM = 'windows'
