@@ -28,6 +28,20 @@ from transcomic.release_version import bumped,validate_release_version
 from transcomic.release_adapters import safe_path
 from transcomic.update.metadata import UpdateError,SemVer
 
+class PublishedVerificationIncomplete(UpdateError):
+    """Remote publication is established; independent verification still failed."""
+
+@contextmanager
+def verification_staging(root):
+    """Owned temporary cache outside source, Python/app image and user profile."""
+    from scripts.test_runtime import TemporaryDirectory
+    from transcomic.update import service
+    with TemporaryDirectory(prefix='TransComic-release-verify-') as directory:
+        path=safe_path(directory)
+        excluded=(safe_path(root),Path(service.__file__).resolve().parents[2],Path(sys.executable).resolve().parent)
+        if any(path.is_relative_to(base) for base in excluded):raise UpdateError('VERIFICATION_STAGING_INSIDE_SOURCE_OR_PROGRAM')
+        yield path
+
 def now():return datetime.now(timezone.utc).isoformat().replace('+00:00','Z')
 def write(path,value):
     path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
@@ -118,7 +132,51 @@ class Runtime:
         publisher=FirstReleasePublisher(commands);remote=publisher.read(version)
         if remote is None:raise UpdateError('JOURNALED_RELEASE_MISSING')
         publisher.verify(version,remote,assets,published=remote['draft'] is False)
-        return {'tag':'v'+version,'build_id':record['build_id'],'assets_verified':True,'published':remote['draft'] is False,'draft':remote['draft'] is True}
+        return {'tag':'v'+version,'build_id':record['build_id'],'assets_verified':True,'published':remote['draft'] is False,'draft':remote['draft'] is True,
+            'release_id':remote['id'],'release_url':remote['html_url']}
+
+    def verify_recovery_inputs(self,record,work):
+        """Validate immutable historical evidence; never relabel it as current tests."""
+        scope=automatic_scope(record['version']);proof=package.load(work/'gates.json')
+        if proof['source_commit']!=record['source_commit'] or proof['source_dirty'] or proof.get('version')!=record['version']:
+            raise UpdateError('RECOVERY_SOURCE_IDENTITY_MISMATCH')
+        historical=source.fingerprint(source.file_map(self.root,record['source_commit']))
+        if historical!=record['input_fingerprint']:raise UpdateError('RECOVERY_SOURCE_FINGERPRINT_MISMATCH')
+        for name,digest in proof['source_hashes'].items():
+            blob=source.git(self.root,'show',record['source_commit']+':'+name)
+            # Git may store LF while the verified working snapshot used CRLF.
+            options=(blob,blob.replace(b'\r\n',b'\n'),blob.replace(b'\r\n',b'\n').replace(b'\n',b'\r\n'))
+            if digest not in {hashlib.sha256(raw).hexdigest() for raw in options}:raise UpdateError('RECOVERY_HISTORICAL_SOURCE_DRIFT: '+name)
+        for name,digest in proof['test_evidence'].items():
+            path=safe_path(scope.out/name,scope.out)
+            if package.sha(path)!=digest:raise UpdateError('RECOVERY_TEST_EVIDENCE_CHANGED')
+            suite=ET.parse(path).getroot().find('testsuite')
+            if suite is None or int(suite.get('failures')) or int(suite.get('errors')):raise UpdateError('RECOVERY_TESTS_FAILED')
+        if (set(proof.get('release_gates',{}))!=set(GATE_NAMES) or not all(v is True for v in proof['release_gates'].values())
+                or proof['baseline_compatibility'] is not True or proof['privacy_findings']):raise UpdateError('RECOVERY_GATES_FAILED')
+        folder=safe_path(self.root/'releases'/record['version'],self.root)
+        if package.sha(scope.out/'release-notes.md')!=proof['publication_notes_sha256'] or package.sha(folder/'release-notes.md')!=proof['publication_notes_sha256']:
+            raise UpdateError('RECOVERY_NOTES_CHANGED')
+        report=package.load(work/'build/build-report.json')
+        if report['head']!=record['source_commit'] or report['version']!=record['version'] or report['version_overlay']:
+            raise UpdateError('RECOVERY_BUILD_IDENTITY_MISMATCH')
+        for name,digest in report['hashes'].items():
+            if package.sha(safe_path(work/'build/source'/name,work))!=digest:raise UpdateError('RECOVERY_STAGED_SOURCE_CHANGED')
+        for item in report['artifacts']:
+            original=safe_path(item['path'],work);flat=folder/original.name
+            if package.sha(original)!=item['sha256'] or package.sha(flat)!=item['sha256'] or package.file_version(flat)!=record['version']+'.0':
+                raise UpdateError('RECOVERY_PACKAGED_ARTIFACT_CHANGED')
+        package.verify_identity((work/'build/source/installer/TransComic.iss').read_text(encoding='utf8'))
+        package.verify_archives([folder/'TransComic.exe',folder/'TransComic-UpdateHelper.exe'])
+        for label,dpr in (('100',1.0),('125',1.25),('150',1.5)):
+            report=package.load(safe_path(work/package.load(work/'gui-index.json')[label],work)/'report.json')
+            if not (report['passed'] and report['frozen'] and report['version']==record['version'] and abs(report['dpr']-dpr)<0.01
+                    and report['safe_exit_verified'] and report['safe_exit_deadline_ms']==900 and report['exit_code']==0):raise UpdateError('RECOVERY_GUI_PROOF_FAILED')
+        baseline=package.load(work/'baseline-offline.json')
+        if baseline.get('passed') is not True or baseline['installer_sha256']!=record['asset_inventory'][package.names(record['version'])[0]]['sha256']:
+            raise UpdateError('RECOVERY_BASELINE_PROOF_CHANGED')
+        return {'historical_source_commit':record['source_commit'],'current_source_commit':source.inspect(self.root)['head'],
+            'historical_gates_verified':True,'original_inputs_unchanged':True}
 
     def baseline(self,previous):
         folder=safe_path(self.root/'releases'/previous,self.root)
@@ -246,13 +304,16 @@ class Runtime:
                     or latest.get('draft') is not False or latest.get('prerelease') is not False or tag['draft'] or tag['prerelease']):raise UpdateError('LATEST_NOT_NEW_RELEASE')
             expected={a['name']:a for a in tag['assets']}
             if set(expected)!=set(package.names(record['version'])):raise UpdateError('PUBLIC_ASSET_INVENTORY_MISMATCH')
-            service=UpdateService(directory=work/'anonymous',client=client)
-            raw={}
-            for name,limit in (('transcomic-update.json',128*1024),('SHA256SUMS.txt',4096)):
-                raw[name]=b''.join(service._stream(client,expected[name]['browser_download_url'],threading.Event(),limit))
-                local=self.root/'releases'/record['version']/name
-                if raw[name]!=local.read_bytes() or len(raw[name])!=expected[name]['size']:raise UpdateError('ANONYMOUS_METADATA_MISMATCH')
-            item=candidate(tag,json.loads(raw['transcomic-update.json']));verify_checksums(raw['SHA256SUMS.txt'],item,raw['transcomic-update.json'])
+            with verification_staging(self.root) as staging:
+                service=UpdateService(directory=staging/'Updates',client=client)
+                raw={}
+                for name,limit in (('transcomic-update.json',128*1024),('SHA256SUMS.txt',4096)):
+                    raw[name]=b''.join(service._stream(client,expected[name]['browser_download_url'],threading.Event(),limit))
+                    local=self.root/'releases'/record['version']/name
+                    if raw[name]!=local.read_bytes() or len(raw[name])!=expected[name]['size']:raise UpdateError('ANONYMOUS_METADATA_MISMATCH')
+                item=candidate(tag,json.loads(raw['transcomic-update.json']));verify_checksums(raw['SHA256SUMS.txt'],item,raw['transcomic-update.json'])
+                write(work/'public-verification-staging.json',{'directory':str(staging),'outside_source':not staging.is_relative_to(self.root),
+                    'outside_program':not staging.is_relative_to(Path(sys.executable).resolve().parent),'owns_temporary_directory':True})
             write(work/'anonymous-release.json',tag)
         self.probe(record,work,self.baseline(record['previous_published_version']),True)
 
@@ -263,6 +324,44 @@ class AutomaticSystem:
     def save(self,record):
         with self.journal.exclusive():self.journal.save(record)
         return record
+
+    def recover_published(self,record,remote):
+        """GET-only remote recovery; works after reviewed verifier source fixes."""
+        matches=[r for r in remote['releases'] if r.get('tag_name')=='v'+record['version']]
+        if (len(matches)!=1 or matches[0].get('draft') is not False or matches[0].get('prerelease') is not False
+                or remote['latest'].get('tag_name')!='v'+record['version']):
+            raise UpdateError('PUBLISHED_RECOVERY_REMOTE_IDENTITY_REQUIRED')
+        if not record.get('automatic_v2') or not record.get('asset_inventory') or not record.get('prepared'):
+            raise UpdateError('PUBLISHED_RECOVERY_JOURNAL_EVIDENCE_REQUIRED')
+        original_work=safe_path(self.root/record['work'],self.root)
+        work=safe_path(self.root/'artifacts/automatic-release'/record['version']/('postverify-'+uuid4().hex[:8]),self.root);work.mkdir(parents=True)
+        print('RECOVER PUBLISHED v'+record['version']+' — GITHUB GET ONLY; NO BUILD, TAG, UPLOAD OR PUBLISH',flush=True)
+        try:
+            inputs=self.runtime.verify_recovery_inputs(record,original_work)
+            evidence=self.runtime.verify_previous(record)
+            if evidence.get('published') is not True:raise UpdateError('RECOVERY_RELEASE_NOT_PUBLISHED')
+            write(work/'authenticated-evidence.json',{'remote':evidence,'inputs':inputs})
+            # Reconcile through the journal API only after remote bytes validate.
+            with self.journal.exclusive():
+                current=self.journal.load()
+                if current!=record:raise UpdateError('JOURNAL_CHANGED_DURING_RECOVERY')
+                record=self.journal.reconcile(record,evidence)
+                record['workflow_status']='PUBLISHED — POST-VERIFICATION INCOMPLETE';self.journal.save(record)
+            self.runtime.verify_public(record,work)
+            record.setdefault('post_verification_history',[]).append({'verified_at':now(),'evidence':str(work.relative_to(self.root)),
+                'previous_failure_code':record.get('failure_code'),'read_only_github':True})
+            record.update(post_publication_verified=True,released_fingerprint=record['input_fingerprint'],failure_code=None,
+                workflow_status='PUBLISHED AND VERIFIED',post_verification_work=str(work.relative_to(self.root)))
+            self.save(record);write(work/'acceptance.json',record)
+            print('RELEASE PUBLISHED AND VERIFIED\nhttps://github.com/'+REPO+'/releases/tag/v'+record['version']+'\nRecovered existing release; no new version reserved.')
+            return record
+        except Exception as exc:
+            # This path is entered only for an independently observed public release.
+            current=self.journal.load()
+            if current and current['version']==record['version']:record=current
+            record.update(post_publication_verified=False,workflow_status='PUBLISHED — POST-VERIFICATION INCOMPLETE',failure_code=type(exc).__name__+': '+str(exc)[:240])
+            self.save(record);write(work/'failure.json',{'error':record['failure_code'],'release_url':'https://github.com/'+REPO+'/releases/tag/v'+record['version']})
+            raise PublishedVerificationIncomplete('PUBLISHED — POST-VERIFICATION INCOMPLETE: v'+record['version']+'; '+str(exc)) from exc
 
     def plan(self):
         review=source.inspect(self.root);remote=self.runtime.inventory();record=self.journal.load()
@@ -287,11 +386,16 @@ class AutomaticSystem:
         if any(SemVer.parse(t,tag=True)>SemVer.parse(version) for t in remote['tags']):raise UpdateError('REMOTE_NEWER_TAG_REQUIRES_RECONCILIATION')
         return {'review':review,'remote':remote,'record':record,'current':current,'version':version,'pending':pending,'changed':changed}
 
-    def run(self,mode):
+    def run(self,mode,expected_version=None):
         if mode=='check':
-            plan=self.plan();self.describe(plan,mode);return plan
+            plan=self.plan();self.require_expected_version(plan,expected_version);self.describe(plan,mode);return plan
         with process_lock(self.root):
-            plan=self.plan();self.describe(plan,mode)
+            plan=self.plan()
+            self.require_expected_version(dict(plan,version=plan['record']['version']) if mode=='recover-published' else plan,expected_version)
+            self.describe(plan,mode)
+            published=any(r.get('tag_name')=='v'+plan['record']['version'] and r.get('draft') is False and r.get('prerelease') is False for r in plan['remote']['releases'])
+            if mode=='recover-published' or (mode=='auto' and plan['pending'] and published):
+                return self.recover_published(plan['record'],plan['remote'])
             if not plan['changed']:
                 return plan
             record=plan['record'];version=plan['version']
@@ -344,9 +448,10 @@ class AutomaticSystem:
                     print('LOCAL BUILD VERIFIED — NO GITHUB WRITES\n'+str(self.root/'releases'/version));return record
                 record['remote_started']=True;self.save(record)
                 record=self.runtime.publish(record,work,self.journal)
+                record['workflow_status']='PUBLISHED — POST-VERIFICATION INCOMPLETE';self.save(record)
                 # PUBLISHED is not final success until independent latest/download verification.
                 self.runtime.verify_public(record,work)
-                record.update(post_publication_verified=True,released_fingerprint=record['input_fingerprint'],failure_code=None)
+                record.update(post_publication_verified=True,released_fingerprint=record['input_fingerprint'],failure_code=None,workflow_status='PUBLISHED AND VERIFIED')
                 self.save(record);write(work/'acceptance.json',record)
                 print('RELEASE PUBLISHED AND VERIFIED\nhttps://github.com/'+REPO+'/releases/tag/v'+version+'\n'+str(self.root/'releases'/version))
                 return record
@@ -356,18 +461,28 @@ class AutomaticSystem:
                 if latest and latest['version']==version:record=latest
                 record['failure_code']=type(exc).__name__+': '+str(exc)[:240]
                 if record['state'] not in (ReleaseState.UNKNOWN_REMOTE_OUTCOME,ReleaseState.PUBLISHED):record['state']=ReleaseState.FAILED
+                if record['state']==ReleaseState.PUBLISHED:
+                    record.update(post_publication_verified=False,workflow_status='PUBLISHED — POST-VERIFICATION INCOMPLETE')
                 self.save(record)
+                if record['state']==ReleaseState.PUBLISHED:
+                    raise PublishedVerificationIncomplete('PUBLISHED — POST-VERIFICATION INCOMPLETE: v'+version+'; '+record['failure_code']+'\nRecovery: chạy BAT --recover-published; không upload/publish lại release đã tồn tại.') from exc
                 print('RELEASE STOPPED — '+record['failure_code']+'\nRecovery: giữ nguyên journal/packages; chạy --check, xem artifacts/automatic-release/'+version+'. Không xóa tag hoặc journal.')
                 raise
 
+    @staticmethod
+    def require_expected_version(plan,expected):
+        if expected is not None and plan['version']!=expected:raise UpdateError('EXPECTED_VERSION_MISMATCH: expected '+expected+', planned '+plan['version'])
+
     def describe(self,plan,mode):
+        recovering=mode=='recover-published' or (mode=='auto' and plan['pending'] and any(
+            r.get('tag_name')=='v'+plan['record']['version'] and r.get('draft') is False for r in plan['remote']['releases']))
         print(json.dumps({'mode':'AUTO RELEASE' if mode=='auto' else mode.upper(),'repository':str(self.root),'github_destination':REPO,
             'current_version':plan['current'],'proposed_version':plan['version'],'source_commit':plan['review']['head'],
             'source_changes':plan['review']['changes'],'resume_reserved_version':plan['pending'],
             'journal_state':plan['record']['state'],'last_completed':plan['record']['last_completed'],
-            'release_readiness':'CHECKS_ONLY_TESTS_BUILD_PENDING' if mode=='check' else 'GATED_PIPELINE',
-            'remote_operations':['create fixed-repo tag/draft','upload canonical installer/manifest/checksums','verify','publish','verify anonymous latest and baseline'] if mode=='auto' and plan['changed'] else [],
-            'historical_acceptance':'USER CONFIRMED: install 0.1.0; native 0.1.0 → 0.1.1 → 1.0.0; history preserved. Not automated E2E evidence.',
+            'release_readiness':plan['record'].get('workflow_status','CHECKS_ONLY_TESTS_BUILD_PENDING' if mode=='check' else 'GATED_PIPELINE'),
+            'remote_operations':['GET existing release/tag/assets/latest; verify baseline; no remote writes'] if recovering else ['create fixed-repo tag/draft','upload canonical installer/manifest/checksums','verify','publish','verify anonymous latest and baseline'] if mode=='auto' and plan['changed'] else [],
+            'historical_acceptance':'USER CONFIRMED: install 0.1.0; native 0.1.0 → 0.1.1 → 1.0.0 → 1.0.1; history preserved. Not automated E2E evidence.',
             'new_version_native_update':'PENDING USER TEST','translation_api_calls':0},ensure_ascii=False,indent=2),flush=True)
         if not plan['changed']:print('NO RELEASEABLE CHANGES')
 
@@ -376,8 +491,19 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description='TransComic one-click Internal release. Default: test, build, publish and verify.',allow_abbrev=False)
     modes=parser.add_mutually_exclusive_group();modes.add_argument('--check',action='store_true',help='Read-only checks; no source/version/journal changes')
     modes.add_argument('--build-only',action='store_true',help='Reserve version, commit, test/build/package; no GitHub writes')
+    modes.add_argument('--recover-published',action='store_true',help='Verify and complete the existing published journal version using GitHub GET only; never bump/build/publish')
+    parser.add_argument('--expected-version',help='Optional safety bound: stop before any mutation if the planned version differs')
     args=parser.parse_args(argv)
-    try:AutomaticSystem(Runtime()).run('check' if args.check else 'build-only' if args.build_only else 'auto');return 0
+    if args.expected_version:
+        try:validate_release_version(args.expected_version)
+        except UpdateError:parser.error('Invalid expected version')
+    try:
+        system=AutomaticSystem(Runtime());mode='check' if args.check else 'build-only' if args.build_only else 'recover-published' if args.recover_published else 'auto'
+        if args.expected_version:system.run(mode,expected_version=args.expected_version)
+        else:system.run(mode)
+        return 0
+    except PublishedVerificationIncomplete as exc:
+        print(str(exc));return 2
     except (UpdateError,OSError,ValueError,subprocess.SubprocessError) as exc:
         print('RELEASE BLOCKED: '+str(exc));return 2
 

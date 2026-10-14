@@ -17,6 +17,7 @@ Chạy BAT mặc định là quyền bắt đầu phát hành thật vào `Thnhp
 | `release_transcomic.bat` | Commit các file đã phân loại, test/build/package, publish và verify |
 | `release_transcomic.bat --check` | Chỉ đọc source, journal, môi trường và GitHub; không commit/bump/reserve/build/publish |
 | `release_transcomic.bat --build-only` | Cùng test/build/package/verify; giữ version reservation để lần sau publish đúng bản, không GitHub writes |
+| `release_transcomic.bat --recover-published` | Đối chiếu release đã public và hoàn tất hậu kiểm bằng GET; không build/bump/tag/upload/publish lại |
 | `release_transcomic.bat --help` | Hướng dẫn, không gọi GitHub |
 
 Không nhận version/repository override hay flags viết tắt. Máy dev cần Python/dependency đã cài, Git có author identity, GitHub CLI đăng nhập đúng tài khoản có quyền repo và Inno Setup. Không tự cài tool hay yêu cầu chạy từng tool riêng lẻ.
@@ -43,6 +44,12 @@ Trước mỗi GitHub write lưu intent bền vững. Timeout/UNKNOWN phải đ�
 
 Sau authenticated publish phải verify anonymous Latest/tag/metadata/checksums và baseline tải Installer thật. Lỗi bước này: không in success, không bắt đầu version kế tiếp. Chạy lại cùng version và đối chiếu remote. Không ghi đè release đã publish.
 
+Hậu kiểm dùng staging tạm riêng ngoài source/program directory. Không đặt thư mục Updates trong `artifacts/` và không nới guard của updater. Nếu GitHub đã publish nhưng hậu kiểm lỗi, BAT trả exit2 và báo **PUBLISHED — POST-VERIFICATION INCOMPLETE**, journal giữ `state=PUBLISHED`, `post_publication_verified=false`; không được hiểu là release chưa tồn tại.
+
+`--recover-published` xác minh source commit/gates/build snapshot cũ, hash/version payload, GUI/SafeExit/baseline và bytes trên GitHub trước khi đánh dấu verified. Có thể sửa verifier trước recovery; bằng chứng cũ vẫn gắn với commit cũ. Evidence recovery nằm ở `artifacts/automatic-release/<version>/postverify-*/`, không ghi đè logs lượt build/publish. BAT mặc định gặp release pending đã public cũng chọn recovery và dừng sau khi hoàn tất, không tự bắt đầu version tiếp trong cùng lượt.
+
+Đợt được cấp quyền riêng cho một version có thể dùng `--expected-version 1.0.2`: BAT dừng trước mọi mutation nếu version tính ra khác; đây là giới hạn an toàn, không ép chọn hoặc bỏ qua quy tắc tăng version.
+
 ## Khi dừng hoặc cần xem log
 
 Chạy `release_transcomic.bat --check` để xem blocker. Logs/XML/GUI/provenance/command-events: `artifacts/automatic-release/<version>/attempt-*/`; journal: `.release-state/journal.json`; network intent: `artifacts/automatic-release/<version>/remote-intent.json`. Không chia sẻ API keys hay user database. Không xóa reservation để vượt gate.
@@ -52,5 +59,7 @@ Thiếu baseline package Latest → dừng; giữ `releases/<Latest>/`. Kiểm t
 ## Nghiệm thu native
 
 USER CONFIRMED: laptop 2 cài0.1.0, nâng0.1.0→0.1.1→1.0.0, history giữ sau cả hai lần. Đây không phải automated E2E. Với mỗi bản mới: cập nhật trong installed app, kiểm tra version/history/settings/tài liệu; không gỡ cũ/chạy Installer tay thay updater test.
+
+Người dùng tiếp tục xác nhận native1.0.0→1.0.1 thành công và lịch sử/bản dịch còn nguyên. Đây cũng là nghiệm thu do người dùng báo, không phải automated E2E; native1.0.1→1.0.2 còn chờ kiểm tra riêng.
 
 Không tự xóa releases cũ, two-laptop artifacts, TestArchive, SecureBackup hoặc dữ liệu người dùng. Công cụ không có cleanup step mặc định.

@@ -64,6 +64,7 @@ def assemble(root,work,version,record):
     notes=(f'# TransComic {version}\n\nBản Windows x64 — kênh Internal (HTTPS + SHA256, không phải chữ ký publisher).\n\n'
         'TXT/DOCX, dịch hàng loạt, Kira/Gemini, lịch sử, hàng đợi và Liquid Glass V3 được kiểm thử offline trước build.\n'
         'SRT giữ nguyên mục sidebar và thông báo “Chức năng đang được cập nhật”.\n\n'
+        'Hậu kiểm release dùng staging riêng ngoài source/program; journal phân biệt trạng thái đã publish và đã xác minh, hỗ trợ khôi phục release public bằng GET.\n\n'
         f'Source commit: `{record["source_commit"]}`.\n\n'
         f'Người đang dùng bản installed {record["previous_published_version"]}: Kiểm tra cập nhật trong ứng dụng → tải → xác nhận cài sau SafeExit. '
         'Không gỡ bản cũ hoặc chạy Installer tay để thay thế kiểm thử updater. Người dùng mới có thể dùng Installer per-user mặc định. '

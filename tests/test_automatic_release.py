@@ -18,10 +18,13 @@ class FakeRuntime(auto.Runtime):
         super().__init__(root);self.latest=version;self.events=[];self.fail=None;self.ops=FakeReleaseOperations();self.ops.policy='internal';self.public_ok=True
     def inventory(self):
         return {'latest':{'tag_name':'v'+self.latest},'tags':['v'+self.latest],
-            'releases':[{'tag_name':'v'+self.latest}],'distribution_commit':'b'*40}
+            'releases':[{'tag_name':'v'+self.latest,'draft':False,'prerelease':False}],'distribution_commit':'b'*40}
     def verify_previous(self,r):
         self.events.append('verify_previous')
         return {'tag':'v'+r['version'],'build_id':r['build_id'],'assets_verified':True,'published':True,'draft':False}
+    def verify_recovery_inputs(self,r,work):
+        self.events.append('verify_recovery_inputs')
+        return {'historical_source_commit':r['source_commit'],'original_inputs_unchanged':True}
     def prepare(self,r,work):
         for phase in ('test','build','package','GUI','baseline','privacy'):
             self.events.append(phase)
@@ -32,6 +35,7 @@ class FakeRuntime(auto.Runtime):
         raw=canonical(manifest(r['version'],name,len(data),hashlib.sha256(data).hexdigest(),r['created_at']))
         (folder/'transcomic-update.json').write_bytes(raw)
         (folder/'SHA256SUMS.txt').write_bytes((hashlib.sha256(data).hexdigest()+'  '+name+'\n'+hashlib.sha256(raw).hexdigest()+'  transcomic-update.json\n').encode('ascii'))
+        r['asset_inventory']={n:{'path':str(folder/n),'size':(folder/n).stat().st_size,'sha256':package.sha(folder/n)} for n in package.names(r['version'])}
         (work/'full.xml').write_text('<testsuites><testsuite tests="1" failures="0" errors="0"/></testsuites>')
     def verify_local(self,r,work):
         self.events.append('verify_local')
