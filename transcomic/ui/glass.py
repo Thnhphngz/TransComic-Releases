@@ -1,7 +1,7 @@
 """Native glass surfaces and a finite day/night animation (no browser)."""
 from PySide6.QtCore import Qt, Property, QPropertyAnimation, QEasingCurve, QRectF, QEvent, QObject, QPointF, QRect
-from PySide6.QtGui import QColor, QPainter, QLinearGradient, QPen, QPalette, QIcon
-from PySide6.QtWidgets import QPushButton, QStyle, QStyleOptionButton, QApplication, QComboBox as QtComboBox, QDialogButtonBox
+from PySide6.QtGui import QColor, QPainter, QLinearGradient, QPen, QPalette, QIcon, QPixmap, QBitmap, QRegion
+from PySide6.QtWidgets import QPushButton, QStyle, QStyleOptionButton, QApplication, QComboBox as QtComboBox, QDialogButtonBox, QSizePolicy
 from .theme import colors, DARK, LIGHT
 
 
@@ -14,6 +14,21 @@ def reduced_motion():
     except (AttributeError, OSError):
         pass
     return False
+
+
+def centered_icon(icon, size, dpr):
+    """Center visible ink, including SVG assets with asymmetric transparent margins."""
+    source = icon.pixmap(size*dpr)
+    bounds = QRegion(QBitmap.fromImage(source.toImage().createAlphaMask())).boundingRect()
+    if bounds.isEmpty(): return icon
+    # Copy in physical pixels, then restore DPR for Qt's logical painting.
+    source.setDevicePixelRatio(1)
+    result = QPixmap(source.size()); result.fill(Qt.transparent)
+    painter = QPainter(result)
+    painter.drawPixmap((result.width()-bounds.width())//2, (result.height()-bounds.height())//2,
+                       source.copy(bounds))
+    painter.end(); result.setDevicePixelRatio(dpr)
+    return QIcon(result)
 
 
 class GlassButton(QPushButton):
@@ -53,6 +68,10 @@ class GlassButton(QPushButton):
         elif danger:
             field=QColor('#58352D' if dark else '#F0D9CF');edge=QColor('#926250' if dark else '#C59683')
             text=QColor('#FFE4D8' if dark else '#853B2B')
+        elif self.property('glassRole') == 'warning':
+            text=QColor('#FF9999' if dark else '#B42323'); edge=QColor('#926250' if dark else '#C59683')
+        elif self.property('glassRole') == 'success':
+            text=QColor('#71D7AB' if dark else '#16784C')
         if not enabled:field=QColor(c['field']);text=QColor(c['muted']);edge=QColor(c['border'])
         light=getattr(self,'_light',float(self.underMouse()))
         if ghost:
@@ -97,16 +116,42 @@ class GlassButton(QPushButton):
         label_rect=option.rect
         if not option.icon.isNull():
             icon_size=option.iconSize
-            width=self.fontMetrics().size(mnemonic,self.text()).width()
-            left=max(label_rect.left(),int(label_rect.center().x()-(width+icon_size.width()+6)/2))
-            icon_rect=QRect(left,label_rect.center().y()-icon_size.height()//2,icon_size.width(),icon_size.height())
+            icon_rect=QRect(0,0,icon_size.width(),icon_size.height())
+            if not self.text():
+                icon_rect.moveCenter(label_rect.center())
+            else:
+                width=self.fontMetrics().size(mnemonic,self.text()).width()
+                left=max(label_rect.left(),int(label_rect.center().x()-(width+icon_size.width()+6)/2))
+                icon_rect.moveTo(left,label_rect.center().y()-icon_size.height()//2)
             option.icon.paint(p,icon_rect,Qt.AlignCenter,QIcon.Normal if enabled else QIcon.Disabled)
-            label_rect=QRect(icon_rect.right()+7,label_rect.top(),max(0,label_rect.right()-icon_rect.right()-6),label_rect.height())
-            p.drawText(label_rect,Qt.AlignVCenter|Qt.AlignLeft|mnemonic,self.text())
-        else:p.drawText(label_rect,Qt.AlignCenter|mnemonic,self.text())
+            if self.text():
+                label_rect=QRect(icon_rect.right()+7,label_rect.top(),max(0,label_rect.right()-icon_rect.right()-6),label_rect.height())
+                p.drawText(label_rect,Qt.AlignVCenter|Qt.AlignLeft|mnemonic,self.text())
+        else:
+            label = self.fontMetrics().elidedText(self.text(), Qt.ElideRight, label_rect.width()) if self.property('elideText') else self.text()
+            p.drawText(label_rect,Qt.AlignCenter|mnemonic,label)
         if self.hasFocus() and self.property('keyboardFocus'):
             p.setPen(QPen(QColor(c['accent']),1.5));p.drawLine(rect.bottomLeft()+QPointF(radius,0),rect.bottomRight()+QPointF(-radius,0))
         p.end()
+
+
+class CompactStatusButton(GlassButton):
+    """One-line badge: elide painting only, preserving full text and click bounds."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setProperty('elideText', True)
+        self.setMinimumWidth(0)
+        self.setFixedHeight(24)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+
+    def setToolTip(self, text):
+        self._status_hint = text
+        super().setToolTip(self.text()+'\n'+text)
+
+    def setText(self, text):
+        super().setText(text)
+        self.setAccessibleName(text)
+        super().setToolTip(text+'\n'+getattr(self, '_status_hint', ''))
 
 
 class PrimaryGlassButton(GlassButton):

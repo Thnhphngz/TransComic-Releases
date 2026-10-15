@@ -117,6 +117,11 @@ def write_exports(store, plan, *, existing='cancel', allow_incomplete=False):
     for item in plan:
         doc, rows, target = item['document'], item['rows'], item['target']
         try:
+            from .line_structure import validate_snapshot
+            structure = validate_snapshot(doc, rows)
+            if structure.structural:
+                results.append({'document_id':doc['id'],'state':'blocked_structure','faults':list(structure.structural),'path':str(target)})
+                continue
             from .language_validator import export_faults
             faults = export_faults(doc, rows)
             if faults:

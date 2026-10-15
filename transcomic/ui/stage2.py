@@ -4,7 +4,7 @@ import json
 import threading
 import time
 from pathlib import Path
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QSignalBlocker
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
     QMenu, QFileDialog, QMessageBox, QDialog, QListWidget, QDialogButtonBox, QLineEdit, QFormLayout,
     QSpinBox, QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView, QScrollArea, QInputDialog)
@@ -175,6 +175,11 @@ class Stage2Mixin:
                 self.last_export = Path(current['path'])
             self.notice.setText(f"Đã xuất {len(success)}/{len(result)} workspace; {sum(r['state']=='error' for r in result)} lỗi, {sum(r['state']=='cancelled' for r in result)} bỏ qua")
             self.refresh()
+            structural=[r for r in result if r['state']=='blocked_structure']
+            if structural:
+                QMessageBox.warning(self,'Không thể xuất: phát hiện lỗi cấu trúc dòng.',
+                    '\n'.join(Path(self.store.document(r['document_id'])['path']).name+' · '+str(len(r['faults']))+' vấn đề' for r in structural))
+                if any(r['document_id']==self.doc_id for r in structural):self.line_check.open_list()
             blocked=[r for r in result if r['state']=='blocked_language']
             if blocked:
                 from ..language_validator import display_reason
@@ -238,6 +243,7 @@ class Stage2Mixin:
         if self.provider_id() == 'gemini': self.concurrency.setMaximum(value)
 
     def refresh_gemini_keys(self):
+        blocker = QSignalBlocker(self.gemini_keys_list)
         selected = self.gemini_keys_list.currentItem()
         selected_id = selected.data(Qt.UserRole) if selected else None
         self.gemini_keys_list.clear()
@@ -247,21 +253,33 @@ class Stage2Mixin:
             if key['id'] == selected_id: self.gemini_keys_list.setCurrentRow(i)
 
     def add_gemini_keys(self):
+        if getattr(self, '_editing_gemini_keys', False): return
+        self._editing_gemini_keys = True
         try:
             added, duplicates = self.store.add_gemini_keys(self.gemini_key_input.text(), self.gemini_project.text())
             self.gemini_verified.setChecked(False)
             self.gemini_key_input.clear(); self.refresh_gemini_keys()
             self.gemini_offline.setText(f'Đã mã hóa {added} key · bỏ qua {duplicates} key trùng · chưa gọi API')
         except Exception as exc: QMessageBox.warning(self, 'Không lưu được key', type(exc).__name__)
+        finally: self._editing_gemini_keys = False
 
     def edit_gemini_key(self, **options):
+        if getattr(self, '_editing_gemini_keys', False): return
         item = self.gemini_keys_list.currentItem()
         if not item: return
-        if options.get('delete') and QMessageBox.question(self, 'Xóa Gemini key', 'Xóa key đã chọn khỏi TransComic?', QMessageBox.Yes|QMessageBox.No, QMessageBox.No) != QMessageBox.Yes: return
+        key_id = item.data(Qt.UserRole)
+        del item  # Never retain a QListWidgetItem across the modal event loop.
+        if not key_id: return
+        self._editing_gemini_keys = True
         try:
-            self.store.change_gemini_key(item.data(Qt.UserRole), **options); self.refresh_gemini_keys()
+            if options.get('delete') and QMessageBox.question(self, 'Xóa Gemini key', 'Xóa key đã chọn khỏi TransComic?', QMessageBox.Yes|QMessageBox.No, QMessageBox.No) != QMessageBox.Yes: return
+            if self._closed: return
+            self.store.change_gemini_key(key_id, **options)
             self.gemini_verified.setChecked(False)
         except ValueError as exc: QMessageBox.information(self, 'Không thay đổi được key', str(exc))
+        finally:
+            if not self._closed: self.refresh_gemini_keys()
+            self._editing_gemini_keys = False
 
     def refresh_gemini_models(self):
         if self.metadata_busy: return

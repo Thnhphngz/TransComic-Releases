@@ -81,6 +81,8 @@ def render_export(lines: list[dict]) -> tuple[bytes, int]:
     missing = 0
     pieces = []
     for line in lines:
+        if any('\r' in (line.get(field) or '') or '\n' in (line.get(field) or '') for field in ('source','translation')):
+            raise ValueError('A TXT unit cannot contain embedded physical line breaks')
         src = line["source"]
         if not translatable(src):
             value = src

@@ -1265,6 +1265,8 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             timer=getattr(self,name,None)
             if timer:timer.stop()
         if hasattr(self,'update_panel'):self.update_panel.shutdown()
+        if hasattr(self,'period_warning'):self.period_warning.shutdown()
+        if hasattr(self,'line_check'):self.line_check.shutdown()
         self.store.close()
         self._closed = True
         if update_exit:

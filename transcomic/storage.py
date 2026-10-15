@@ -204,7 +204,7 @@ class Store:
     def units(self, doc_id: str) -> list[dict]:
         with self.lock:
             return [dict(row) for row in self.db.execute(
-                "SELECT l.*,u.locator FROM lines l JOIN document_units u ON u.line_id=l.id WHERE l.document_id=? ORDER BY l.ordinal", (doc_id,))]
+                "SELECT l.*,u.locator FROM lines l LEFT JOIN document_units u ON u.line_id=l.id AND u.document_id=l.document_id WHERE l.document_id=? ORDER BY l.ordinal", (doc_id,))]
 
     def line(self, line_id: str) -> dict:
         with self.lock:
@@ -359,9 +359,18 @@ class Store:
             results = results or {}
             diagnostics = diagnostics if diagnostics is not None else {}
             rejected_language = {}
-            if any(key not in expected for key in results):
-                results = {}
-                error = "Response contains an unexpected line ID"
+            if results or (error is None and not unknown):
+                from .providers import parse_line_response
+                checked = parse_line_response(json.dumps({'lines':[{'id':k,'text':v} for k,v in results.items()]}), expected)
+                results = checked.values
+                if checked.error:
+                    error = error or checked.error
+                    diagnostics.setdefault('structure_errors', checked.diagnostics['structure_errors'])
+            job = self.job(self.batch(batch_id)['job_id'])
+            if len(expected) != len(payload) or any(not self.db.execute('SELECT 1 FROM lines WHERE id=? AND document_id=?',(item['id'],job['document_id'])).fetchone() for item in payload):
+                diagnostics['structure_errors'] = [{'code':'payload_mapping','line_ids':[]}]
+                self.db.execute("UPDATE batches SET state='error',error='Invalid payload mapping',diagnostics=? WHERE id=?",(json.dumps(diagnostics),batch_id))
+                return []
             if expected_attempt_id:
                 from .postprocess import normalize, VERSION
                 processed_results = {}
@@ -374,7 +383,6 @@ class Store:
                     else: error = 'Normalization left no ordinary text; review required'
                 results = processed_results
             from .language_validator import validator, WRONG_LANGUAGE_CONFIRMED
-            job = self.job(self.batch(batch_id)['job_id'])
             validation_started = time.perf_counter()
             for item in payload:
                 if item['id'] not in results: continue
@@ -730,7 +738,24 @@ class Store:
     def export_snapshot(self, document_ids):
         """One short read transaction, detached snapshots rendered outside the lock."""
         with self.transaction():
-            return [(self.document(d), self.units(d) if self.document(d)['format'] == 'docx' else self.lines(d)) for d in document_ids]
+            snapshots = []
+            for doc_id in document_ids:
+                doc = self.document(doc_id)
+                if doc['source_instance'] != doc_id:
+                    inherited = {}
+                    for r in self.db.execute(
+                        "SELECT l.ordinal,e.old_value,e.new_value FROM lines l JOIN documents d ON d.id=l.document_id JOIN line_edits e ON e.line_id=l.id WHERE d.id=? AND d.digest=? AND e.field='source'",
+                        (doc['source_instance'],doc['digest'])):
+                        inherited.setdefault(r['ordinal'],set()).update((r['old_value'],r['new_value']))
+                    doc['_structure_inherited_sources'] = inherited
+                doc['_structure_batches'] = []
+                for row in self.db.execute("SELECT b.payload,b.error,b.diagnostics FROM batches b JOIN jobs j ON j.id=b.job_id WHERE j.document_id=? AND b.state IN ('done','partial','error','unknown') AND (b.error IS NOT NULL OR b.diagnostics LIKE '%structure_errors%')", (doc_id,)):
+                    doc['_structure_batches'].append({'payload': [{k:p[k] for k in ('id','source_revision','translation_revision')} for p in json.loads(row['payload'])],
+                        'error':row['error'], 'diagnostics':json.loads(row['diagnostics']) if row['diagnostics'] else {}})
+                if doc['format'] == 'docx':
+                    doc['_structure_units'] = [dict(r) for r in self.db.execute('SELECT document_id,line_id,locator FROM document_units WHERE document_id=?',(doc_id,))]
+                snapshots.append((doc, self.units(doc_id) if doc['format']=='docx' else self.lines(doc_id)))
+            return snapshots
 
     def reserve_gemini_quota(self, scope, cost, rpm, tpm, rpd, now=None):
         """Durable conservative rolling 24h budget, including uncertain requests."""

@@ -90,9 +90,25 @@ class WorkspaceV2Mixin:
         folder = QPushButton('Nhập thư mục'); folder.clicked.connect(self.choose_folder)
         self.file_action_buttons = [self.document_expand, self.import_button, folder, self.export_button, self.export_many_button, self.folder_button]
         self.file_action_labels = [b.text() for b in self.file_action_buttons]
+        from .period_warning import PeriodWarning
+        self.validation_badges = QWidget()
+        self.validation_badges.setObjectName('toolbarControls')
+        self.validation_badges.setMinimumWidth(100)
+        badge_layout = QHBoxLayout(self.validation_badges)
+        badge_layout.setContentsMargins(0, 0, 0, 0); badge_layout.setSpacing(4)
+        from .line_check import LineCheck
+        self.line_check = LineCheck(self)
+        badge_layout.addWidget(self.line_check, 1)
+        self.period_warning = PeriodWarning(self)
+        badge_layout.addWidget(self.period_warning, 1)
+        header.addWidget(self.validation_badges, 1)
         for b in self.file_action_buttons: b.setToolTip(b.text())
         footer = self.editor_page.layout().itemAt(self.editor_page.layout().count()-1).layout()
         footer.removeWidget(self.folder_button)
+        self.model.dataChanged.connect(self.period_warning.schedule)
+        self.model.modelReset.connect(self.period_warning.schedule)
+        self.model.dataChanged.connect(self.line_check.schedule)
+        self.model.modelReset.connect(self.line_check.schedule)
         self.folder_button.setEnabled(False); self.notice.hide()
         # Technical configuration lives in Settings, outside the everyday toolbar.
         self.setup_grid.removeWidget(self.advanced_panel); self.advanced_panel.hide()
@@ -195,6 +211,17 @@ class WorkspaceV2Mixin:
             control.ensurePolished()
             control.setMinimumWidth(0)
             control.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        for badge in (self.line_check, self.period_warning):
+            badge.setStyleSheet('QPushButton { font-size: 12px; padding: 2px 6px; }')
+            badge.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        # Match the original single action row even when the document panel is wide.
+        action_height = max(b.sizeHint().height() for b in self.file_action_buttons[1:])
+        for i, control in enumerate(self.file_action_buttons):
+            control.setFixedHeight(action_height)
+            control.setSizePolicy(QSizePolicy.Ignored if i else QSizePolicy.Fixed, QSizePolicy.Fixed)
+            control.setProperty('elideText', True)
+            self.file_actions.addWidget(control, 0, i)
+            self.file_actions.setColumnStretch(i, 0 if i == 0 else 1)
         self.filter_combo.setMinimumWidth(120); self.filter_combo.setMaximumWidth(145)
         self.filter_combo.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         table_layout = self.table.parentWidget().layout()
@@ -223,15 +250,12 @@ class WorkspaceV2Mixin:
         if self._closed:return
         panel_width = self.document_splitter.sizes()[0] if not self.document_panel.isHidden() else 0
         available = self.width()-self.sidebar.width()-panel_width-5
+        self.validation_badges.setMaximumWidth(min(540, max(100, int(self.editor_page.width()*.55))))
         cols = 4 if available >= 520 else 2
         mode = (cols, available >= 640, available >= 780, available >= 460)
         if getattr(self, '_v2_layout_mode', None) == mode:
             self.resize_visible_rows(); return
         self._v2_layout_mode = mode
-        for i, control in enumerate(self.file_action_buttons):
-            control.setText(self.file_action_labels[i] if available >= 780 else ['▤', 'Nhập file', 'Nhập thư mục', 'Xuất file', 'Xuất hàng loạt', 'Thư mục xuất'][i])
-            self.file_actions.removeWidget(control)
-            self.file_actions.addWidget(control, 0 if available >= 460 or i < 3 else 1, i if available >= 460 else i%3)
         self.retry_errors_button.setText('Dịch lại dòng lỗi' if available >= 780 else 'Lỗi file này')
         self.retry_workspace_button.setText('Dịch lại tất cả lỗi' if available >= 780 else 'Lỗi mọi file')
         for i, control in enumerate(self.heading_controls):
@@ -260,13 +284,18 @@ class WorkspaceV2Mixin:
         from PySide6.QtWidgets import QApplication
         QApplication.instance().setWindowIcon(icon)
         self.brand_icon.setPixmap(icon.pixmap(34, 34)); self.brand_label.setVisible(not compact)
+        self.brand_icon.setAlignment(Qt.AlignCenter)
+        self.brand_icon.parentWidget().layout().setAlignment(self.brand_icon, Qt.AlignHCenter if compact else Qt.Alignment())
         self.brand_label.setText('TransComic')
         self.brand_label.setToolTip('TransComic · Translation Studio')
         from PySide6.QtGui import QIcon
+        from .glass import centered_icon
         for control, (title, _), asset in zip(self.nav_buttons, self.navigation_items(), ['translate','subtitles', 'queue', 'history', 'key', 'console', 'settings']):
             control.setCheckable(True); control.setChecked(self.pages.currentIndex() == _)
             control.setToolTip(title[2:].strip()); control.setText('' if compact else title[2:].strip())
-            control.setIcon(QIcon(str(Path(__file__).parent/'assets'/f'nav-{asset}.svg'))); control.setIconSize(QSize(19, 19))
+            nav_icon = QIcon(str(Path(__file__).parent/'assets'/f'nav-{asset}.svg'))
+            if compact: nav_icon = centered_icon(nav_icon, QSize(19, 19), control.devicePixelRatioF())
+            control.setIcon(nav_icon); control.setIconSize(QSize(19, 19))
         if self.tray: self.tray.setIcon(icon)
         self.table.viewport().update(); self.document_panel.view.viewport().update()
 
@@ -372,6 +401,8 @@ class WorkspaceV2Mixin:
         if not hasattr(self, 'document_panel') or self._closed: return
         documents = {d['id']: d for d in self.store.documents()}
         self.workspace_ids = [d for d in self.workspace_ids if d in documents]
+        if hasattr(self, 'period_warning'): self.period_warning.schedule()
+        if hasattr(self, 'line_check'): self.line_check.schedule()
         groups = {}
         states = {}
         if self.scheduler:

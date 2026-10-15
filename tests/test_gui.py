@@ -159,8 +159,11 @@ def test_long_rows_wrap_without_creating_new_lines(tmp_path: Path, monkeypatch):
     window.resize(900, 580)
     app.processEvents()
     assert window.table.viewport().height() > 0
-    assert window.export_button.geometry().right() < window.export_many_button.geometry().left()
-    assert window.export_many_button.geometry().right() < window.folder_button.geometry().left()
-    assert window.folder_button.geometry().right() < window.editor_page.width()
+    def editor_rect(widget):
+        from PySide6.QtCore import QRect
+        return QRect(widget.mapTo(window.editor_page, widget.rect().topLeft()), widget.size())
+    assert editor_rect(window.export_button).right() < editor_rect(window.export_many_button).left()
+    assert editor_rect(window.export_many_button).right() < editor_rect(window.folder_button).left()
+    assert editor_rect(window.folder_button).right() < window.editor_page.width()
     assert window.width() == 900
     window.close()

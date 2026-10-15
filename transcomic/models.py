@@ -9,4 +9,5 @@ KIRA_MODELS: tuple[tuple[str, str], ...] = (
     ("Coding MiMo V2.6 Flash", "coding-mimo-v2.6-flash"),
     ("DeepSeek V4.1 Flash", "deepseek-v4.1-flash"),
     ("GLM 5.3 Flash", "glm-5.3-flash"),
+    ("MiMo V2.6 Flash", "mimo-v2.6-flash"),
 )

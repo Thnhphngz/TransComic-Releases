@@ -251,7 +251,8 @@ def test_native_controls_remove_all_and_confirmation_preserves_history(tmp_path,
     w=MainWindow(store); w.workspace_ids=[doc]; w.open_document(doc); w.show(); w.resize(900,580); app.processEvents()
     assert w.width()==900 and not w.notice.isVisible()
     assert w.file_actions.indexOf(w.folder_button)>=0
-    assert w.folder_button.geometry().right()<w.editor_page.width()
+    assert not w.validation_badges.isAncestorOf(w.folder_button)
+    assert w.folder_button.mapTo(w.editor_page, w.folder_button.rect().topRight()).x()<w.editor_page.width()
     assert w.auto_retry_combo.currentIndex()==3
     monkeypatch.setattr(QMessageBox,'question',lambda *a:QMessageBox.No)
     w.remove_all_workspace(); assert w.workspace_ids==[doc]

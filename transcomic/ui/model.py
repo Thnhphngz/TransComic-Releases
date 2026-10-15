@@ -343,6 +343,9 @@ class LineDelegate(QStyledItemDelegate):
             selection.format.setForeground(QColor("#241A12"))
             selections.append(selection)
         context.selections = selections
+        if field == 'translation' and getattr(self.parent(), 'period_focus_key', None) == (index.model().doc_id, row['id']):
+            from .period_warning import period_selections
+            context.selections += period_selections(document, text, QAbstractTextDocumentLayout.Selection)
         context.palette.setColor(QPalette.Text, index.data(Qt.ForegroundRole) or option.palette.color(QPalette.Text))
         painter.save()
         painter.setClipRect(rect)
@@ -353,7 +356,10 @@ class LineDelegate(QStyledItemDelegate):
     def createEditor(self, parent, option, index):
         if index.column() == CHECK_COLUMN:
             return None
-        editor = OneLineEditor(parent)
+        warning = getattr(self.parent().window(), 'period_warning', None)
+        editor = warning.take_editor(parent, index) if warning is not None else None
+        restored = editor is not None
+        if editor is None: editor = OneLineEditor(parent)
         editor.setObjectName("cellEditor")
         editor.setFrameStyle(0)
         editor.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -361,13 +367,15 @@ class LineDelegate(QStyledItemDelegate):
         editor.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         editor.setTabChangesFocus(True)
         editor.document().setDocumentMargin(2)
-        editor._initialized = False
+        editor._initialized = restored
         editor._dirty = False
+        editor._period_keep = False
         self.active_editor = editor
         self.active_index = index
         self.parent().model().editing_id = self.parent().model().rows[index.row()]["id"]
         self.apply_editor_font()
-        editor.textChanged.connect(lambda: self._save_typing(editor, index))
+        editor._save_connection = lambda: self._save_typing(editor, index)
+        editor.textChanged.connect(editor._save_connection)
         return editor
 
     def apply_editor_font(self):
@@ -384,12 +392,16 @@ class LineDelegate(QStyledItemDelegate):
     def setEditorData(self, editor, index):
         # API refreshes must not replace an open editor's buffer or reset its caret.
         if editor._initialized:
+            warning = getattr(self.parent().window(), 'period_warning', None)
+            if warning is not None: warning.update_highlight()
             return
         editor.setPlainText(index.data(Qt.EditRole) or "")
         cursor = editor.textCursor()
         cursor.setPosition(0)
         editor.setTextCursor(cursor)
         editor._initialized = True
+        warning = getattr(self.parent().window(), 'period_warning', None)
+        if warning is not None: warning.update_highlight()
 
     def updateEditorGeometry(self, editor, option, index):
         editor.setGeometry(option.rect.adjusted(4, 1, -4, -1))
@@ -402,10 +414,18 @@ class LineDelegate(QStyledItemDelegate):
         self.active_editor = None
         self.active_index = None
         self.parent().model().editing_id = None
-        super().destroyEditor(editor, index)
+        if getattr(editor, '_period_keep', False):
+            editor.textChanged.disconnect(editor._save_connection)
+            editor.hide(); editor.setParent(self.parent().window().period_warning)
+        else: super().destroyEditor(editor, index)
         QTimer.singleShot(0, self.parent().model().refresh)
 
     def eventFilter(self, editor, event):
+        if isinstance(editor, OneLineEditor) and event.type() == QEvent.FocusOut:
+            for name in ('period_warning','line_check'):
+                warning = getattr(self.parent().window(), name, None)
+                if warning is not None and warning.dialog is not None and warning.dialog.isVisible():
+                    return False  # Preserve native undo while choosing in either review dialog.
         if isinstance(editor, OneLineEditor) and event.type() == QEvent.KeyPress:
             if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab, Qt.Key_Backtab):
                 index = self.active_index

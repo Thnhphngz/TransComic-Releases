@@ -172,7 +172,8 @@ class GeminiProvider(KiraProvider):
         return {'models': result, 'nextPageToken': token, 'pages': page+1}
 
     async def translate(self, lines, source_lang, target_lang, *, client=None, observer=None):
-        if not 1 <= len(lines) <= 3: raise ValueError('Each request must contain 1–3 lines')
+        from .providers import validate_request_lines
+        validate_request_lines(lines)
         prompt = messages(lines, source_lang, target_lang, self.prompt_version)
         body = {'systemInstruction': {'parts': [{'text': prompt[0]['content']}]},
                 'contents': [{'role': 'user', 'parts': [{'text': prompt[1]['content']}]}],
@@ -247,6 +248,7 @@ class GeminiProvider(KiraProvider):
                 text = ''.join(p['text'] for p in parts if isinstance(p, dict) and not p.get('thought') and isinstance(p.get('text'), str))
                 diagnostics['finish_reason'] = candidate.get('finishReason') if candidate.get('finishReason') in ('STOP', 'MAX_TOKENS', 'SAFETY', 'RECITATION') else 'unknown'
                 parsed = parse_line_response(text, expected)
+                diagnostics.update(parsed.diagnostics or {})
                 kind = 'invalid_line_response' if parsed.error else None
                 diagnostics['returned_valid_ids'] = len(parsed.values)
                 diagnostics['parse_seconds'] = round(time.monotonic()-parse_start, 6)

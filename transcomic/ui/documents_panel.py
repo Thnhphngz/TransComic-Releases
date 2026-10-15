@@ -52,7 +52,15 @@ class DocumentListModel(QAbstractListModel):
 
 
 class DocumentDelegate(QStyledItemDelegate):
-    def sizeHint(self, option, index): return QSize(230, 112)
+    def sizeHint(self, option, index): return QSize(self.parent().view.viewport().width(), 112)
+
+    def card_rect(self, index):
+        view = self.parent().view
+        rect = view.visualRect(index)
+        # QListView can cache a minimum width larger than a resized viewport.
+        # Horizontal scrolling is disabled: the card must fit the visible area.
+        rect.setLeft(0); rect.setWidth(view.viewport().width())
+        return rect
 
     @staticmethod
     def close_rect(rect):
@@ -64,6 +72,9 @@ class DocumentDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index):
         item = index.data(Qt.UserRole); owner = self.parent().owner
+        # Paint and mouse hit testing use the same viewport coordinate space.
+        # Do not mix a style-supplied option rectangle with QListView geometry.
+        option.rect = self.card_rect(index)
         c = DARK if owner.dark else LIGHT
         painter.save(); painter.setRenderHint(painter.RenderHint.Antialiasing)
         r = option.rect.adjusted(3, 3, -3, -3)
@@ -107,11 +118,17 @@ class DropList(QListView):
     def hit_action(self, point):
         index = self.indexAt(point)
         if not index.isValid(): return None
-        rect = self.visualRect(index); delegate = self.itemDelegate()
+        delegate = self.itemDelegate(); rect = delegate.card_rect(index)
         instance = index.data(Qt.UserRole)['instance']
         if delegate.close_rect(rect).contains(point): return ('close', instance)
         if delegate.check_rect(rect).contains(point): return ('check', instance)
         return None
+
+    def mouseDoubleClickEvent(self, event):
+        # A rapid second click on an action must not activate/open the card.
+        if event.button() == Qt.LeftButton and self.hit_action(event.position().toPoint()):
+            self.mousePressEvent(event); return
+        super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event):
         self._pressed_action = self.hit_action(event.position().toPoint()) if event.button() == Qt.LeftButton else None
@@ -178,6 +195,7 @@ class DocumentsPanel(QWidget):
         self.drop_hint = QLabel('Kéo file hoặc thư mục vào đây'); self.drop_hint.setWordWrap(True)
         self.drop_hint.setObjectName('muted'); layout.addWidget(self.drop_hint)
         self.view = DropList(self); self.view.setUniformItemSizes(True)
+        self.view.setResizeMode(QListView.Adjust)
         self.model = DocumentListModel(self.view); self.view.setModel(self.model)
         self.view.setItemDelegate(DocumentDelegate(self))
         self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)

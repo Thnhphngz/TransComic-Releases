@@ -22,6 +22,15 @@ class BatchResult:
     diagnostics: dict | None = None
 
 
+def validate_request_lines(lines):
+    if not 1 <= len(lines) <= 3: raise ValueError('Each request must contain 1–3 lines')
+    ids = [r.get('id') for r in lines]
+    if any(not isinstance(i,str) or not i for i in ids) or len(set(ids)) != len(ids):
+        raise ValueError('Request line IDs must be unique and nonempty')
+    if any(not isinstance(r.get('source'),str) or '\r' in r['source'] or '\n' in r['source'] for r in lines):
+        raise ValueError('Each request source must be one logical unit')
+
+
 def parse_line_response(content: str, expected: set[str]) -> BatchResult:
     """Reject ambiguous IDs; never pair by order."""
     try:
@@ -31,21 +40,28 @@ def parse_line_response(content: str, expected: set[str]) -> BatchResult:
                 content = fenced.group(1)
         obj = json.loads(content)
     except (json.JSONDecodeError, TypeError):
-        return BatchResult({}, "Model response is not JSON")
+        return BatchResult({}, "Model response is not JSON", diagnostics={'structure_errors':[{'code':'invalid_json','line_ids':sorted(expected)}]})
     if not isinstance(obj, dict) or not isinstance(obj.get("lines"), list):
-        return BatchResult({}, "Response must contain a lines array")
+        return BatchResult({}, "Response must contain a lines array", diagnostics={'structure_errors':[{'code':'invalid_schema','line_ids':sorted(expected)}]})
     values: dict[str, str] = {}
     seen: set[str] = set()
     invalid = False
     duplicate = False
+    structure = []
     for entry in obj["lines"]:
         if not isinstance(entry, dict) or not isinstance(entry.get("id"), str) or not isinstance(entry.get("text"), str):
             invalid = True
+            structure.append({'code':'invalid_entry','line_ids':[entry['id']] if isinstance(entry,dict) and isinstance(entry.get('id'),str) and entry['id'] in expected else []})
+            if isinstance(entry,dict) and isinstance(entry.get('id'),str):
+                values.pop(entry['id'], None)
+                seen.add(entry['id'])
             continue
         line_id, value = entry["id"], entry["text"]
         if line_id not in expected or line_id in seen or "\n" in value or "\r" in value or not value.strip():
             invalid = True
             duplicate = duplicate or line_id in seen
+            code = 'unexpected_id' if line_id not in expected else 'duplicate_id' if line_id in seen else 'linebreak' if '\n' in value or '\r' in value else 'empty_value'
+            structure.append({'code':code,'line_ids':[line_id] if line_id in expected else []})
             if line_id in values:
                 values.pop(line_id, None)
             seen.add(line_id)
@@ -53,8 +69,9 @@ def parse_line_response(content: str, expected: set[str]) -> BatchResult:
         seen.add(line_id)
         values[line_id] = value
     missing = expected - values.keys()
+    if missing: structure.append({'code':'missing_id','line_ids':sorted(missing)})
     error = "Duplicate or invalid line IDs/values" if invalid or duplicate else "Missing response line IDs" if missing else None
-    return BatchResult(values, error)
+    return BatchResult(values, error, diagnostics={'structure_errors':structure} if structure else None)
 
 
 class KiraProvider:
@@ -82,8 +99,7 @@ class KiraProvider:
     async def translate(self, lines: list[dict], source_lang: str, target_lang: str, *, client=None, observer=None) -> BatchResult:
         if getattr(self,'should_stop',lambda:False)():
             return BatchResult({}, 'Stopped before HTTP send', diagnostics={'failure_kind':'not_sent'})
-        if not 1 <= len(lines) <= 3:
-            raise ValueError("Each request must contain 1–3 lines")
+        validate_request_lines(lines)
         expected = {x["id"] for x in lines}
         body = {"model": self.model, "stream": False,
                 "messages": messages(lines, source_lang, target_lang, self.prompt_version)}
@@ -227,6 +243,7 @@ class KiraProvider:
         diagnostics['content_json_start'] = content.lstrip().startswith(('{', '```'))
         diagnostics['content_json_end'] = content.rstrip().endswith(('}', '```'))
         parsed = parse_line_response(content, expected)
+        diagnostics.update(parsed.diagnostics or {})
         kind = ("partial_response" if parsed.values else "invalid_line_response") if parsed.error else None
         diagnostics["returned_valid_ids"] = len(parsed.values)
         diagnostics["parse_seconds"] = round(time.monotonic()-parsing_started, 6)
