@@ -198,6 +198,7 @@ def test_native_dialog_buttons_use_glass_disabled_items_and_popup_wheel(gui,dark
     wheel=QWheelEvent(QPointF(8,8),QPointF(view.viewport().mapToGlobal(QPoint(8,8))),QPoint(),QPoint(0,-120),Qt.NoButton,Qt.NoModifier,Qt.NoScrollPhase,False)
     app.sendEvent(view.viewport(),wheel);assert bar.value()>0 and combo.currentIndex()==before
     combo.hidePopup();dialog.close()
+    w.concurrency.setValue(w.concurrency.maximum()-1)
     previous=w.concurrency.value()
     wheel=QWheelEvent(QPointF(8,8),QPointF(w.concurrency.mapToGlobal(QPoint(8,8))),QPoint(),QPoint(0,120),Qt.NoButton,Qt.NoModifier,Qt.NoScrollPhase,False)
     app.sendEvent(w.concurrency,wheel);assert w.concurrency.value()==previous+1

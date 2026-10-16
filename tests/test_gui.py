@@ -128,10 +128,13 @@ def test_docx_gui_import_resume_mock_translate_export(tmp_path: Path, monkeypatc
     monkeypatch.setattr(QMessageBox, 'question', lambda *args: QMessageBox.Yes)
     monkeypatch.setattr(QMessageBox, 'warning', lambda *args: QMessageBox.Yes)
     reopened.export_file()
-    for _ in range(200):
+    # DOCX export validates/writes on a background worker. Wait for its completion
+    # signal rather than assuming a two-second disk/CPU budget under full pytest.
+    for _ in range(1000):
         app.processEvents()
         if not reopened.export_busy: break
         QTest.qWait(10)
+    assert not reopened.export_busy
     output = tmp_path / 'chapter_VI.docx' 
     rendered = Document(output)
     assert rendered.paragraphs[0].text == "VI Hello world"

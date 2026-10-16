@@ -108,11 +108,11 @@ def test_local_url_filter_and_no_target_validation(tmp_path, monkeypatch):
 
 def test_kira_saved_limit_provider_switch_and_gemini_cap(tmp_path, monkeypatch):
     app, store, w = workspace(tmp_path, monkeypatch)
-    assert w.concurrency.maximum() == 50 and w.concurrency.value() == 30
-    w.concurrency.setValue(40); w.provider_selector.setCurrentIndex(1)
+    assert w.concurrency.maximum() == 30 and w.concurrency.value() == 30
+    w.concurrency.setValue(20); w.provider_selector.setCurrentIndex(1)
     assert w.concurrency.maximum() == 1
-    w.provider_selector.setCurrentIndex(0); assert w.concurrency.value() == 40
-    assert store.setting('concurrency') == '40'
+    w.provider_selector.setCurrentIndex(0); assert w.concurrency.value() == 20
+    assert store.setting('concurrency') == '20'
     w.toggle_theme(); assert store.setting('dark') == '1' and not w.windowIcon().isNull()
     assert [p for _, p in w.navigation_items()] == [0, 6, 5, 1, 2, 4, 3]
     assert [p for _, p in w.navigation_items() if p != 6] == [0, 5, 1, 2, 4, 3]

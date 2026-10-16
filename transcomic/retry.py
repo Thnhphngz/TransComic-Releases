@@ -1,5 +1,7 @@
 """Evidence-based retry permission. No uncertainty is converted into success."""
 def allowed_retry(job, diagnostics, next_attempt):
+    import json
+    if json.loads(job.get('config') or '{}').get('kira_multi_key'): return False
     if diagnostics.get('finish_reason') in ('SAFETY', 'RECITATION', 'content_filter'): return False
     status = diagnostics.get('http_status')
     if next_attempt > min(6, 1 + job.get('auto_retries', 0)): return False

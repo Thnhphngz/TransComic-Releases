@@ -13,6 +13,7 @@ from pathlib import Path
 from .documents import ImportedText, TextLine, translatable
 from .quality import collect
 from .diagnostics import DiagnosticLog
+from .kira_keys import KiraKeysMixin
 
 
 SCHEMA = """
@@ -52,6 +53,16 @@ CREATE TABLE IF NOT EXISTS quality_warnings (
  line_id TEXT PRIMARY KEY REFERENCES lines(id), source_revision INTEGER NOT NULL,
  translation_revision INTEGER NOT NULL, payload TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS secrets (key TEXT PRIMARY KEY, encrypted BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS kira_keys (
+ id TEXT PRIMARY KEY, name TEXT NOT NULL, encrypted BLOB NOT NULL,
+ fingerprint TEXT UNIQUE, enabled INTEGER NOT NULL DEFAULT 1,
+ status TEXT NOT NULL DEFAULT 'READY', cooldown_until REAL NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS kira_reservations (
+ id TEXT PRIMARY KEY, created_at REAL NOT NULL, tokens INTEGER NOT NULL,
+ account_scope TEXT NOT NULL DEFAULT 'shared', key_alias TEXT);
+CREATE TABLE IF NOT EXISTS kira_monitor_runs (
+ run_id TEXT PRIMARY KEY, updated_at REAL NOT NULL, snapshot TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS kira_monitor_latest ON kira_monitor_runs(updated_at);
 CREATE TABLE IF NOT EXISTS request_attempts (
  id TEXT PRIMARY KEY, original_batch_id TEXT NOT NULL REFERENCES batches(id),
  attempt_number INTEGER NOT NULL CHECK(attempt_number BETWEEN 1 AND 6), state TEXT NOT NULL,
@@ -71,7 +82,7 @@ CREATE TABLE IF NOT EXISTS api_text_versions (
 """
 
 
-class Store:
+class Store(KiraKeysMixin):
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -83,6 +94,12 @@ class Store:
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA busy_timeout=5000")
             self.db.executescript(SCHEMA)
+            if 'account_scope' not in {r['name'] for r in self.db.execute('PRAGMA table_info(kira_reservations)')}:
+                self.db.execute("ALTER TABLE kira_reservations ADD COLUMN account_scope TEXT NOT NULL DEFAULT 'shared'")
+            if 'key_alias' not in {r['name'] for r in self.db.execute('PRAGMA table_info(kira_reservations)')}:
+                self.db.execute('ALTER TABLE kira_reservations ADD COLUMN key_alias TEXT')
+            self.db.execute('CREATE INDEX IF NOT EXISTS kira_budget_scope ON kira_reservations(account_scope,created_at)')
+            self.db.execute('CREATE INDEX IF NOT EXISTS kira_budget_key ON kira_reservations(key_alias,created_at)')
             attempt_sql = self.db.execute("SELECT sql FROM sqlite_master WHERE name='request_attempts'").fetchone()[0]
             if 'BETWEEN 1 AND 6' not in attempt_sql:
                 # Keep the original table name and foreign key targets while rebuilding.
@@ -115,6 +132,7 @@ class Store:
                 if column not in {r['name'] for r in self.db.execute(f'PRAGMA table_info({table})')}:
                     self.db.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
             self.db.execute("UPDATE documents SET source_instance=id WHERE source_instance=''")
+            self.db.execute('CREATE INDEX IF NOT EXISTS kira_monitor_jobs ON jobs(run_id)')
             self.db.execute("UPDATE translation_runs SET state='interrupted' WHERE state IN ('running','pausing','stopping','user_paused','waiting_rate_limit','retry_scheduled')")
             for saved in self.db.execute("SELECT id,config FROM translation_runs WHERE state='interrupted'").fetchall():
                 snapshot=json.loads(saved['config'])
@@ -131,6 +149,7 @@ class Store:
             self.db.execute("UPDATE lines SET state='unknown', error='Ứng dụng đóng khi request đang chạy' WHERE state='processing'")
             self.db.execute("UPDATE request_attempts SET state='unknown' WHERE state IN ('prepared','inflight')")
         self.log = DiagnosticLog(self.path.parent / (self.path.stem + "_logs"))
+        self.migrate_kira_key()
 
     def close(self):
         if not self.log.closed: self.log.close()
@@ -264,11 +283,13 @@ class Store:
             job_id = str(uuid.uuid4())
             self.db.execute("INSERT INTO jobs(id,document_id,provider,model,source_lang,target_lang,concurrency,state,timeout,prompt_version,mode,retry_504,max_requests) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             (job_id, doc_id, provider, model, source_lang, target_lang, concurrency, "ready", timeout, "review-v2", "retranslation" if line_ids is not None else "translation", int(retry_504), max_requests))
-            retries = int(self.setting('auto_retries', '5'))
+            retries = 0 if (config or {}).get('kira_multi_key') else int(self.setting('auto_retries', '5'))
             if not 0 <= retries <= 5: raise ValueError('Invalid automatic retry setting')
             from .prompts import PROMPT_VERSION
             frozen = {**(config or {}), 'request_interval': float(self.setting('request_interval', '0')), 'auto_retries': retries, 'prompt_version': PROMPT_VERSION,
                       'source_locale':source_entry.locale,'target_locale':target_entry.locale}
+            if frozen.get('kira_multi_key'):
+                self.db.execute('UPDATE jobs SET retry_504=0 WHERE id=?',(job_id,))
             for key, default in [('rate_wait_budget', 300), ('rate_cooldown_limit', 10), ('rate_backoff_max', 30)]:
                 frozen.setdefault(key, float(self.setting(key, str(default))))
             self.db.execute('UPDATE jobs SET run_id=?,config=?,auto_retries=?,prompt_version=? WHERE id=?', (run_id, json.dumps(frozen), retries, PROMPT_VERSION, job_id))
@@ -542,6 +563,12 @@ class Store:
     def complete_attempt(self, attempt_id, diagnostics):
         from datetime import datetime, timezone
         with self.transaction():
+            if diagnostics.get('monitor'):
+                previous=self.db.execute('SELECT diagnostics FROM request_attempts WHERE id=?',(attempt_id,)).fetchone()
+                if previous:
+                    from .kira_telemetry import TERMINAL
+                    old=json.loads(previous[0] or '{}').get('monitor',{})
+                    if old.get('state') in TERMINAL:return False
             self.db.execute("UPDATE request_attempts SET state='finished',completed_at=?,diagnostics=? WHERE id=?", (datetime.now(timezone.utc).isoformat(timespec="milliseconds"), json.dumps(diagnostics, ensure_ascii=False), attempt_id))
 
     def history(self):
@@ -698,6 +725,7 @@ class Store:
                     'concurrency': concurrency, 'timeout': timeout, 'prompt_version': PROMPT_VERSION,
                     'auto_retries': int(self.setting('auto_retries', '5')), 'request_interval': float(self.setting('request_interval', '0')),
                     'retry_504': provider == 'kira' and self.setting('retry_504', '1') == '1'}
+        if snapshot.get('kira_multi_key'):snapshot.update(auto_retries=0,retry_504=False)
         with self.transaction():
             self.db.execute('INSERT INTO translation_runs(id,config) VALUES (?,?)', (run_id, json.dumps(snapshot, ensure_ascii=False)))
             for doc_id in document_ids:
@@ -785,8 +813,9 @@ class Store:
     def save_key(self, encrypted: bytes):
         with self.transaction():
             self.db.execute("INSERT INTO secrets VALUES ('kira',?) ON CONFLICT(key) DO UPDATE SET encrypted=excluded.encrypted", (encrypted,))
+            self.db.execute("INSERT INTO kira_keys(id,name,encrypted) VALUES ('legacy-kira','Kira 1',?) ON CONFLICT(id) DO UPDATE SET encrypted=excluded.encrypted,fingerprint=NULL", (encrypted,))
 
     def load_key(self) -> bytes | None:
         with self.lock:
-            row = self.db.execute("SELECT encrypted FROM secrets WHERE key='kira'").fetchone()
+            row = self.db.execute("SELECT encrypted FROM kira_keys WHERE enabled=1 ORDER BY rowid LIMIT 1").fetchone()
             return row["encrypted"] if row else None

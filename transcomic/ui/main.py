@@ -667,9 +667,10 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         self.api_key_input.setPlaceholderText("Dán API key mới; khóa đã lưu không được hiện lại")
         form.addRow("API key", self.api_key_input)
         content.addLayout(form)
-        save = button("Lưu khóa an toàn", True)
+        save = button("Thêm Kira key an toàn", True)
         save.clicked.connect(self.save_api_key)
         content.addWidget(save, alignment=Qt.AlignLeft)
+        self.build_kira_controls(content)
         detail = QLabel("Endpoint: https://kiraai.vn/api/v1/chat/completions\nModel mặc định: kira-2.5-flash\nKiểm tra kết nối sử dụng một request thật và có thể tốn token, nên ứng dụng không tự gửi request thử.")
         detail.setWordWrap(True)
         detail.setObjectName("muted")
@@ -768,6 +769,17 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             QMessageBox.warning(self, "Không thể nhập tài liệu", str(exc))
 
     def _key(self) -> str | None:
+        for record in self.store.kira_keys():
+            if not record['enabled']:continue
+            with self.store.lock:
+                encrypted=self.store.db.execute('SELECT encrypted FROM kira_keys WHERE id=?',(record['id'],)).fetchone()
+            if encrypted:
+                try:return unprotect_key(encrypted[0])
+                except Exception:
+                    self.store.kira_key_status(record['id'],'UNKNOWN_ERROR')
+        if self.store.kira_keys():
+            QMessageBox.information(self,'Kira key chưa khả dụng','Bật hoặc khôi phục key trong trang API; không có request nào được gửi.')
+            self.pages.setCurrentIndex(2);return None
         encrypted = self.store.load_key()
         if not encrypted:
             QMessageBox.information(self, "Cần API key", "Hãy lưu Kira API key trong mục Quản lý API trước khi dịch.")
@@ -790,7 +802,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             QMessageBox.information(self, "Đang dịch", "Hãy dừng hoặc hoàn thành lượt dịch đang chạy.")
             return
         changed_target = self.store.document(self.doc_id)['target_lang'] != self.target_lang.currentText() and any(j['document_id'] == self.doc_id for j in self.store.jobs())
-        if self.provider_id() == 'gemini' or len(self.target_languages()) > 1 or len(self.workspace_ids) > 1 or changed_target:
+        if self.provider_id() in ('kira','gemini') or len(self.target_languages()) > 1 or len(self.workspace_ids) > 1 or changed_target:
             self.start_stage2()
             return
         if not self.valid_languages():
@@ -802,12 +814,12 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         if not model:
             return
         try:
-            job_id = self.store.create_job(self.doc_id, model, self.source_lang.currentText(), self.target_lang.currentText(), self.concurrency.value(), timeout=self.timeout_spin.value())
+            job_id = self.store.create_job(self.doc_id, model, self.source_lang.currentText(), self.target_lang.currentText(), self.concurrency.value(), timeout=self.timeout_spin.value(),config={'kira_multi_key':True})
         except ValueError as exc:
             QMessageBox.information(self, "Không thể bắt đầu", "Không còn dòng chưa gửi đủ điều kiện. Chọn checkbox rồi dùng Dịch lại dòng đã chọn để xử lý lỗi hoặc tạo bản mới." if "No lines" in str(exc) else str(exc))
             return
         self.store.set_setting("concurrency", str(self.concurrency.value()))
-        self.scheduler = Scheduler(self.store, KiraProvider(key, model, timeout=self.store.job(job_id)["timeout"], prompt_version=self.store.job(job_id)["prompt_version"]), self.bridge.changed.emit)
+        self.scheduler = Scheduler(self.store, self.make_provider(self.store.job(job_id),key), self.bridge.changed.emit)
         self.current_job_ids = {item["id"] for batch in self.store.batches(job_id) for item in batch["payload"]}
         self.scheduler.start(job_id)
         self.refresh()
@@ -889,6 +901,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         key = self._key() if provider == 'kira' else None
         if provider == 'kira' and not key: return
         config = json.loads(original['config']) if original else {}
+        if provider=='kira':config['kira_multi_key']=True
         if provider == 'gemini' and not config:
             QMessageBox.information(self, 'Cấu hình Gemini', 'Bắt đầu một lượt có snapshot key/quota trước khi dịch lại.'); return
         try:
@@ -900,7 +913,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         if all_errors:
             with self.store.transaction():
                 self.store.db.execute("UPDATE jobs SET mode='retry_errors' WHERE id=?", (job_id,))
-        self.scheduler = Scheduler(self.store, self.make_provider(job, key) if provider == 'gemini' else KiraProvider(key, job['model'], timeout=job['timeout'], prompt_version=job['prompt_version']), self.bridge.changed.emit)
+        self.scheduler = Scheduler(self.store, self.make_provider(job, key), self.bridge.changed.emit)
         self.current_job_ids = {item["id"] for batch in self.store.batches(job_id) for item in batch["payload"]}
         self.scheduler.start(job_id)
         self.refresh()
@@ -918,10 +931,12 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         if not key:
             return
         try:
-            encrypted = protect_key(key)
-            self.store.save_key(encrypted)
+            added,duplicates=self.store.add_kira_keys(key,self.kira_name_input.text())
             self.api_key_input.clear()
+            self.kira_name_input.clear()
+            self.refresh_kira_keys()
             self.refresh()
+            self.statusBar().showMessage(f'Đã thêm {added} Kira key · bỏ qua {duplicates} key trùng',5000)
         except Exception as exc:
             QMessageBox.warning(self, "Không lưu được khóa", f"Windows DPAPI không khả dụng: {type(exc).__name__}")
 
@@ -1083,6 +1098,15 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         elif running:
             mode = self.store.job(self.scheduler.job_id).get("mode")
             self.active_label.setText(("Đang dịch lại tất cả dòng lỗi" if mode == "retry_errors" else "Đang dịch lại dòng đã chọn" if mode == "retranslation" else "Đang dịch") + f" · {self.scheduler.active} request")
+        if running and getattr(self.scheduler,'key_metrics',None):
+            m=self.scheduler.key_metrics
+            text=f"{m['busy']}/{m['maximum']} luồng · {m['keys']} key · {getattr(self.scheduler,'active_files',0)} file"
+            if self.scheduler._paused.is_set():
+                reasons={'kira_keys_unavailable':'Không còn key khả dụng; xem trang API',
+                         'network_unavailable':'Mất kết nối; chờ kiểm tra rồi Tiếp tục',
+                         'kira_request_exceeds_tpm':'Batch vượt TPM đã đặt; kiểm tra hạn mức'}
+                text='Tạm dừng · '+reasons.get(self.scheduler.intervention_reason,'Người dùng')
+            self.active_label.setText(text);self.active_label.setToolTip(text)
         if running and getattr(self.scheduler,'current_locale',None):
             self.active_label.setText(self.scheduler.current_locale+' · '+self.active_label.text())
         percent = int(done * 100 / total) if total else 0
@@ -1267,6 +1291,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         if hasattr(self,'update_panel'):self.update_panel.shutdown()
         if hasattr(self,'period_warning'):self.period_warning.shutdown()
         if hasattr(self,'line_check'):self.line_check.shutdown()
+        if hasattr(self,'kira_monitor_dialog'):self.kira_monitor_dialog.close()
         self.store.close()
         self._closed = True
         if update_exit:

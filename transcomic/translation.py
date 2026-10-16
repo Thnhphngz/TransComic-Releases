@@ -79,11 +79,27 @@ class Scheduler:
                     if not attempts or attempts[-1]['state']=='finished': continue
                     attempt=attempts[-1]
                     diagnostics={'failure_kind':'shutdown_cancelled','state':'outcome_unknown','reason':'transport_ignored_cancellation'}
+                    record=(attempt.get('diagnostics') or {}).get('monitor')
+                    if record:
+                        record={**record,'state':'UNKNOWN' if record.get('sent') else 'CANCELLED',
+                            'accepted_ids':[],'failed_ids':[],'rejected_ids':[],
+                            'unknown_ids':record['line_ids'] if record.get('sent') else [],'request_success':False}
+                        diagnostics['monitor']=record
+                        if record['attempt_id'] not in self.provider.monitor.attempts:
+                            self.provider.monitor.claim(record)
+                            if record.get('sent'):self.provider.monitor.sent(record['attempt_id'])
+                        self.provider.monitor.complete(record)
                     self.store.finish_batch(batch['id'],{},'Safe-exit fence: outcome_unknown; server may have consumed tokens',True,diagnostics,expected_attempt_id=attempt['id'])
                     import json
                     self.store.db.execute("UPDATE request_attempts SET state='unknown',diagnostics=? WHERE id=?",(json.dumps(diagnostics),attempt['id']))
                 self.store.job_state(job_id,'interrupted')
             if self.run_id:self.store.run_state(self.run_id,'interrupted')
+            if getattr(self.provider,'multi_key',False):
+                from .kira_monitor_store import save_summary
+                self.provider.monitor.set_state('interrupted')
+                import sqlite3
+                try:save_summary(self.store,self.provider.redact(self.provider.monitor_snapshot(30)))
+                except (sqlite3.Error,OSError,ValueError):self.provider.monitor.persistence_error=True
 
     def cancel_inflight(self):
         """Called at the safe-exit deadline, never blocks the Qt thread."""
@@ -146,6 +162,14 @@ class Scheduler:
         self._thread.start()
 
     def _set_state(self, state):
+        if getattr(self.provider,'multi_key',False) and self.provider.monitor.run_id:
+            self.provider.monitor.intervention_reason=self.intervention_reason
+            monitor_state=state
+            if state=='finished':
+                phase=set(getattr(self,'_phase_job_ids',self.job_ids))
+                if self._paused.is_set():monitor_state='user_paused'
+                elif any(self.store.job(j)['state']=='ready' for j in self.job_ids if j not in phase):monitor_state='running'
+            self.provider.monitor.set_state(monitor_state)
         for job_id in getattr(self,'_phase_job_ids',self.job_ids) or ([self.job_id] if self.job_id else []): self.store.job_state(job_id, state)
         if self.run_id: self.store.run_state(self.run_id, state)
         if self.run_id and getattr(self,'current_locale',None) and state!='finished':
@@ -160,22 +184,30 @@ class Scheduler:
         self._notify([])
 
     def resume(self):
+        if getattr(self.provider,'multi_key',False):
+            self.provider.network_paused=False
+            self.intervention_reason=None
         if hasattr(self.provider, 'pool'):
             self.provider.pool.resume_requested = True
         with self._dispatch_lock:
             self._paused.clear()
-        if self.job_id:
-            self._set_state('running')
+            if self.job_id:
+                phase=getattr(self,'_phase_job_ids',self.job_ids) or [self.job_id]
+                # Resume may arrive after a phase drained while paused. Preserve
+                # its completed DB state so the language barrier can advance.
+                drained=all(self.store.job(j)['state']=='finished' for j in phase)
+                self._set_state('finished' if drained else 'running')
         self._notify([])
 
     @staticmethod
     def has_work(store, job_id):
         from .retry import allowed_retry
         job = store.job(job_id)
+        multi_key=job['provider']=='kira' and bool(store.kira_keys())
         for batch in store.batches(job_id):
             prior = store.attempts(batch['id'])
             if batch['state'] == 'pending' and not prior: return True
-            if prior and prior[-1]['state'] == 'finished' and batch['state'] in ('error', 'partial', 'unknown') and allowed_retry(job, prior[-1]['diagnostics'] or {}, len(prior)+1):
+            if not multi_key and prior and prior[-1]['state'] == 'finished' and batch['state'] in ('error', 'partial', 'unknown') and allowed_retry(job, prior[-1]['diagnostics'] or {}, len(prior)+1):
                 if any(store.line(r['id'])['state'] in ('error', 'unknown', 'wrong_target_language') and store.line(r['id'])['source_revision']==r['source_revision'] and store.line(r['id'])['translation_revision']==r['translation_revision'] for r in batch['payload']): return True
         return False
 
@@ -194,6 +226,12 @@ class Scheduler:
         try:
             import json
             from .languages import language
+            if getattr(self.provider,'multi_key',False):
+                from .kira_monitor_store import records_for_run
+                self.provider.begin_monitor(self.run_id or self.job_id,
+                    records_for_run(self.store,self.run_id or self.job_id))
+                self._monitor_checkpoint_at=0
+                self.monitor_checkpoint(force=True)
             groups={}
             for jid in self.job_ids:
                 groups.setdefault(language(self.store.job(jid)['target_lang']).locale,[]).append(jid)
@@ -247,8 +285,34 @@ class Scheduler:
             if self.job_id:
                 self._set_state('interrupted')
             self._notify([])
+        finally:
+            if getattr(self.provider,'multi_key',False) and not self._abandoned.is_set():
+                state=(self.store.run(self.run_id) if self.run_id else self.store.job(self.job_id)).get('state','interrupted')
+                if all(self.store.job(j)['state']=='finished' for j in self.job_ids):state='finished'
+                elif self._stopped.is_set() and state!='interrupted':state='stopped'
+                self.provider.monitor.set_state(state)
+                self.monitor_checkpoint(force=True)
+
+    def monitor_checkpoint(self, force=False):
+        if self._abandoned.is_set():return
+        now=time.monotonic()
+        if not force and now-getattr(self,'_monitor_checkpoint_at',0)<1:return
+        self._monitor_checkpoint_at=now
+        from .kira_monitor_store import save_summary
+        cap=max(1,min(30,int(self.store.setting('concurrency','30'))))
+        import sqlite3
+        try:
+            save_summary(self.store,self.provider.redact(self.provider.monitor_snapshot(cap)))
+            self.provider.monitor.persistence_error=False
+        except (sqlite3.Error,OSError,ValueError):
+            if not self.provider.monitor.persistence_error:
+                self.store.log.emit('monitor_persistence_error',run_id=self.run_id,provider='kira')
+            self.provider.monitor.persistence_error=True
 
     async def _run(self):
+        if getattr(self.provider,'multi_key',False):
+            from .kira_dispatch import run
+            return await run(self)
         self._loop = asyncio.get_running_loop()
         assert self.job_id
         job = self.store.job(self.job_id)

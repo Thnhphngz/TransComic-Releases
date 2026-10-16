@@ -15,9 +15,10 @@ from ..providers import KiraProvider
 from ..translation import Scheduler
 from .controls import QComboBox, QSpinBox
 from .glass import GlassButton as QPushButton
+from .kira_api import KiraApiMixin
 
 
-class Stage2Mixin:
+class Stage2Mixin(KiraApiMixin):
     def setup_stage2(self):
         self.workspace_ids = []
         self.workspace_positions = {}
@@ -72,9 +73,11 @@ class Stage2Mixin:
         if provider == 'kira':
             for label, model in KIRA_MODELS: self.model_name.addItem(label, model)
             saved = self.store.setting('kira_model', 'kira-2.5-flash')
-            self.concurrency.setMaximum(50)
+            self.concurrency.setMaximum(30)
+            self.concurrency.setToolTip('Số request đồng thời tối đa MỖI key Kira (1–30); các key cùng nhóm tài khoản chia sẻ trần tài khoản/RPM/TPM.')
             self.concurrency.setValue(int(self.store.setting('concurrency', '30')))
         else:
+            self.concurrency.setToolTip('Concurrency theo quota Gemini đã xác minh; không nhân theo số key.')
             cache = json.loads(self.store.setting('gemini_models', '{"models":[]}'))
             for model in cache.get('models', []): self.model_name.addItem(model['displayName'], model['name'])
             saved = self.store.setting('gemini_model')
@@ -84,9 +87,12 @@ class Stage2Mixin:
         self.concurrency.blockSignals(False)
         if saved: self.set_model_id(saved)
         self.model_name.blockSignals(False)
-        self.retry_504_check.setEnabled(provider == 'kira')
+        self.retry_504_check.setEnabled(False)
+        self.retry_504_check.setToolTip('Kira Multi-Key không tự gửi lại batch 504/timeout/lỗi. Cấu hình cũ chỉ dành cho lịch sử trước nâng cấp.')
+        if hasattr(self,'auto_retry_combo'):self.auto_retry_combo.setEnabled(provider!='kira')
         if hasattr(self, 'gemini_offline'):
             self.gemini_offline.setText('Danh sách cache/offline; chưa gọi kiểm tra kết nối. '+str(self.model_name.count())+' model khi chọn Gemini.')
+        if hasattr(self,'kira_manage_button'):self.kira_manage_button.setVisible(provider=='kira')
 
     def choose_targets(self):
         dialog = QDialog(self); dialog.setWindowTitle('Ngôn ngữ đích của lượt dịch mới')
@@ -302,6 +308,9 @@ class Stage2Mixin:
 
     def make_provider(self, job, kira_key=None):
         if job['provider'] == 'kira':
+            if self.store.kira_keys():
+                from ..kira_pool import KiraPoolProvider
+                return KiraPoolProvider(self.store,job['model'],timeout=job['timeout'],prompt_version=job['prompt_version'])
             return KiraProvider(kira_key or self._key(), job['model'], timeout=job['timeout'], prompt_version=job['prompt_version'])
         config = json.loads(job['config'])
         all_keys = {k['id']: k for k in self.store.gemini_keys(decrypt=True)}
@@ -329,6 +338,7 @@ class Stage2Mixin:
         if provider == 'kira':
             key = self._key()
             if not key: return
+            config={'kira_multi_key':True,'auto_retries':0,'retry_504':False}
         else:
             if not self.gemini_verified.isChecked(): QMessageBox.information(self, 'Giới hạn Gemini', 'Đối chiếu và xác nhận quota/model trong Quản lý API trước khi chạy.'); return
             keys = self.store.gemini_keys()
@@ -375,6 +385,7 @@ class Stage2Mixin:
         if self._closed: return
         self.background_threads = [t for t in self.background_threads if t.is_alive()]
         if self.pages.currentIndex() == 2: self.refresh_gemini_keys()
+        self.refresh_kira_keys()
         if self.scheduler:
             jobs = [self.store.job(j) for j in self.scheduler.job_ids or [self.scheduler.job_id] if j]
             docs = list(dict.fromkeys(j['document_id'] for j in jobs if j))

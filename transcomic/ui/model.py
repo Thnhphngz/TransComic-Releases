@@ -422,6 +422,9 @@ class LineDelegate(QStyledItemDelegate):
 
     def eventFilter(self, editor, event):
         if isinstance(editor, OneLineEditor) and event.type() == QEvent.FocusOut:
+            if getattr(self.parent().window(),'_kira_monitor_navigating',False):return False
+            monitor=getattr(self.parent().window(),'kira_monitor_dialog',None)
+            if monitor is not None and monitor.isVisible():return False
             for name in ('period_warning','line_check'):
                 warning = getattr(self.parent().window(), name, None)
                 if warning is not None and warning.dialog is not None and warning.dialog.isVisible():

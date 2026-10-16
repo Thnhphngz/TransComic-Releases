@@ -5,8 +5,9 @@ import time
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtCore import QPoint, QPointF, QRect, Qt
 from PySide6.QtTest import QTest, QSignalSpy
+from PySide6.QtGui import QEnterEvent
 from PySide6.QtWidgets import QApplication
 
 from transcomic.documents import decode_txt
@@ -126,7 +127,14 @@ def test_badge_hover_click_popup_and_hide_without_moving_actions(gui, dark):
                          (window.period_warning, 'Các dòng dịch có dấu chấm')):
         assert badge.text() in badge.toolTip()
         spy = QSignalSpy(badge.clicked)
+        QTest.mouseMove(window, QPoint(2, window.height()-10))
+        QTest.qWait(30)
         QTest.mouseMove(badge, badge.rect().center())
+        # QtTest cursor positioning under a forced Windows scale may use the OS
+        # scale instead. Exercise the native widget's hover event deterministically.
+        local=QPointF(badge.rect().center())
+        app.sendEvent(badge,QEnterEvent(local,QPointF(badge.mapTo(window,local.toPoint())),
+                                        QPointF(badge.mapToGlobal(local.toPoint()))))
         QTest.qWait(160)
         assert badge.get_light() > 0
         QTest.mouseClick(badge, Qt.LeftButton, pos=badge.rect().center())

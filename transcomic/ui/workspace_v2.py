@@ -43,7 +43,9 @@ class WorkspaceV2Mixin:
                         import uuid
                         runs[scope] = str(uuid.uuid4())
                         self.store.db.execute('INSERT INTO translation_runs(id,config) VALUES (?,?)', (runs[scope], j['config']))
-                    new = self.store.create_job(j['document_id'], j['model'], j['source_lang'], j['target_lang'], j['concurrency'], g['line_ids'], j['timeout'], provider=j['provider'], config=json.loads(j['config']), allow_shared_document=True, run_id=runs[scope])
+                    retry_config=json.loads(j['config'])
+                    if j['provider']=='kira':retry_config['kira_multi_key']=True
+                    new = self.store.create_job(j['document_id'], j['model'], j['source_lang'], j['target_lang'], j['concurrency'], g['line_ids'], j['timeout'], provider=j['provider'], config=retry_config, allow_shared_document=True, run_id=runs[scope])
                     frozen = self.store.job(new); adapters[new] = self.make_provider(frozen, kira_key)
                     scope = (frozen['provider'], frozen['model'], frozen['concurrency'], frozen['prompt_version'], frozen['config'])
                     groups.setdefault(scope, []).append(new)
@@ -102,6 +104,13 @@ class WorkspaceV2Mixin:
         self.period_warning = PeriodWarning(self)
         badge_layout.addWidget(self.period_warning, 1)
         header.addWidget(self.validation_badges, 1)
+        self.kira_manage_button=QPushButton('Kira: 0 key')
+        self.kira_manage_button.setFocusPolicy(Qt.NoFocus)
+        self.kira_manage_button.setToolTip('Quản lý Kira Multi-Key · ô Luồng là giới hạn mỗi key; dùng chung quota tài khoản.')
+        from .kira_monitor import open_monitor
+        self.kira_manage_button.clicked.connect(lambda:open_monitor(self))
+        self.actions_widget.layout().addWidget(self.kira_manage_button)
+        self.kira_manage_button.setVisible(self.provider_id()=='kira')
         for b in self.file_action_buttons: b.setToolTip(b.text())
         footer = self.editor_page.layout().itemAt(self.editor_page.layout().count()-1).layout()
         footer.removeWidget(self.folder_button)
@@ -124,6 +133,7 @@ class WorkspaceV2Mixin:
         form.addRow(self.retry_504_check)
         self.auto_retry_combo = QComboBox(); self.auto_retry_combo.addItems(['Tắt', '1 lần', '2 lần', '3 lần', '4 lần', '5 lần'])
         self.auto_retry_combo.setCurrentIndex(int(self.store.setting('auto_retries', '5')))
+        self.auto_retry_combo.setEnabled(self.provider_id()!='kira')
         self.auto_retry_combo.currentIndexChanged.connect(lambda n: self.store.set_setting('auto_retries', str(n)))
         form.addRow('Tự động dịch lại lỗi (lượt mới)', self.auto_retry_combo)
         retry_notice = QLabel('Tối đa 5 lần thử lại sau lần đầu (6 request/batch). Retry, đặc biệt HTTP 504, có thể tiêu thụ thêm token và tiền. Không gửi lại timeout hoặc attempt mất trạng thái sau crash.')
