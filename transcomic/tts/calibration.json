@@ -1,0 +1,11 @@
+{
+  "58f408a3e8b243d43d2b06fb205464f83a63dc6daeb7be365cf2eb2b96064c44": {
+    "workers": 2,
+    "baseline_throughput": 5.11334183134568,
+    "parallel_throughput": 6.735124214737505,
+    "segments_per_run": 32,
+    "repeats": 2,
+    "source": "continue-parallel-calibration-final",
+    "minimum_free_ram_gib": 1.5
+  }
+}

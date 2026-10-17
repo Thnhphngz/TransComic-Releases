@@ -52,3 +52,10 @@ venv/
 *.tc-keybackup
 *.testkey
 /.release-state/
+
+# TTS runtime assets and generated audio belong in the user cache/output.
+*.onnx
+*.wav
+*.mp3
+*.npz
+*.bin

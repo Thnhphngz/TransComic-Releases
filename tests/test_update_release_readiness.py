@@ -50,7 +50,17 @@ def test_helper_uncertain_outcome_blocks_blind_replay(tmp_path,fault):
     with pytest.raises(UpdateError,match='MANUAL_RECONCILIATION'):helper.run(plan,args[-1],threading.Event())
     assert runtime.calls==calls
 
-def test_staging_version_overlay_does_not_mutate_source(tmp_path):
+def test_staging_version_overlay_does_not_mutate_source(tmp_path,monkeypatch):
+    # Simulate the CPU release profile; never install its CPU wheel over the
+    # developer's working CUDA runtime just to exercise a staging-only test.
+    import scripts.release_config as config
+    original_version=config.metadata.version
+    def cpu_profile_version(name):
+        try:return original_version(name)
+        except config.metadata.PackageNotFoundError:
+            if name=='onnxruntime':return original_version('onnxruntime-gpu')
+            raise
+    monkeypatch.setattr(config.metadata,'version',cpu_profile_version)
     from scripts.build_local import ROOT,prepare
     original=(ROOT/'transcomic/version.py').read_bytes()
     # Existing build entry requires outputs inside the actual workspace.

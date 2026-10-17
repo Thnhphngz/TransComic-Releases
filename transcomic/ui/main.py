@@ -148,6 +148,9 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             label=QLabel(text);label.setAlignment(Qt.AlignCenter);label.setWordWrap(True)
             label.setObjectName('section' if text=='Dịch file SRT' else 'muted');srt_layout.addWidget(label)
         srt_layout.addStretch();self.pages.addWidget(srt_page)
+        self.tts_container=QWidget();self.tts_layout=QVBoxLayout(self.tts_container)
+        self.tts_layout.setContentsMargins(0,0,0,0);self.pages.addWidget(self.tts_container)
+        self.pages.currentChanged.connect(self.open_tts_page)
         self.pages.currentChanged.connect(lambda _: self.update_branding())
         self.change_font(self.font_spin.value())
         for shortcut, replace in [("Ctrl+F", False), ("Ctrl+H", True)]:
@@ -945,6 +948,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         self.store.set_setting("dark", "1" if self.dark else "0")
         self.setStyleSheet(stylesheet(self.dark))
         self.sky_switch.set_dark(self.dark)
+        if hasattr(self,'tts_page'):self.tts_page.apply_theme()
         self.update_branding()
         from .controls import install_combo_popup
         for combo in self.findChildren(QComboBox): install_combo_popup(combo)
@@ -1231,6 +1235,12 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             self.exit_timer.stop()
             event.ignore()
 
+    def open_tts_page(self,index):
+        if index==7 and not hasattr(self,'tts_page'):
+            from .tts_page import TtsPage
+            self.tts_page=TtsPage(self.store.path.parent,self)
+            self.tts_layout.addWidget(self.tts_page)
+
     def _close_event(self, event):
         panel=getattr(self,'update_panel',None)
         if panel and panel.handoff_pending:
@@ -1248,7 +1258,8 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         if self._closed:
             event.accept()
             return
-        running = bool(self.scheduler and self.scheduler._thread and self.scheduler._thread.is_alive()) or any(t.is_alive() for t in getattr(self, 'background_threads', []))
+        tts=getattr(self,'tts_page',None)
+        running = bool(self.scheduler and self.scheduler._thread and self.scheduler._thread.is_alive()) or any(t.is_alive() for t in getattr(self, 'background_threads', [])) or bool(tts and tts.is_busy())
         if self._exit_pending and not self._exit_authorized:
             event.ignore()
             return
@@ -1271,6 +1282,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
                     if timer: timer.stop()
                 self._exit_deadline = time.monotonic()+self.shutdown_grace_seconds
                 if self.scheduler: self.scheduler.stop()
+                if tts:tts.request_stop()
                 self.notice.setText("Đang thoát an toàn: chờ request đang chạy lưu kết quả…")
                 self.exit_timer.start()
                 event.ignore()
@@ -1292,6 +1304,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         if hasattr(self,'period_warning'):self.period_warning.shutdown()
         if hasattr(self,'line_check'):self.line_check.shutdown()
         if hasattr(self,'kira_monitor_dialog'):self.kira_monitor_dialog.close()
+        if tts:tts.shutdown()
         self.store.close()
         self._closed = True
         if update_exit:
@@ -1333,6 +1346,8 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             self.exit_timer.stop()
 
     def _finish_safe_exit(self):
+        tts=getattr(self,'tts_page',None)
+        if tts and tts.is_busy():return
         # A zero-duration Windows yield may immediately return to Qt's event pump.
         # Give the Python/asyncio cleanup thread a bounded scheduling opportunity;
         # this is not a worker join or an extension of the shutdown deadline.

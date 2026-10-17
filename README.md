@@ -4,6 +4,10 @@
 
 Các tài liệu Stage A/B1/B2.1 là lịch sử thiết kế; trạng thái preflight/locked trong đó không mô tả chế độ BAT hiện hành.
 
+## Text to Speech — v1.1.0
+
+**TTS V4** có lịch sử/tìm kiếm/xóa bản ghi, popup Xem câu và player chung. Hỗ trợ TXT/DOCX hàng loạt, nhập trực tiếp, WAV/MP3 và tối đa hai worker. **Tạm dừng cho phép tiếp tục; Dừng/Hủy kết thúc lượt**, giữ audio đã xuất. Bản Windows tự chuẩn bị runtime/model/voice qua **TTS → Cài đặt → Tải model**; lần đầu cần internet. CUDA tùy phần cứng/driver, có CPU fallback; không yêu cầu cài Python/CUDA Toolkit/cuDNN thủ công. Không hỗ trợ tiếng Việt. Xem [hướng dẫn](docs/tts-workflow.md), [release notes](docs/release-notes-1.1.0.md), [giấy phép](docs/tts-licenses.md).
+
 ## Gemini và dịch hàng loạt
 
 - **Quản lý API → Google Gemini:** thêm key đơn/hàng loạt, mã hóa Windows DPAPI, phát hiện trùng và sắp thứ tự ưu tiên. Thêm key không gọi API.
@@ -123,9 +127,13 @@ Trong Hàng đợi & lịch sử, **Xóa toàn bộ** xóa các lượt/batch/at
 
 Kiểm tra cập nhật thủ công có bản Internal hợp lệ sẽ mở popup Liquid Glass với **Tải và cài đặt** / **Để sau**. Nút tải dùng downloader và native helper đã xác minh. Auto-check chỉ cập nhật trạng thái. Sidebar **Dịch file SRT** hiện là trang thông báo chức năng đang được cập nhật.
 
-Sau full regression đạt, build riêng bằng `python scripts/build_local.py --output artifacts/first-local-build/<thư-mục-mới>`. Script tạo snapshot allowlist rồi chạy PyInstaller và ISCC; không chạy installer, tăng version hoặc ghi GitHub. Đây là entry point BUILD_LOCAL devtest; `release_transcomic.bat` vẫn là entry point phát hành hoàn chỉnh. Xem [artifact và báo cáo kiểm thử](docs/first-local-build.md). Cài đặt/auto-update/phát hành cần quyền riêng.
+Sau full regression đạt và được cấp quyền build, dùng interpreter CPU riêng chạy `scripts/build_local.py --output <thư-mục-mới-trong-artifacts> --distribution-kit <kit-source-notices-đã-xác-minh>`. Script tạo snapshot allowlist, xác minh source/notices và payload, rồi chạy PyInstaller và ISCC; không chạy Installer, tăng version hoặc ghi GitHub. Xem [báo cáo phân phối Windows hiện tại](docs/windows-distribution-report.md). `release_transcomic.bat` vẫn là entry point phát hành hoàn chỉnh; không dùng BAT cho thử đóng gói này.
 
 ## Phiên bản và cập nhật
+
+**v1.1.0** bổ sung TTS và Windows setup. [Hồ sơ kiểm thử v1.1.0](docs/release-1.1.0-readiness.md) ghi kết quả trên đúng Installer, CPU/CUDA hai lane, Sandbox sạch, nâng cấp và bảo toàn dữ liệu. Installer **UNSIGNED**. Luồng cập nhật dùng HTTPS + SHA-256; không phải chữ ký publisher.
+
+[Báo cáo Windows distribution 1.0.4](docs/windows-distribution-report.md) và [RC audit](docs/release-candidate-audit.md) giữ nguyên làm lịch sử trước phát hành TTS. Bản v1.1.0 dùng source/notices đã xác minh trong Installer và asset source riêng.
 
 v0.1.1 và v1.0.0 đã phát hành; các BAT flags cố định theo version trước đây đã được thay bằng Automatic Release V2. Giữ các báo cáo lịch sử để đối chiếu. Nguồn VERSION vẫn là `transcomic/version.py`; không tự sửa version mỗi lần phát hành.
 

@@ -112,8 +112,17 @@ def test_journal_lock_corruption_and_local_save_failure(tmp_path,monkeypatch):
         assert a.path.read_bytes()==old and not list(tmp_path.glob('*.part'))
 
 
-def test_build_command_staging_allowlist_overlay_and_original_unchanged(tmp_path):
+def test_build_command_staging_allowlist_overlay_and_original_unchanged(tmp_path,monkeypatch):
     # Use source copy under pytest directory; no EXE created. Tests exercise real argv through fake runner.
+    # Match the simulated CPU release profile without modifying an actual CUDA env.
+    import scripts.release_config as config
+    original_version=config.metadata.version
+    def cpu_profile_version(name):
+        try:return original_version(name)
+        except config.metadata.PackageNotFoundError:
+            if name=='onnxruntime':return original_version('onnxruntime-gpu')
+            raise
+    monkeypatch.setattr(config.metadata,'version',cpu_profile_version)
     import shutil
     root=tmp_path/'source with spaces';root.mkdir()
     for name in ('run_transcomic.py','pyproject.toml','requirements-release.lock','TransComic.spec'):

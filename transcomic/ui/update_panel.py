@@ -271,6 +271,8 @@ def native_install_idle(window):
     """No scheduling, cancellation or request fencing is permitted for install."""
     from ..update.install import window_safety
     if window._closed:return False
+    tts=getattr(window,'tts_page',None)
+    if tts and tts.is_busy():return False
     snapshot=window_safety(window)
     scheduler=window.scheduler
     return not (any(getattr(snapshot,n) for n in ('translating','paused','inflight','transaction','editing')) or

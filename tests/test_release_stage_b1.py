@@ -213,7 +213,17 @@ def test_sqlite_backup_migration_and_schema_rollback_limits(tmp_path):
     with sqlite3.connect(backup) as copy:assert copy.execute('PRAGMA user_version').fetchone()[0]==1
 
 
-def test_static_allowlist_plugins_resources_lock_and_b1_label():
+def test_static_allowlist_plugins_resources_lock_and_b1_label(monkeypatch):
+    # This is a CPU release-profile configuration test, not a requirement to
+    # install the conflicting CPU wheel into a developer's verified CUDA env.
+    import scripts.release_config as config
+    original=config.metadata.version
+    def cpu_profile_version(name):
+        try:return original(name)
+        except config.metadata.PackageNotFoundError:
+            if name=='onnxruntime':return original('onnxruntime-gpu')
+            raise
+    monkeypatch.setattr(config.metadata,'version',cpu_profile_version)
     root=Path(__file__).resolve().parents[1];report=static_configuration(root)
     assert report['missing']==[] and report['qt_windows_plugin']
     spec=(root/'TransComic.spec').read_text();iss=(root/'installer/TransComic.iss').read_text(encoding='utf8')

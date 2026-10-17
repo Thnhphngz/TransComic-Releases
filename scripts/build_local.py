@@ -19,6 +19,13 @@ from transcomic.version import VERSION
 
 def input_files(root):
     files=[root/name for name in ('run_transcomic.py','pyproject.toml','requirements-release.lock','TransComic.spec','installer/TransComic.iss','installer/TransComic.ico','scripts/release_config.py','scripts/update_helper.py')]
+    # Exact public inputs required by the TTS hook; do not glob runtime caches,
+    # imported documents, keys, fixtures or arbitrary JSON into the build.
+    files += [root/name for name in ('scripts/tts_packaging.py','transcomic/tts/setup-catalog.json',
+              'transcomic/tts/calibration.json','docs/tts-licenses.md','docs/tts-third-party-notices.md',
+              'docs/windows-distribution-rights.md')]
+    descriptor=root/'transcomic/tts/gpu-pack.json'
+    if descriptor.is_file():files.append(descriptor)
     files += list((root/'transcomic').rglob('*.py'))+list((root/'transcomic/ui/assets').glob('*.svg'))
     return sorted(safe_path(p,root) for p in files)
 
@@ -67,6 +74,7 @@ def run_tool(argv,cwd,log,timeout):
 def main(argv=None):
     parser=argparse.ArgumentParser(description='BUILD_LOCAL devtest only; never install/release')
     parser.add_argument('--output',type=Path)
+    parser.add_argument('--distribution-kit',type=Path,default=os.environ.get('TRANSCOMIC_DISTRIBUTION_KIT'),help='Verified local notices/corresponding-source kit (or TRANSCOMIC_DISTRIBUTION_KIT)')
     parser.add_argument('--candidate-version',help='Staging-only devtest version overlay; never changes source/journal')
     parser.add_argument('--official-1.0.0',dest='official_1_0_0',action='store_true',help='Build the authorized clean source version 1.0.0; no installation or publication')
     parser.add_argument('--release-build',action='store_true',help='Canonical package from clean committed current VERSION; never publish or install')
@@ -79,6 +87,9 @@ def main(argv=None):
             parser.error('Official 1.0.0 requires clean committed source VERSION 1.0.0 and no version overlay')
     output=args.output or ROOT/'artifacts/first-local-build'/('build-'+uuid4().hex)
     try:
+        from scripts.distribution_kit import verify_kit
+        if args.distribution_kit is None:raise ValueError('Corresponding-source/notices kit required')
+        kit=verify_kit(args.distribution_kit,ROOT)
         inventory=discover();compiler=inventory['ISCC']['path']
         if not compiler or inventory['platform']['system']!='Windows' or inventory['platform']['bits']!=64:raise ValueError('Windows x64 / Inno compiler missing')
         stage,report=prepare(ROOT,output,args.candidate_version);output=safe_path(output,ROOT);version=report['version']
@@ -87,15 +98,20 @@ def main(argv=None):
             report.update(status='OFFICIAL LOCAL BUILD — NOT PUBLISHED',source_tree_state='clean_local_commit',official_version=version)
             (output/'build-inputs.json').write_text(json.dumps(report,indent=2),encoding='utf8')
         run_tool([sys.executable,'-m','PyInstaller','--noconfirm','--clean','--distpath',str(stage/'dist'),'--workpath',str(output/'work'),str(stage/'TransComic.spec')],stage,output/'pyinstaller.log',1800)
+        from scripts.tts_packaging import audit_payload
+        report['native_payload']=audit_payload(stage/'dist/TransComic')
+        shutil.copytree(args.distribution_kit,stage/'dist/TransComic/ThirdParty')
+        verify_kit(stage/'dist/TransComic/ThirdParty',stage)
+        report['distribution_kit']=kit
         for name in ('TransComic.exe','TransComic-UpdateHelper.exe'):
-            p=stage/'dist'/name
+            p=stage/'dist'/('TransComic/'+name if name=='TransComic.exe' else name)
             if not p.is_file() or pe_architecture(p)!='x64' or file_version(p)!=version+'.0':raise ValueError('EXE architecture/version mismatch')
         filename=f'TransComic-Setup-{version}-'+('' if canonical_build else 'devtest-')+'windows-x64.exe'
         run_tool([str(safe_path(compiler)),'/DBUILD_LOCAL','/O'+str(output/'installer'),'/F'+Path(filename).stem,str(stage/'installer/TransComic.iss')],stage,output/'iscc.log',900)
         installer=output/'installer'/filename
         if not installer.is_file() or pe_architecture(installer) not in ('x86','x64') or file_version(installer)!=version+'.0':raise ValueError('Installer metadata mismatch')
         # Inno bootstrapper may be x86; ISS payload/target is Windows x64.
-        products=[stage/'dist/TransComic.exe',stage/'dist/TransComic-UpdateHelper.exe',installer]
+        products=[stage/'dist/TransComic/TransComic.exe',stage/'dist/TransComic-UpdateHelper.exe',installer]
         report['artifacts']=[{'path':str(p),'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'pe_arch':pe_architecture(p),'version':file_version(p)} for p in products]
         report['installer_executed']=False
         if canonical_build:

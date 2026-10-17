@@ -19,6 +19,21 @@ def data_path() -> Path:
 
 
 def main() -> int:
+    if '--tts-distribution-smoke' in sys.argv:
+        from .distribution_smoke import main as smoke
+        return smoke()
+    if '--tts-v4-smoke' in sys.argv:
+        if getattr(sys,'frozen',False):return 2
+        from .tts.v4_smoke import main as smoke
+        return smoke()
+    if '--tts-crash-smoke' in sys.argv:
+        if getattr(sys,'frozen',False):return 2
+        from .tts.crash_smoke import main as smoke
+        return smoke()
+    if '--tts-source-smoke' in sys.argv:
+        if getattr(sys,'frozen',False):return 2  # Developer-only isolated harness.
+        from .tts.source_smoke import main as smoke
+        return smoke()
     if '--local-build-smoke' in sys.argv:
         from .local_build_smoke import main as smoke
         return smoke()

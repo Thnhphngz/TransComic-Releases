@@ -396,13 +396,17 @@ def test_optional_summary_failure_does_not_interrupt_translation(tmp_path,monkey
 @pytest.mark.parametrize('summary_failure',[False,True])
 def test_shutdown_fence_retires_late_callback_without_losing_attribution(tmp_path,monkeypatch,summary_failure):
     store,docs,run,jobs=setup(tmp_path,1,1,files=1)
-    gate=threading.Event()
+    gate=threading.Event();entered=threading.Event()
     async def handler(req):
+        entered.set()
         while not gate.is_set():await asyncio.sleep(.002)
         return success(req)
     scheduler,pool=start(store,run,jobs,handler)
     try:
-        wait_for(lambda:scheduler.active_http==1)
+        # active_http is incremented before the pool persists its sent marker.
+        # Fence only after the mock transport really entered the HTTP handler;
+        # otherwise this tests the legitimate cancelled-before-send branch.
+        wait_for(entered.is_set)
         if summary_failure:
             import sqlite3
             import transcomic.kira_monitor_store as summaries

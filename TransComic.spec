@@ -8,35 +8,39 @@ from transcomic.version import VERSION
 from scripts.release_config import exe_version_resource
 from PySide6 import __file__ as qt_module
 from PyInstaller.utils.hooks import collect_submodules
+from scripts.tts_packaging import resources, FROZEN_EXCLUDES, filter_native
+tts_datas,tts_binaries,tts_hidden=resources()
 from PyInstaller.utils.win32.versioninfo import VSVersionInfo, FixedFileInfo, StringFileInfo, StringTable, StringStruct, VarFileInfo, VarStruct
 root = Path(SPECPATH)
 qt_plugins = Path(qt_module).parent/'plugins'
 # Only these plugin families; no root-directory data glob or personal files.
 plugins = [(str(p), 'PySide6/plugins/'+family) for family in ('platforms','imageformats','styles')
-           for p in (qt_plugins/family).glob('*.dll')]
+           for p in (qt_plugins/family).glob('*.dll') if p.name!='qpdf.dll']
 
 
 a = Analysis(
     [str(root/'run_transcomic.py')],
     pathex=[str(root)],
-    binaries=plugins,
-    datas=[(str(p), 'transcomic/ui/assets') for p in (root/'transcomic/ui/assets').glob('*.svg')],
-    hiddenimports=collect_submodules('docx')+['PySide6.QtSvg','PySide6.QtNetwork','charset_normalizer'],
+    binaries=plugins+tts_binaries,
+    datas=[(str(p), 'transcomic/ui/assets') for p in (root/'transcomic/ui/assets').glob('*.svg')]+tts_datas,
+    hiddenimports=collect_submodules('docx')+['PySide6.QtSvg','PySide6.QtNetwork','charset_normalizer']+tts_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['pytest','tests','scripts','tkinter'],
+    excludes=['pytest','tests','scripts','tkinter','PySide6.QtPdf','PySide6.QtPdfWidgets','PySide6.QtVirtualKeyboard']+list(FROZEN_EXCLUDES),
     noarchive=False,
     optimize=0,
 )
+# Qt's general image hook also discovers qpdf; PDF is not an application format
+# and QtPdf has a different community license. Do not ship that unused module.
+a.binaries=filter_native(a.binaries)
 pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='TransComic',
     icon=str(root/'installer/TransComic.ico'),
     version=eval(exe_version_resource(VERSION)),
@@ -53,6 +57,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
+app_distribution = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='TransComic')
 
 # External helper ships beside the app; native execution requires installed identity and Safe Exit.
 helper_analysis = Analysis(

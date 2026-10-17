@@ -28,9 +28,11 @@ UsePreviousAppDir=yes
 SetupIconFile=TransComic.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 VersionInfoVersion={#MyAppVersion}
+InfoBeforeFile=..\docs\windows-distribution-rights.md
 
 [Files]
-Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+; External shared libraries remain replaceable, including LGPL Qt/audio libraries.
+Source: "..\dist\TransComic\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\dist\TransComic-UpdateHelper.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

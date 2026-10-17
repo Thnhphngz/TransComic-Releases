@@ -8,7 +8,8 @@ from transcomic.release_adapters import safe_path
 from transcomic.update.metadata import UpdateError
 
 ROOT_FILES={'.gitignore','README.md','TransComic.spec','run_transcomic.py',
-            'release_transcomic.bat','pyproject.toml','requirements-release.lock','conftest.py'}
+            'release_transcomic.bat','pyproject.toml','requirements-release.lock','requirements-tts-cuda.lock','conftest.py'}
+TTS_CATALOG_FILES={'transcomic/tts/setup-catalog.json','transcomic/tts/calibration.json'}
 SECRET=re.compile(rb'gh[oopsu]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AIza[A-Za-z0-9_-]{25,}|sk-[A-Za-z0-9_-]{24,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----')
 
 def git(root,*args):
@@ -16,7 +17,7 @@ def git(root,*args):
 
 def allowed(name):
     p=Path(name)
-    return (name in ROOT_FILES or name=='installer/TransComic.iss' or name=='installer/TransComic.ico'
+    return (name in ROOT_FILES or name in TTS_CATALOG_FILES or name=='installer/TransComic.iss' or name=='installer/TransComic.ico'
         or (p.parts[0] in ('transcomic','scripts','tests') and p.suffix in ('.py','.svg'))
         or (p.parts[0]=='docs' and p.suffix=='.md')) and '..' not in p.parts
 
