@@ -27,6 +27,7 @@ def input_files(root):
     descriptor=root/'transcomic/tts/gpu-pack.json'
     if descriptor.is_file():files.append(descriptor)
     files += list((root/'transcomic').rglob('*.py'))+list((root/'transcomic/ui/assets').glob('*.svg'))
+    files += [root/'transcomic/capcut'/name for name in ('mau-structure.zip','mau-origin.json','mau-animations.zip')]
     return sorted(safe_path(p,root) for p in files)
 
 

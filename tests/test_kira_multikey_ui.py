@@ -23,6 +23,36 @@ def gui(tmp_path):
 
 
 @pytest.mark.parametrize('dark',[False,True])
+def test_selected_model_status_does_not_display_old_quota(gui,dark):
+    app,s,w=gui
+    if w.dark!=dark:w.toggle_theme()
+    s.add_kira_keys('synthetic-model-display')
+    key=s.kira_keys()[0]['id']
+    s.kira_key_status(key,'QUOTA_EXHAUSTED',model='old-paid-model')
+    pool=KiraPoolProvider(s,'explicit-free-model')
+    w.scheduler=Scheduler(s,pool)
+    w.refresh_kira_keys()
+    assert 'Sẵn sàng' in w.kira_keys_list.item(0).text()
+    assert s.kira_keys()[0]['status']=='QUOTA_EXHAUSTED'
+    lease=pool.reserve(1,1)
+    pool.release(lease[0],BatchResult({},'permission',diagnostics={'failure_kind':'permission'}))
+    w.refresh_kira_keys()
+    assert 'Không có quyền dùng model' in w.kira_keys_list.item(0).text()
+
+
+def test_idle_monitor_does_not_infer_shared_account(gui):
+    from transcomic.ui.kira_monitor import idle_snapshot
+    app,s,w=gui
+    s.add_kira_keys('synthetic-idle-a synthetic-idle-b synthetic-idle-c')
+    s.set_setting('concurrency','30')
+    snap=idle_snapshot(w)
+    assert snap['keys']==3 and snap['maximum']==90
+    ids=[k['id'] for k in s.kira_keys()]
+    for key in ids:s.set_kira_account_scope(key,ids[0])
+    assert idle_snapshot(w)['maximum']==30
+
+
+@pytest.mark.parametrize('dark',[False,True])
 def test_keys_ui_refresh_stable_toggle_delete_and_no_network(gui,monkeypatch,dark):
     app,s,w=gui
     if w.dark!=dark:w.toggle_theme()

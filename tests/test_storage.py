@@ -127,5 +127,6 @@ def test_legacy_database_migrates_without_losing_data(tmp_path):
     assert store.lines("doc")[0]["translation"] == "Bản dịch"
     assert store.setting("kira_model") == "kira-2.5-flash"
     assert store.load_key() == b"encrypted-key"
-    assert store.db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "8"
+    assert store.db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "9"
+    assert 'verified_translation_revision' in {r['name'] for r in store.db.execute('PRAGMA table_info(lines)')}
     store.close()

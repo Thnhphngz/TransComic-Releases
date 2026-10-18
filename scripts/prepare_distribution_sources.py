@@ -18,10 +18,66 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 
 
+def refresh_kit(previous,previous_lock,out):
+    """Reuse a verified kit and add only newly pinned dependencies."""
+    import httpx
+    from scripts.distribution_kit import verify_kit
+    verify_kit(previous)
+    old=json.loads((previous/'manifest.json').read_text(encoding='utf8'))
+    if hashlib.sha256(previous_lock.read_bytes()).hexdigest()!=old['release_lock_sha256']:
+        raise ValueError('Previous lock does not belong to verified kit')
+    def pins(path):
+        return dict(line.strip().split('==',1) for line in path.read_text().splitlines() if line.strip() and not line.startswith('#'))
+    before=pins(previous_lock);after=pins(ROOT/'requirements-release.lock')
+    if any(after.get(n)!=v for n,v in before.items()):raise ValueError('Changed existing pins require full source preparation')
+    added={n:v for n,v in after.items() if n not in before}
+    if out.exists():raise ValueError('Use a new kit directory')
+    shutil.copytree(previous,out)
+    provenance=json.loads((out/'source-provenance.json').read_text(encoding='utf8'))
+    with httpx.Client(timeout=120,follow_redirects=True,trust_env=False) as client:
+        for name,version in added.items():
+            if metadata.version(name)!=version:raise ValueError('Build dependency version mismatch')
+            response=client.get(f'https://pypi.org/pypi/{name}/{version}/json');response.raise_for_status()
+            source=next(r for r in response.json()['urls'] if r['packagetype']=='sdist')
+            from urllib.parse import urlsplit
+            if urlsplit(source['url']).hostname!='files.pythonhosted.org':raise ValueError('Untrusted source host')
+            downloaded=client.get(source['url']);downloaded.raise_for_status();raw=downloaded.content
+            if hashlib.sha256(raw).hexdigest()!=source['digests']['sha256'] or len(raw)!=source['size']:
+                raise ValueError('Dependency source hash/size mismatch')
+            target=out/'sources'/source['filename'];target.write_bytes(raw)
+            provenance.append(dict(component=name,file=target.relative_to(out).as_posix(),url=source['url'],
+                                   sha256=source['digests']['sha256'],bytes=len(raw),version=version))
+            dist=metadata.distribution(name);count=0
+            for file in dist.files or []:
+                if file.name.upper().startswith(('LICENSE','LICENCE','COPYING','NOTICE','AUTHORS')):
+                    src=Path(dist.locate_file(file))
+                    if src.is_file():
+                        dst=out/'notices'/name/str(file);dst.parent.mkdir(parents=True,exist_ok=True)
+                        shutil.copyfile(src,dst);count+=1
+            if not count:raise ValueError('New dependency notices missing')
+    (out/'source-provenance.json').write_text(json.dumps(provenance,indent=2),encoding='utf8')
+    for name in ('tts-licenses.md','tts-third-party-notices.md','windows-distribution-rights.md'):
+        shutil.copyfile(ROOT/'docs'/name,out/name)
+    files={}
+    for p in sorted(out.rglob('*')):
+        if p.is_file() and p.name!='manifest.json':
+            with p.open('rb') as stream:sha=hashlib.file_digest(stream,'sha256').hexdigest()
+            files[p.relative_to(out).as_posix()]=dict(bytes=p.stat().st_size,sha256=sha)
+    old.update(components=sorted(set(old['components'])|set(added)),files=files,
+               release_lock_sha256=hashlib.sha256((ROOT/'requirements-release.lock').read_bytes()).hexdigest())
+    (out/'manifest.json').write_text(json.dumps(old,indent=2),encoding='utf8')
+    return verify_kit(out,ROOT)
+
+
 def main():
     import httpx
     parser=argparse.ArgumentParser();parser.add_argument('--output',type=Path,required=True)
-    args=parser.parse_args();out=args.output.resolve();out.mkdir(parents=True,exist_ok=True)
+    parser.add_argument('--refresh-from',type=Path);parser.add_argument('--previous-lock',type=Path)
+    args=parser.parse_args();out=args.output.resolve()
+    if args.refresh_from:
+        if not args.previous_lock:parser.error('--previous-lock is required for verified refresh')
+        print(json.dumps(refresh_kit(args.refresh_from,args.previous_lock,out),indent=2));return
+    out.mkdir(parents=True,exist_ok=True)
     sources=out/'sources';sources.mkdir(exist_ok=True)
     rows=[]
     prior=json.loads((out/'source-provenance.json').read_text()) if (out/'source-provenance.json').is_file() else []

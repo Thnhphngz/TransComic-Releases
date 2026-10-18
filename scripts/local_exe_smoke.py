@@ -19,6 +19,7 @@ def main(argv=None):
     parser=argparse.ArgumentParser();parser.add_argument('--exe',required=True,type=Path)
     parser.add_argument('--scale',default='1');parser.add_argument('--source',action='store_true')
     parser.add_argument('--output',type=Path,help='Evidence directory; preserve previous build smoke by selecting a new directory')
+    parser.add_argument('--cpu-cache',type=Path,help='Existing isolated CPU acceptance cache, never a production profile')
     args=parser.parse_args(argv)
     exe=safe_path(args.exe,ROOT)
     if exe.name!='TransComic.exe' and not (args.source and exe.name=='run_transcomic.py'):raise ValueError('Only app EXE/source smoke, never installer/helper')
@@ -26,6 +27,7 @@ def main(argv=None):
     with TemporaryDirectory(prefix='TransComic-build-smoke-') as directory:
         root=Path(directory);(root/'isolated-smoke.json').write_text(json.dumps({'mode':'isolated-build-smoke'}),encoding='utf8')
         env=dict(os.environ,LOCALAPPDATA=directory,QT_SCALE_FACTOR=args.scale,QT_QPA_PLATFORM='windows',TEMP=str(root.parent),TMP=str(root.parent))
+        if args.cpu_cache:env['TRANSCOMIC_SMOKE_CPU_CACHE']=str(args.cpu_cache.resolve())
         argv=[sys.executable,str(exe),'--local-build-smoke'] if args.source else [str(exe),'--local-build-smoke']
         with (out/'process.log').open('wb') as log:
             result=subprocess.run(argv,env=env,cwd=root,stdout=log,stderr=subprocess.STDOUT,shell=False,timeout=180,creationflags=0x08000000)

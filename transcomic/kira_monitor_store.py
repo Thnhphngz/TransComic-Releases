@@ -37,7 +37,7 @@ def load_latest(store):
     snapshot=json.loads(row[0]); records=records_for_run(store,snapshot['run_id'])
     if not records:
         snapshot.update(archived=True,detail_available=False,busy=0,active_files=0)
-        if snapshot['state'] in ('running','user_paused'):snapshot['state']='interrupted'
+        if snapshot['state'] in ('running','user_paused','waiting_rate_limit','retry_scheduled','network_waiting','provider_recovering'):snapshot['state']='interrupted'
         for stats in snapshot['per_key'].values():
             stats.update(busy=0,in_flight_lines=0,in_flight_requests=0,files=[])
         return snapshot
@@ -55,9 +55,10 @@ def load_latest(store):
         s['mean_seconds']=s['seconds']/s['latency_samples'] if s['latency_samples'] else 0
         s['error_rate']=s['errors']/s['requests'] if s['requests'] else 0
     state=snapshot['state']
-    if state not in ('finished','stopped','interrupted','needs_intervention','quota_exhausted'):
+    if state not in ('finished','stopped','interrupted','needs_intervention','quota_exhausted','blocked','completed_with_errors'):
         state='interrupted'
     telemetry.set_state(state)
+    telemetry.recovery_phase=snapshot.get('recovery_phase',0)
     if snapshot.get('ended_at'):telemetry.ended_at=snapshot['ended_at']
     snapshot['busy']=0
     result=telemetry.snapshot(snapshot)

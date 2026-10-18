@@ -105,6 +105,13 @@ def validate_snapshot(document, rows, layout=None):
                 row = owned.get(item['id'])
                 if item['id'] not in affected or row is None: continue
                 if row.get('source_revision',0) != item.get('source_revision',0): continue
+                # Exact-ID acceptance is positive evidence at the current pair
+                # of revisions. An old response-level warning is not a defect
+                # in the current document; real ownership/order faults above
+                # remain blocking, irrespective of this evidence.
+                if (usable(row) and row.get('state')=='done' and
+                        row.get('verified_source_revision')==row.get('source_revision') and
+                        row.get('verified_translation_revision')==row.get('translation_revision')):continue
                 # Unmapped extra IDs are batch-wide: all verified results may have
                 # been saved at revision +1; a later successful edit/run supersedes it.
                 allowance = 1 if not failure.get('line_ids') else 0

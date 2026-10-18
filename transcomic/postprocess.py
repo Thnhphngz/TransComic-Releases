@@ -5,7 +5,16 @@ from .quality import PLACEHOLDER
 VERSION = 'review-periods-v2-technical-links'
 
 
-def normalize(source, raw):
+def normalize(source, raw, *, preserve_punctuation=False):
+    if preserve_punctuation:
+        # New Kira recovery jobs keep the model's verified text intact. Protocol
+        # repair must not silently delete periods, quotes or Unicode punctuation.
+        text=raw.strip();notes=[]
+        from .documents import translatable
+        if translatable(source) and not translatable(text):
+            return '',['No ordinary translated text; review required']
+        if sorted(PLACEHOLDER.findall(source))!=sorted(PLACEHOLDER.findall(text)):notes.append('Placeholder mismatch')
+        return text,notes
     protected = []
     def protect(match):
         protected.append(match.group())

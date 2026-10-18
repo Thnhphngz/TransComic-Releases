@@ -4,14 +4,53 @@ import hmac
 import secrets
 import uuid
 
-STATES = {'READY', 'COOLDOWN', 'QUOTA_EXHAUSTED', 'INVALID', 'DISABLED', 'UNKNOWN_ERROR'}
+STATES = {'READY', 'COOLDOWN', 'TEMPORARY_ERROR', 'QUOTA_EXHAUSTED', 'INVALID', 'DISABLED', 'UNKNOWN_ERROR',
+          'PERMISSION_DENIED','MODEL_UNAVAILABLE','CREDENTIAL_ERROR'}
 
 
 class KiraKeysMixin:
+    def recover_kira_transient_statuses(self, *, legacy=False):
+        """Expire temporary health only; never re-enable disabled/auth/quota keys.
+
+        Legacy UNKNOWN_ERROR is repaired only with the last durable attempt's
+        matching key identity and a recognized transient failure, not a guess.
+        This never queues HTTP or changes job/batch/line state.
+        """
+        import json,time
+        if not legacy:
+            with self.lock:
+                if not self.db.execute("SELECT 1 FROM kira_keys WHERE status IN ('COOLDOWN','TEMPORARY_ERROR') AND cooldown_until>0 AND cooldown_until<=? LIMIT 1",(time.time(),)).fetchone():return
+        with self.transaction():
+            self.db.execute("UPDATE kira_keys SET status='READY',cooldown_until=0 WHERE status IN ('COOLDOWN','TEMPORARY_ERROR') AND cooldown_until>0 AND cooldown_until<=?",(time.time(),))
+            if not legacy:return
+            pending={r['id'] for r in self.db.execute("SELECT id FROM kira_keys WHERE status='UNKNOWN_ERROR'")}
+            if not pending:return
+            for row in self.db.execute('SELECT diagnostics FROM request_attempts WHERE diagnostics IS NOT NULL ORDER BY rowid DESC').fetchall():
+                try:d=json.loads(row[0])
+                except (ValueError,TypeError):continue
+                if not isinstance(d,dict):continue
+                monitor=d.get('monitor') or {}
+                key=d.get('key_alias') or (monitor.get('key_id') if isinstance(monitor,dict) else None)
+                if key not in pending:continue
+                pending.remove(key)
+                if d.get('failure_kind') in ('http_504','http_server_error','client_timeout','network_error','connect_error','connect_not_sent','http_timeout'):
+                    self.db.execute("UPDATE kira_keys SET status='READY',cooldown_until=0 WHERE id=?",(key,))
+                elif d.get('http_status')==402 and d.get('provider_error_code') in ('vnd_balance_exhausted','insufficient_quota','quota_exhausted','billing_hard_limit_reached'):
+                    self.kira_key_status(key,'QUOTA_EXHAUSTED',reason='quota_exhausted',model=d.get('model'))
+                elif d.get('failure_kind')=='rate_limit' and d.get('http_status')==429:
+                    self.db.execute("UPDATE kira_keys SET status='READY',cooldown_until=0 WHERE id=?",(key,))
+                elif d.get('failure_kind') in ('permission','model_or_request') and d.get('model'):
+                    self.kira_key_status(key,'PERMISSION_DENIED' if d['failure_kind']=='permission' else 'MODEL_UNAVAILABLE',reason=d['failure_kind'],model=d['model'])
+                if not pending:break
     def kira_account_scope(self, key_id):
-        # Unknown ownership remains shared. A key ID is an opaque, stable group ID,
-        # not a credential or an assertion learned from the provider.
+        # Stored declaration is preserved for compatibility. Only confirmed
+        # declarations affect effective ownership; unknown keys stay isolated.
         return self.setting('kira_account:' + key_id, 'shared')
+
+    def kira_effective_scope(self, key_id):
+        """Only an explicit ownership confirmation may share health/limits."""
+        scope = self.kira_account_scope(key_id)
+        return scope if scope != 'shared' and self.setting('kira_account_confirmed:'+key_id,'') == scope else key_id
 
     def set_kira_account_scope(self, key_id, scope):
         with self.transaction():
@@ -20,6 +59,7 @@ class KiraKeysMixin:
             if key_id not in ids or scope not in ids | scopes | {'shared'}:
                 raise ValueError('Invalid Kira account group')
             self.set_setting('kira_account:' + key_id, scope)
+            self.set_setting('kira_account_confirmed:' + key_id, scope if scope != 'shared' else '')
 
     def migrate_kira_key(self):
         # Copy ciphertext without decrypting: recovery is one atomic/idempotent transaction.
@@ -32,6 +72,7 @@ class KiraKeysMixin:
 
     def kira_keys(self, decrypt=False):
         from .security import unprotect_key
+        self.recover_kira_transient_statuses()
         with self.lock:
             rows = self.db.execute('SELECT * FROM kira_keys ORDER BY rowid').fetchall()
             result = []
@@ -92,8 +133,14 @@ class KiraKeysMixin:
                 self.db.execute("UPDATE kira_keys SET enabled=?,status=CASE WHEN status='DISABLED' THEN 'READY' ELSE status END WHERE id=?", (int(enabled),key_id))
             if restore:
                 self.db.execute("UPDATE kira_keys SET status=CASE WHEN enabled=1 THEN 'READY' ELSE 'DISABLED' END,cooldown_until=0 WHERE id=?", (key_id,))
+                self.db.execute('DELETE FROM settings WHERE key LIKE ?',('kira_model_status:'+key_id+':%',))
+                self.db.execute('DELETE FROM settings WHERE key LIKE ?',('kira_verified_quota:'+self.kira_effective_scope(key_id)+':%',))
 
-    def kira_key_status(self, key_id, state, until=0):
+    def kira_key_status(self, key_id, state, until=0, *, reason=None, model=None):
         if state not in STATES: raise ValueError('Invalid key state')
         with self.transaction():
             self.db.execute("UPDATE kira_keys SET status=?,cooldown_until=? WHERE id=?", (state,until,key_id))
+            if reason:self.set_setting('kira_key_reason:'+key_id,reason)
+            if model and state in ('PERMISSION_DENIED','MODEL_UNAVAILABLE','QUOTA_EXHAUSTED'):
+                self.set_setting('kira_model_status:'+key_id+':'+model,state)
+                self.set_setting('kira_key_status_model:'+key_id,model)

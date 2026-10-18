@@ -33,6 +33,25 @@ def stylesheet(dark: bool) -> str:
     QLabel#muted {{ color: {c['muted']}; }}
     QFrame#card, QFrame#sidebar {{ background: {c['panel']}; border: 1px solid {c['border']}; border-radius: 15px; }}
     QFrame#sidebar {{ background: {c['sidebar']}; border: 0; border-radius: 0; }}
+    QTableView#capcutPairTable {{ selection-color: {c['ink']}; }}
+    QFrame#capcutExportPanel {{ background: {c['panel']}; border: 1px solid {'#806657' if dark else '#B59B8B'}; border-radius: 15px; }}
+    QTableView#capcutSplitPreview {{ background: {c['panel']}; border: 1px solid {'#806657' if dark else '#B59B8B'}; border-radius: 4px; selection-color: {c['ink']}; gridline-color: {c['border']}; }}
+    QTableView#capcutSplitPreview QHeaderView::section {{ background: {c['field']}; border-bottom: 1px solid {'#806657' if dark else '#B59B8B'}; }}
+    QLineEdit#capcutNameEditor {{ background: {c['field']}; color: {c['ink']}; border: 1px solid {c['border']}; border-radius: 0; padding: 0 3px; }}
+    QLineEdit#capcutNameEditor:focus {{ border: 1px solid {c['accent']}; }}
+    QWidget#capcutGroupTitle {{ background: transparent; }}
+    QWidget#capcutSplitControls {{ background: transparent; }}
+    QFrame#capcutWorkspacePanel {{ background: {c['panel']}; border: 1px solid {c['border']}; border-radius: 12px; }}
+    QListView#capcutGroupList {{ background: {c['panel']}; border: 0; outline: 0; }}
+    QWidget#capcutInspector {{ background: transparent; }}
+    QSplitter#capcutWorkspace::handle:horizontal {{ width: 7px; margin: 0; border: 0; background: {c['border']}; }}
+    QLabel#capcutGroupName {{ font-size: 15px; font-weight: 600; color: {c['ink']}; }}
+    QLabel#capcutTotals {{ color: {c['muted']}; }}
+    QLabel#capcutTotals[scanState="ready"] {{ color: {'#71D7AB' if dark else '#16784C'}; font-weight: 700; }}
+    QLabel#capcutTotals[scanState="review"] {{ color: {'#FF9999' if dark else '#B42323'}; font-weight: 700; }}
+    QLabel#capcutStatus[scanState="ready"] {{ color: {'#71D7AB' if dark else '#16784C'}; }}
+    QLabel#capcutStatus[scanState="review"] {{ color: {'#FF9999' if dark else '#B42323'}; }}
+    QLabel#capcutStatus[scanState="pending"] {{ color: {c['muted']}; }}
     QPushButton {{ background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 {c['panel']},stop:0.25 {c['field']},stop:1 {c['field']}); border: 1px solid {c['border']}; border-radius: 10px; padding: 9px 15px; font-weight: 600; }}
     QPushButton:checked {{ background: {c['accent']}; color: {'#30231D' if dark else '#FFFCF9'}; border-color: {c['accent']}; }}
     QSplitter::handle {{ background: {c['border']}; width: 5px; }}

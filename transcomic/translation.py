@@ -148,6 +148,7 @@ class Scheduler:
     def start_many(self, job_ids, run_id=None):
         if self._thread and self._thread.is_alive():
             raise RuntimeError("Scheduler is already running")
+        if self._abandoned.is_set():raise RuntimeError('Retired scheduler requires a new confirmed recovery session')
         jobs = [self.store.job(j) for j in job_ids]
         if not jobs or any(not j for j in jobs): raise ValueError('Missing jobs')
         if len({(j['provider'], j['model'], j['concurrency'], j['prompt_version']) for j in jobs}) != 1:
@@ -157,6 +158,8 @@ class Scheduler:
         self.started_at = time.monotonic()
         self._paused.clear()
         self._stopped.clear()
+        self._cancel_requested.clear()
+        self.intervention_reason=None;self.quota_paused=False
         self._set_state('running')
         self._thread = threading.Thread(target=self._run_thread, name="TransComicTranslation", daemon=True)
         self._thread.start()
@@ -170,7 +173,9 @@ class Scheduler:
                 if self._paused.is_set():monitor_state='user_paused'
                 elif any(self.store.job(j)['state']=='ready' for j in self.job_ids if j not in phase):monitor_state='running'
             self.provider.monitor.set_state(monitor_state)
-        for job_id in getattr(self,'_phase_job_ids',self.job_ids) or ([self.job_id] if self.job_id else []): self.store.job_state(job_id, state)
+        for job_id in getattr(self,'_phase_job_ids',self.job_ids) or ([self.job_id] if self.job_id else []):
+            if getattr(self.provider,'multi_key',False) and self.store.job(job_id)['state']=='finished' and state!='finished':continue
+            self.store.job_state(job_id, state)
         if self.run_id: self.store.run_state(self.run_id, state)
         if self.run_id and getattr(self,'current_locale',None) and state!='finished':
             self.store.run_language_state(self.run_id,self.current_locale,state)
@@ -203,11 +208,10 @@ class Scheduler:
     def has_work(store, job_id):
         from .retry import allowed_retry
         job = store.job(job_id)
-        multi_key=job['provider']=='kira' and bool(store.kira_keys())
         for batch in store.batches(job_id):
             prior = store.attempts(batch['id'])
             if batch['state'] == 'pending' and not prior: return True
-            if not multi_key and prior and prior[-1]['state'] == 'finished' and batch['state'] in ('error', 'partial', 'unknown') and allowed_retry(job, prior[-1]['diagnostics'] or {}, len(prior)+1):
+            if prior and prior[-1]['state'] == 'finished' and batch['state'] in ('error', 'partial', 'unknown') and allowed_retry(job, prior[-1]['diagnostics'] or {}, len(prior)+1):
                 if any(store.line(r['id'])['state'] in ('error', 'unknown', 'wrong_target_language') and store.line(r['id'])['source_revision']==r['source_revision'] and store.line(r['id'])['translation_revision']==r['translation_revision'] for r in batch['payload']): return True
         return False
 
@@ -232,6 +236,9 @@ class Scheduler:
                     records_for_run(self.store,self.run_id or self.job_id))
                 self._monitor_checkpoint_at=0
                 self.monitor_checkpoint(force=True)
+                if all(json.loads(self.store.job(j)['config']).get('kira_recovery_version',0)>=2 for j in self.job_ids):
+                    from .kira_workflow import run
+                    return run(self)
             groups={}
             for jid in self.job_ids:
                 groups.setdefault(language(self.store.job(jid)['target_lang']).locale,[]).append(jid)
@@ -264,7 +271,8 @@ class Scheduler:
                 unknown=any(r['state']=='unknown' and not r.get('error','').startswith('Kira gateway HTTP 504') for j in groups[locale] for r in self.store.lines(self.store.job(j)['document_id']))
                 if self._stopped.is_set() or self.intervention_reason or uncertain or unknown or any(s!='finished' for s in states):
                     state='interrupted' if 'interrupted' in states else 'stopped' if self._stopped.is_set() else 'quota_exhausted' if self.quota_paused else 'needs_intervention'
-                    for j in groups[locale]:self.store.job_state(j,state)
+                    for j in groups[locale]:
+                        if not getattr(self.provider,'multi_key',False) or self.store.job(j)['state']!='finished':self.store.job_state(j,state)
                     if state!='stopped':self.intervention_reason=self.intervention_reason or ('unknown_request' if uncertain or unknown else state)
                     self.store.run_language_state(self.run_id,locale,state)
                     if self.run_id:self.store.run_state(self.run_id,state)
@@ -288,8 +296,9 @@ class Scheduler:
         finally:
             if getattr(self.provider,'multi_key',False) and not self._abandoned.is_set():
                 state=(self.store.run(self.run_id) if self.run_id else self.store.job(self.job_id)).get('state','interrupted')
-                if all(self.store.job(j)['state']=='finished' for j in self.job_ids):state='finished'
-                elif self._stopped.is_set() and state!='interrupted':state='stopped'
+                final_jobs=self.store.run_jobs(self.run_id) if self.run_id else [self.store.job(j) for j in self.job_ids]
+                if self._stopped.is_set() and state!='interrupted':state='stopped'
+                elif all(j['state']=='finished' for j in final_jobs):state='finished'
                 self.provider.monitor.set_state(state)
                 self.monitor_checkpoint(force=True)
 

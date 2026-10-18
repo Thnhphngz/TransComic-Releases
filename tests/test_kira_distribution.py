@@ -23,6 +23,8 @@ from test_kira_multikey import lines, success, wait_for
 def fixture_docx(tmp_path):
     store = Store(tmp_path / 'synthetic.db')
     store.add_kira_keys('fixture-distribution-A fixture-distribution-B')
+    ids=[k['id'] for k in store.kira_keys()]
+    for key in ids:store.set_kira_account_scope(key,ids[0])
     store.set_setting('concurrency', '30')
     path = tmp_path / 'synthetic-121.docx'
     word = Document()
@@ -34,7 +36,7 @@ def fixture_docx(tmp_path):
     doc = store.import_document(path, data, 'vi', 'en', document_format='docx',
                                 locators=[u.locator for u in imported.units])[0]
     run, jobs = store.create_run([doc], ['en'], provider='kira', model='mock',
-        source_lang='vi', concurrency=30, config={'kira_multi_key': True})
+        source_lang='vi', concurrency=30, config={'kira_multi_key': True,'kira_recovery_version':1})
     assert len(store.lines(doc)) == 121
     assert len(store.batches(jobs[0])) == 41
     return store, doc, run, jobs
@@ -232,7 +234,7 @@ def test_account_assignment_frozen_until_new_provider_and_same_account_shares(tm
     pool=KiraPoolProvider(store,'mock',account_limit=1)
     assert pool.reserve(30,10)[0]==a
     store.set_kira_account_scope(b,b);pool.refresh()
-    assert pool.scopes[b]=='shared' and pool.reserve(30,10) is None
+    assert pool.scopes[b]==a and pool.reserve(30,10) is None
     pool.release(a)
     new=KiraPoolProvider(store,'mock',account_limit=1)
     assert new.availability(30)[1]==2 and new.scopes[b]==b
@@ -283,12 +285,9 @@ def test_121_unknown_batches_never_resent_on_other_key_or_resume(tmp_path,failur
         return success(req)
     pool=KiraPoolProvider(store,'mock',transport=httpx.MockTransport(handler))
     scheduler=Scheduler(store,pool);scheduler.start_many(jobs,run)
-    if failure=='timeout':
-        wait_for(lambda:scheduler._paused.is_set())
-        prior=len(seen);time.sleep(.05);assert len(seen)==prior
-        scheduler.resume()
     scheduler.join(20)
     assert not scheduler._thread.is_alive()
+    assert not scheduler._paused.is_set()
     assert len(seen)==41 and len(set(seen))==41 and seen.count(failed[0])==1
     assert scheduler.retry_count==0 and store.run(run)['state']=='needs_intervention'
     assert sum(v['errors'] for v in pool.stats.values())==1

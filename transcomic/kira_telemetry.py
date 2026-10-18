@@ -39,6 +39,7 @@ class KiraTelemetry:
             self.run_id = run_id; self.state = 'running'
             self.persistence_error = False
             self.intervention_reason = None
+            self.recovery_phase=0
             self.attempts.clear(); self.files.clear(); self.unique.clear(); self.key_unique.clear();self.key_names.clear()
             self.started_at = time.time(); self.ended_at = None
             for stats in self.stats.values():stats.clear(); stats.update(counters())
@@ -67,7 +68,7 @@ class KiraTelemetry:
                 name=record['file_name'],source_instance=record['source_instance'],
                 in_flight_lines=0,in_flight_requests=0,translated_lines=0,failed_lines=0,
                 unknown_lines=0,rejected_lines=0,requests=0,successful_requests=0,
-                saved_ids=set()))
+                saved_ids=set(),failed_ids=set(),unknown_ids=set(),rejected_ids=set()))
             self.version += 1
             return True
 
@@ -126,8 +127,15 @@ class KiraTelemetry:
                 f['successful_requests'] += bool(r.get('request_success'))
                 stats['batches'] += r['state']=='SUCCEEDED_AND_COMMITTED'
             stats['translated_lines'] += len(accepted); f['translated_lines'] += len(accepted)
-            f['failed_lines'] += len(failed); f['unknown_lines'] += len(unknown)
-            f['rejected_lines'] += len(rejected); f['saved_ids'].update(accepted)
+            f['failed_ids'].update(failed);f['unknown_ids'].update(unknown);f['rejected_ids'].update(rejected)
+            f['saved_ids'].update(accepted)
+            # Keep failed request counters as history, but unresolved line counts
+            # must fall when a later, verified attempt commits those exact IDs.
+            for files in self.files.values():
+                other=files.get((r['document_id'],r['target_language']))
+                if other is None:continue
+                for field in ('failed_ids','unknown_ids','rejected_ids'):other[field].difference_update(accepted)
+                other['failed_lines']=len(other['failed_ids']);other['unknown_lines']=len(other['unknown_ids']);other['rejected_lines']=len(other['rejected_ids'])
             positions = {(r['document_id'],r['target_language'],i) for i in accepted}
             self.unique.update(positions); self.key_unique[r['key_id']].update(positions)
             self.version += 1
@@ -136,7 +144,7 @@ class KiraTelemetry:
     def set_state(self, state):
         with self.lock:
             self.state = state
-            self.ended_at = time.time() if state in ('finished','stopped','interrupted','needs_intervention','quota_exhausted') else None
+            self.ended_at = time.time() if state in ('finished','stopped','interrupted','needs_intervention','quota_exhausted','blocked','completed_with_errors') else None
             self.version += 1
 
     def snapshot(self, pool_metrics):
@@ -148,7 +156,7 @@ class KiraTelemetry:
             for key,stats in metrics['per_key'].items():
                 rows = []
                 for value in self.files.get(key,{}).values():
-                    f = {k:v for k,v in value.items() if k!='saved_ids'}
+                    f = {k:v for k,v in value.items() if k not in ('saved_ids','failed_ids','unknown_ids','rejected_ids')}
                     f['unique_translated_lines'] = len(value['saved_ids'])
                     if f['in_flight_requests']:active_files.add(f['source_instance'])
                     rows.append(f)
@@ -162,6 +170,8 @@ class KiraTelemetry:
                 unique_translated_lines=len(self.unique),detail_available=bool(self.attempts))
             metrics['persistence_error']=self.persistence_error
             metrics['intervention_reason']=self.intervention_reason
+            metrics['recovery_phase']=getattr(self,'recovery_phase',0)
             for name in ('requests','successful_requests','failed_requests','unknown_requests','errors','translated_lines'):
                 metrics[name] = sum(s.get(name,0) for s in metrics['per_key'].values())
+            metrics['effective_rpm']=metrics['requests']*60/elapsed
             return metrics

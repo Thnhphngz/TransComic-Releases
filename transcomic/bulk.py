@@ -74,9 +74,16 @@ def workspace_status(rows, job_state=None):
     done = sum(usable(r) for r in required)
     errors = sum(r['state'] in ('error','wrong_target_language') for r in required)
     unknown = sum(r['state'] == 'unknown' for r in required)
-    if job_state in ('stopped', 'interrupted'): state = 'Đã dừng' if job_state == 'stopped' else 'Bị gián đoạn'
-    elif job_state in ('paused', 'pausing', 'user_paused'): state = 'Tạm dừng người dùng'
+    if job_state=='completed_with_errors':state='Hoàn thành còn lỗi'
+    elif job_state=='blocked':state='Bị chặn · kiểm tra quyền/ngân sách'
+    elif done == len(required) and not errors and not unknown and not any(r['state']=='processing' for r in required) and job_state in ('finished','needs_intervention','quota_exhausted'):state='Hoàn thành đầy đủ'
+    elif job_state in ('stopped', 'interrupted'): state = 'Đã dừng' if job_state == 'stopped' else 'Bị gián đoạn'
+    elif job_state == 'user_paused': state = 'Tạm dừng người dùng'
+    elif job_state in ('paused','pausing'):state='Tạm dừng · chưa xác định nguyên nhân'
     elif job_state == 'waiting_rate_limit': state = 'Chờ giới hạn API'
+    elif job_state == 'network_waiting':state='Chờ mạng phục hồi'
+    elif job_state == 'provider_recovering':state='Chờ Kira phục hồi'
+    elif job_state == 'retry_scheduled':state='Đang tự xử lý dòng lỗi'
     elif job_state in ('quota_exhausted', 'needs_intervention'): state = 'Cần xử lý hạn mức/lỗi API'
     elif any(r['state'] == 'processing' for r in required): state = 'Đang dịch'
     elif done == len(required): state = 'Hoàn thành đầy đủ'

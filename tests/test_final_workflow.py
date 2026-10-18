@@ -278,7 +278,7 @@ def test_v6_attempt_migration_keeps_reserved_requests_and_keys(tmp_path):
     store.save_key(b'encrypted-key'); store.close()
     db=sqlite3.connect(tmp_path/'state.db')
     db.execute('CREATE TABLE old_attempts (id TEXT PRIMARY KEY, original_batch_id TEXT NOT NULL REFERENCES batches(id), attempt_number INTEGER NOT NULL CHECK(attempt_number IN (1,2)), state TEXT NOT NULL, created_at TEXT NOT NULL, completed_at TEXT, diagnostics TEXT, UNIQUE(original_batch_id,attempt_number))')
-    db.execute('INSERT INTO old_attempts SELECT * FROM request_attempts'); db.execute('DROP TABLE request_attempts'); db.execute('ALTER TABLE old_attempts RENAME TO request_attempts')
+    db.execute('INSERT INTO old_attempts SELECT id,original_batch_id,attempt_number,state,created_at,completed_at,diagnostics FROM request_attempts'); db.execute('DROP TABLE request_attempts'); db.execute('ALTER TABLE old_attempts RENAME TO request_attempts')
     db.execute('ALTER TABLE jobs DROP COLUMN auto_retries'); db.commit(); db.close()
     reopened=Store(tmp_path/'state.db')
     assert reopened.attempts(batch['id'])[0]['id']==reserved

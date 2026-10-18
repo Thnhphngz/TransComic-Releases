@@ -106,8 +106,10 @@ class Store(KiraKeysMixin):
                 self.db.execute('PRAGMA foreign_keys=OFF')
                 self.db.execute('BEGIN IMMEDIATE')
                 try:
-                    self.db.execute('CREATE TABLE attempts_v7 (id TEXT PRIMARY KEY, original_batch_id TEXT NOT NULL REFERENCES batches(id), attempt_number INTEGER NOT NULL CHECK(attempt_number BETWEEN 1 AND 6), state TEXT NOT NULL, created_at TEXT NOT NULL, completed_at TEXT, diagnostics TEXT, UNIQUE(original_batch_id,attempt_number))')
-                    self.db.execute('INSERT INTO attempts_v7 SELECT * FROM request_attempts')
+                    self.db.execute('CREATE TABLE attempts_v7 (id TEXT PRIMARY KEY, original_batch_id TEXT NOT NULL REFERENCES batches(id), attempt_number INTEGER NOT NULL CHECK(attempt_number BETWEEN 1 AND 6), state TEXT NOT NULL, created_at TEXT NOT NULL, completed_at TEXT, diagnostics TEXT, reserved_tokens INTEGER NOT NULL DEFAULT 0, UNIQUE(original_batch_id,attempt_number))')
+                    columns='id,original_batch_id,attempt_number,state,created_at,completed_at,diagnostics'
+                    if 'reserved_tokens' in {r['name'] for r in self.db.execute('PRAGMA table_info(request_attempts)')}:columns+=',reserved_tokens'
+                    self.db.execute(f'INSERT INTO attempts_v7 ({columns}) SELECT {columns} FROM request_attempts')
                     self.db.execute('DROP TABLE request_attempts')
                     self.db.execute('ALTER TABLE attempts_v7 RENAME TO request_attempts')
                     self.db.execute('COMMIT')
@@ -133,23 +135,27 @@ class Store(KiraKeysMixin):
                     self.db.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
             self.db.execute("UPDATE documents SET source_instance=id WHERE source_instance=''")
             self.db.execute('CREATE INDEX IF NOT EXISTS kira_monitor_jobs ON jobs(run_id)')
-            self.db.execute("UPDATE translation_runs SET state='interrupted' WHERE state IN ('running','pausing','stopping','user_paused','waiting_rate_limit','retry_scheduled')")
+            self.db.execute("UPDATE translation_runs SET state='interrupted' WHERE state IN ('running','paused','pausing','stopping','user_paused','waiting_rate_limit','retry_scheduled','network_waiting','provider_recovering')")
             for saved in self.db.execute("SELECT id,config FROM translation_runs WHERE state='interrupted'").fetchall():
                 snapshot=json.loads(saved['config'])
                 states=snapshot.get('language_states',{})
                 changed=False
                 for locale,state in list(states.items()):
-                    if state in ('running','user_paused','waiting_rate_limit','stopping'):
+                    if state in ('running','paused','pausing','user_paused','waiting_rate_limit','retry_scheduled','network_waiting','provider_recovering','stopping'):
                         states[locale]='interrupted';changed=True
                 if changed:self.db.execute('UPDATE translation_runs SET config=? WHERE id=?',(json.dumps(snapshot,ensure_ascii=False),saved['id']))
-            self.db.execute("UPDATE meta SET value='8' WHERE key='schema_version'")
+            for table,column,definition in [('batches','original_payload','TEXT'),('request_attempts','reserved_tokens','INTEGER NOT NULL DEFAULT 0'),('lines','verified_source_revision','INTEGER'),('lines','verified_translation_revision','INTEGER')]:
+                if column not in {r['name'] for r in self.db.execute(f'PRAGMA table_info({table})')}:
+                    self.db.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
+            self.db.execute("UPDATE meta SET value='9' WHERE key='schema_version'")
             # A crash after dispatch cannot be distinguished from an unfinished request.
             self.db.execute("UPDATE batches SET state='unknown', error='Ứng dụng đóng khi request đang chạy' WHERE state='inflight'")
-            self.db.execute("UPDATE jobs SET state='interrupted' WHERE state IN ('running','pausing','stopping','user_paused','waiting_rate_limit','retry_scheduled')")
+            self.db.execute("UPDATE jobs SET state='interrupted' WHERE state IN ('running','paused','pausing','stopping','user_paused','waiting_rate_limit','retry_scheduled','network_waiting','provider_recovering')")
             self.db.execute("UPDATE lines SET state='unknown', error='Ứng dụng đóng khi request đang chạy' WHERE state='processing'")
             self.db.execute("UPDATE request_attempts SET state='unknown' WHERE state IN ('prepared','inflight')")
         self.log = DiagnosticLog(self.path.parent / (self.path.stem + "_logs"))
         self.migrate_kira_key()
+        self.recover_kira_transient_statuses(legacy=True)
 
     def close(self):
         if not self.log.closed: self.log.close()
@@ -269,7 +275,7 @@ class Store(KiraKeysMixin):
         retry_504 = self.setting("retry_504", "1") == "1" if retry_504 is None else retry_504
         if provider == 'gemini': retry_504 = False
         with self.transaction():
-            existing = self.db.execute("SELECT id FROM jobs WHERE document_id=? AND state IN ('ready','running','paused','pausing','stopping','user_paused','waiting_rate_limit','retry_scheduled')", (doc_id,)).fetchone()
+            existing = self.db.execute("SELECT id FROM jobs WHERE document_id=? AND state IN ('ready','running','paused','pausing','stopping','user_paused','waiting_rate_limit','retry_scheduled','network_waiting','provider_recovering')", (doc_id,)).fetchone()
             if existing and not allow_shared_document:
                 raise ValueError("A translation job already exists for this document")
             rows = self.lines(doc_id)
@@ -283,16 +289,19 @@ class Store(KiraKeysMixin):
             job_id = str(uuid.uuid4())
             self.db.execute("INSERT INTO jobs(id,document_id,provider,model,source_lang,target_lang,concurrency,state,timeout,prompt_version,mode,retry_504,max_requests) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             (job_id, doc_id, provider, model, source_lang, target_lang, concurrency, "ready", timeout, "review-v2", "retranslation" if line_ids is not None else "translation", int(retry_504), max_requests))
-            retries = 0 if (config or {}).get('kira_multi_key') else int(self.setting('auto_retries', '5'))
+            from .kira_recovery import frozen_policy
+            policy=frozen_policy(self,config or {})
+            retries = policy.get('auto_retries',0) if policy.get('kira_multi_key') else int(self.setting('auto_retries', '5'))
             if not 0 <= retries <= 5: raise ValueError('Invalid automatic retry setting')
-            from .prompts import PROMPT_VERSION
-            frozen = {**(config or {}), 'request_interval': float(self.setting('request_interval', '0')), 'auto_retries': retries, 'prompt_version': PROMPT_VERSION,
+            from .prompts import PROMPT_VERSION,KIRA_RECOVERY_PROMPT_VERSION
+            prompt_version=KIRA_RECOVERY_PROMPT_VERSION if provider=='kira' and policy.get('kira_recovery_version',0)>=1 else PROMPT_VERSION
+            frozen = {**policy, 'request_interval': float(self.setting('request_interval', '0')), 'auto_retries': retries, 'prompt_version': prompt_version,
                       'source_locale':source_entry.locale,'target_locale':target_entry.locale}
             if frozen.get('kira_multi_key'):
                 self.db.execute('UPDATE jobs SET retry_504=0 WHERE id=?',(job_id,))
             for key, default in [('rate_wait_budget', 300), ('rate_cooldown_limit', 10), ('rate_backoff_max', 30)]:
                 frozen.setdefault(key, float(self.setting(key, str(default))))
-            self.db.execute('UPDATE jobs SET run_id=?,config=?,auto_retries=?,prompt_version=? WHERE id=?', (run_id, json.dumps(frozen), retries, PROMPT_VERSION, job_id))
+            self.db.execute('UPDATE jobs SET run_id=?,config=?,auto_retries=?,prompt_version=? WHERE id=?', (run_id, json.dumps(frozen), retries, prompt_version, job_id))
             for offset in range(0, len(eligible), 3):
                 chunk = eligible[offset:offset + 3]
                 payload = [{"id": r["id"], "source": r["source"], "source_revision": r["source_revision"], "translation_revision": r["translation_revision"]} for r in chunk]
@@ -309,6 +318,14 @@ class Store(KiraKeysMixin):
                 from datetime import datetime, timezone
                 created = datetime.now(timezone.utc).isoformat(timespec='microseconds')
                 self.db.execute("INSERT INTO batches(id,job_id,state,payload,diagnostics) VALUES (?,?,?,?,?)", (str(uuid.uuid4()), job_id, "pending", json.dumps(payload, ensure_ascii=False), json.dumps({'batch_created_at':created})))
+            if frozen.get('kira_recovery_version',0)>=1 and max_requests is None:
+                count=(len(eligible)+2)//3
+                limit=frozen.get('kira_request_limit') or count+min(count*retries,frozen['kira_retry_budget'])
+                self.db.execute('UPDATE jobs SET max_requests=? WHERE id=?',(limit,job_id))
+            if frozen.get('kira_recovery_version',0)>=2:
+                limit=self.job(job_id)['max_requests'] or frozen.get('max_requests') or 1
+                frozen['kira_effective_token_limit']=frozen.get('kira_token_limit') or limit*int(self.setting('kira_tpm','1000000'))
+                self.db.execute('UPDATE jobs SET config=? WHERE id=?',(json.dumps(frozen),job_id))
         for batch in self.batches(job_id):
             self.log.emit("queued", provider=provider, model=model, document_id=doc_id, job_id=job_id, run_id=run_id, target_lang=target_lang, batch_id=batch["id"], line_ids=[r["id"] for r in batch["payload"]], line_count=len(batch["payload"]), state="pending")
         return job_id
@@ -340,6 +357,7 @@ class Store(KiraKeysMixin):
 
     def claim_batch(self, batch_id: str) -> list[dict]:
         with self.transaction():
+            self.db.execute('UPDATE batches SET original_payload=COALESCE(original_payload,payload) WHERE id=?',(batch_id,))
             batch = self.db.execute("SELECT payload FROM batches WHERE id=? AND state='pending'", (batch_id,)).fetchone()
             if batch is None:
                 return []
@@ -398,10 +416,15 @@ class Store(KiraKeysMixin):
                 for item in payload:
                     if item['id'] not in results: continue
                     raw = results[item['id']]
-                    processed, notes = normalize(item['source'], raw)
-                    self.db.execute('INSERT OR REPLACE INTO api_text_versions VALUES (?,?,?,?,?,?,0)', (expected_attempt_id, item['id'], raw, processed, VERSION, json.dumps(notes)))
+                    preserve=job['provider']=='kira' and json.loads(job['config']).get('kira_recovery_version',0)>=1
+                    processed, notes = normalize(item['source'], raw,preserve_punctuation=preserve)
+                    text_version=VERSION+'+punctuation-preserved-v1' if preserve else VERSION
+                    self.db.execute('INSERT OR REPLACE INTO api_text_versions VALUES (?,?,?,?,?,?,0)', (expected_attempt_id, item['id'], raw, processed, text_version, json.dumps(notes)))
                     if processed.strip(): processed_results[item['id']] = processed
-                    else: error = 'Normalization left no ordinary text; review required'
+                    else:
+                        error = 'Normalization left no ordinary text; review required'
+                        diagnostics['failure_kind']='invalid_line_response'
+                        diagnostics.setdefault('structure_errors',[]).append({'code':'invalid_value','line_ids':[item['id']]})
                 results = processed_results
             from .language_validator import validator, WRONG_LANGUAGE_CONFIRMED
             validation_started = time.perf_counter()
@@ -439,10 +462,16 @@ class Store(KiraKeysMixin):
                     self.db.execute("UPDATE lines SET translation=?, translation_revision=translation_revision+1, state='done', error=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?",
                                     (results[item["id"]], item["id"]))
                     self.db.execute("UPDATE lines SET translation_source_revision=source_revision WHERE id=?", (item["id"],))
+                    self.db.execute('UPDATE lines SET verified_source_revision=source_revision,verified_translation_revision=translation_revision WHERE id=?',(item['id'],))
                 else:
                     self.db.execute("UPDATE lines SET state=?, error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
                                     ("unknown" if unknown else "wrong_target_language" if item['id'] in rejected_language else "error", error if unknown and error else rejected_language.get(item['id']) or error or "Missing valid response for line ID", item["id"]))
                 self.db.execute("DELETE FROM quality_warnings WHERE line_id=?", (item["id"],))
+            if json.loads(job['config']).get('kira_recovery_version',0)>=2:
+                original=json.loads(self.batch(batch_id).get('original_payload') or '[]')
+                if any(self.line(r['id'])['state'] in ('error','unknown','wrong_target_language') for r in original if r['id'] not in expected):
+                    diagnostics['failure_kind']='partial_response'
+                    self.db.execute("UPDATE batches SET state='partial',diagnostics=? WHERE id=?",(json.dumps(diagnostics),batch_id))
             return accepted
 
     def warning_rows(self, doc_id):
@@ -522,10 +551,20 @@ class Store(KiraKeysMixin):
         with self.lock:
             return [{**dict(r), "diagnostics": json.loads(r["diagnostics"]) if r["diagnostics"] else None} for r in self.db.execute("SELECT * FROM request_attempts WHERE original_batch_id=? ORDER BY attempt_number", (batch_id,))]
 
-    def prepare_attempt(self, batch_id, number):
+    def prepare_attempt(self, batch_id, number, *, reserved_tokens=0):
         from datetime import datetime, timezone
         with self.transaction():
             job = dict(self.db.execute("SELECT j.* FROM jobs j JOIN batches b ON b.job_id=j.id WHERE b.id=?", (batch_id,)).fetchone())
+            policy=json.loads(job['config'])
+            if not isinstance(reserved_tokens,int) or reserved_tokens<0:raise ValueError('Invalid token reservation')
+            if policy.get('kira_recovery_version',0)>=2:
+                token_limit=policy['kira_effective_token_limit']
+                scope_sql='j.run_id=?' if job['run_id'] else 'j.id=?'
+                consumed=self.db.execute('SELECT COALESCE(SUM(a.reserved_tokens),0) FROM request_attempts a JOIN batches b ON b.id=a.original_batch_id JOIN jobs j ON j.id=b.job_id WHERE '+scope_sql,(job['run_id'] or job['id'],)).fetchone()[0]
+                if consumed+reserved_tokens>token_limit:return None
+            if number>1 and policy.get('kira_recovery_version',0)>=1:
+                from .kira_recovery import retry_usage
+                if retry_usage(self,job)>=policy['kira_retry_budget']:return None
             budget = json.loads(job['config']).get('max_requests')
             if budget is not None and job['run_id']:
                 used = self.db.execute('SELECT COUNT(*) FROM request_attempts a JOIN batches b ON a.original_batch_id=b.id JOIN jobs j ON j.id=b.job_id WHERE j.run_id=?', (job['run_id'],)).fetchone()[0]
@@ -538,12 +577,13 @@ class Store(KiraKeysMixin):
                 return None
             batch = self.db.execute("SELECT * FROM batches WHERE id=?", (batch_id,)).fetchone()
             if number > 1:
+                if batch['state']=='inflight':return None
                 prior = self.attempts(batch_id)
                 from .retry import allowed_retry
-                if not 2 <= number <= 6 or job['state'] not in ('running', 'waiting_rate_limit', 'retry_scheduled') or len(prior) != number-1 or prior[-1]['state'] != 'finished' or not allowed_retry(job, prior[-1]['diagnostics'] or {}, number):
+                if not 2 <= number <= 6 or job['state'] not in ('running', 'waiting_rate_limit', 'retry_scheduled','network_waiting','provider_recovering') or len(prior) != number-1 or prior[-1]['state'] != 'finished' or not allowed_retry(job, prior[-1]['diagnostics'] or {}, number):
                     return None
                 valid = []
-                for r in json.loads(batch["payload"]):
+                for r in json.loads(batch['original_payload'] or batch["payload"]):
                     current = self.line(r["id"])
                     if current["source_revision"] == r["source_revision"] and current["translation_revision"] == r["translation_revision"] and current["state"] in ('unknown', 'error', 'wrong_target_language'):
                         if current['attempt_kind']=='manual': continue
@@ -551,6 +591,9 @@ class Store(KiraKeysMixin):
                         valid.append(r)
                 if not valid:
                     return None
+                malformed={'invalid_line_response','invalid_schema','partial_response'}
+                if policy.get('kira_recovery_version',0)>=2 and sum((p['diagnostics'] or {}).get('failure_kind') in malformed for p in prior)>=2:
+                    valid=valid[:1]
                 valid[0]["context"] = json.loads(batch["payload"])[0].get("context", [])
                 self.db.execute("UPDATE batches SET state='inflight',payload=? WHERE id=?", (json.dumps(valid, ensure_ascii=False), batch_id))
                 self.db.executemany("UPDATE lines SET state='processing' WHERE id=?", [(r["id"],) for r in valid])
@@ -558,6 +601,7 @@ class Store(KiraKeysMixin):
                 return None
             attempt_id = str(uuid.uuid4())
             self.db.execute("INSERT INTO request_attempts(id,original_batch_id,attempt_number,state,created_at) VALUES (?,?,?,'prepared',?)", (attempt_id, batch_id, number, datetime.now(timezone.utc).isoformat(timespec="milliseconds")))
+            self.db.execute('UPDATE request_attempts SET reserved_tokens=? WHERE id=?',(reserved_tokens,attempt_id))
             return attempt_id
 
     def complete_attempt(self, attempt_id, diagnostics):
@@ -725,7 +769,12 @@ class Store(KiraKeysMixin):
                     'concurrency': concurrency, 'timeout': timeout, 'prompt_version': PROMPT_VERSION,
                     'auto_retries': int(self.setting('auto_retries', '5')), 'request_interval': float(self.setting('request_interval', '0')),
                     'retry_504': provider == 'kira' and self.setting('retry_504', '1') == '1'}
-        if snapshot.get('kira_multi_key'):snapshot.update(auto_retries=0,retry_504=False)
+        if snapshot.get('kira_multi_key'):
+            from .kira_recovery import frozen_policy
+            snapshot=frozen_policy(self,snapshot)
+            if snapshot.get('kira_recovery_version',0)>=1:
+                from .prompts import KIRA_RECOVERY_PROMPT_VERSION
+                snapshot['prompt_version']=KIRA_RECOVERY_PROMPT_VERSION
         with self.transaction():
             self.db.execute('INSERT INTO translation_runs(id,config) VALUES (?,?)', (run_id, json.dumps(snapshot, ensure_ascii=False)))
             for doc_id in document_ids:
@@ -741,6 +790,16 @@ class Store(KiraKeysMixin):
                     if eligible:
                         jobs.append(self.create_job(workspace, model, source_lang, target, concurrency, timeout=timeout, provider=provider, run_id=run_id, config=snapshot))
             if not jobs: raise ValueError('No lines need translation')
+            if snapshot.get('kira_recovery_version',0)>=1:
+                count=sum(len(self.batches(j)) for j in jobs)
+                if snapshot.get('max_requests') is None:snapshot['max_requests']=snapshot.get('kira_request_limit') or count+min(count*snapshot['auto_retries'],snapshot['kira_retry_budget'])
+                if snapshot.get('kira_recovery_version',0)>=2:
+                    snapshot['kira_effective_token_limit']=snapshot.get('kira_token_limit') or snapshot['max_requests']*int(self.setting('kira_tpm','1000000'))
+                self.db.execute('UPDATE translation_runs SET config=? WHERE id=?',(json.dumps(snapshot,ensure_ascii=False),run_id))
+                for jid in jobs:
+                    frozen=json.loads(self.job(jid)['config']);frozen['max_requests']=snapshot['max_requests']
+                    if snapshot.get('kira_recovery_version',0)>=2:frozen['kira_effective_token_limit']=snapshot['kira_effective_token_limit']
+                    self.db.execute('UPDATE jobs SET config=? WHERE id=?',(json.dumps(frozen),jid))
         return run_id, jobs
 
     def run(self, run_id):
@@ -782,7 +841,17 @@ class Store(KiraKeysMixin):
                         'error':row['error'], 'diagnostics':json.loads(row['diagnostics']) if row['diagnostics'] else {}})
                 if doc['format'] == 'docx':
                     doc['_structure_units'] = [dict(r) for r in self.db.execute('SELECT document_id,line_id,locator FROM document_units WHERE document_id=?',(doc_id,))]
-                snapshots.append((doc, self.units(doc_id) if doc['format']=='docx' else self.lines(doc_id)))
+                rows=self.units(doc_id) if doc['format']=='docx' else self.lines(doc_id)
+                # Read-only provenance for records accepted before revision proof
+                # columns existed. Never rewrite a translation or its undo history.
+                accepted={}
+                for item in self.db.execute('SELECT v.line_id,v.processed_text FROM api_text_versions v JOIN request_attempts a ON a.id=v.attempt_id JOIN batches b ON b.id=a.original_batch_id JOIN jobs j ON j.id=b.job_id WHERE j.document_id=? AND v.accepted=1 AND a.state=\'finished\'',(doc_id,)):
+                    accepted.setdefault(item['line_id'],set()).add(item['processed_text'])
+                for row in rows:
+                    if (row.get('verified_translation_revision') is None and row['state']=='done' and
+                            row.get('translation_source_revision')==row['source_revision'] and row['translation'] in accepted.get(row['id'],())):
+                        row.update(verified_source_revision=row['source_revision'],verified_translation_revision=row['translation_revision'])
+                snapshots.append((doc, rows))
             return snapshots
 
     def reserve_gemini_quota(self, scope, cost, rpm, tpm, rpd, now=None):

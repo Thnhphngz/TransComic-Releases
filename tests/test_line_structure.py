@@ -135,14 +135,14 @@ def test_batch_evidence_and_manual_correction(store,tmp_path):
     assert validate_snapshot(*snapshot(store,doc)).state=='complete'
 
 
-def test_extra_api_id_retains_valid_results_but_blocks_structure(store,tmp_path):
+def test_extra_api_id_retains_exact_id_results_without_stale_structure_block(store,tmp_path):
     doc=imported(store,tmp_path/'a.txt');job=store.create_job(doc,'mock','vi','en',1)
     batch=store.batches(job)[0];payload=store.claim_batch(batch['id'])
     entries=[{'id':p['id'],'text':'Hello'} for p in payload]+[{'id':'foreign','text':'Ignored'}]
     parsed=parse_line_response(json.dumps({'lines':entries}),{p['id'] for p in payload})
     store.finish_batch(batch['id'],parsed.values,parsed.error,diagnostics=parsed.diagnostics)
     assert all(r['translation']=='Hello' for r in store.lines(doc))
-    assert validate_snapshot(*snapshot(store,doc)).state=='structure_error'
+    assert validate_snapshot(*snapshot(store,doc)).state=='complete'
 
 
 def test_storage_rejects_multiline_before_normalization_and_foreign_payload(store,tmp_path):

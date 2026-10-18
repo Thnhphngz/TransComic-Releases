@@ -8,7 +8,7 @@ import tempfile
 import threading
 import traceback
 import httpx
-from PySide6.QtCore import QTimer,Qt,QEventLoop
+from PySide6.QtCore import QTimer,Qt,QEventLoop,QPoint
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from .storage import Store
@@ -87,7 +87,14 @@ def main():
                     else:window.showNormal();window.resize(900,580)
                     window.pages.setCurrentIndex(6);QTest.qWait(150)
                     assert window.navigation_group.button(6).isChecked()
-                    assert window.nav_buttons[-1].geometry().bottom()<window.collapse_button.geometry().top()
+                    # Navigation now lives inside its own scroll viewport;
+                    # compare coordinates in the sidebar, not different parents.
+                    last=window.nav_buttons[-1];window.navigation_scroll.ensureWidgetVisible(last)
+                    QTest.qWait(40)
+                    assert window.navigation_scroll.viewport().rect().contains(last.mapTo(window.navigation_scroll.viewport(),last.rect().center()))
+                    assert last.mapTo(window.sidebar,QPoint(0,last.height())).y()<=window.collapse_button.y()
+                    QTest.mouseClick(last,Qt.LeftButton);assert window.pages.currentIndex()==3
+                    window.pages.setCurrentIndex(6)
                     assert window.sky_switch.geometry().bottom()<=window.sidebar.height()
                     window.grab().save(str(root/f'srt-{dark}-{compact}.png'))
                     window.pages.setCurrentIndex(0);assert store.lines(doc)==before and window.target_languages()==targets,repr({'lines_before':before,'lines_after':store.lines(doc),'targets_before':targets,'targets_after':window.target_languages()})
@@ -107,7 +114,31 @@ def main():
             panel.check_now(True);wait(lambda:panel.update_dialog is not None);panel.update_dialog.download.click()
             wait(lambda:not panel.busy and panel.downloaded_path is not None)
             assert panel.downloaded_path.suffix=='.testdata'
+            window.pages.setCurrentIndex(7);QApplication.processEvents();assert hasattr(window,'tts_page')
+            from .tts.managed_runtime import catalog,WORKER_FILES
+            assert catalog()['python'] and all((Path(__file__).parent/'tts'/('worker_source/'+n if getattr(sys,'frozen',False) else n)).is_file() for n in WORKER_FILES)
+            tts={'page_open':True,'catalog_and_worker_paths':True,'cached_cpu_load':'NOT_VERIFIED'}
+            cpu_cache=os.environ.get('TRANSCOMIC_SMOKE_CPU_CACHE')
+            if cpu_cache:
+                cache=Path(cpu_cache).resolve();marker=json.loads((cache/'isolated-distribution.json').read_text(encoding='utf8'))
+                assert cache.name.startswith('TransComic-distribution-cpu-') and marker.get('backend')=='cpu'
+                from .tts.models import ModelManager
+                from .tts.managed_runtime import ManagedRuntimes
+                from .tts.managed_engine import ManagedEngine
+                from .tts.audio import encode
+                models=ModelManager(cache/'TransComic/TTS/Models');assert models.ready('standard')
+                runtime=ManagedRuntimes(cache/'TransComic/TTS/Runtimes').active();assert runtime['backend']=='CPUExecutionProvider'
+                engine=ManagedEngine(models,dict(variant='standard',language='en-us',voice='af_heart',speed=1),runtime,width=1)
+                try:
+                    engine.probe();blocks=list(engine.synthesize('Hello.', 'af_heart',1,'en-us'))
+                    wav=encode(root/'kokoro-probe.wav',iter(blocks),'wav');mp3=encode(root/'kokoro-probe.mp3',iter(blocks),'mp3')
+                    tts.update(cached_cpu_load='PASS',audio_wav=bool(wav),audio_mp3=bool(mp3),backend=runtime['backend'],download_bytes=0)
+                finally:engine.close()
+            window.pages.setCurrentIndex(8);QApplication.processEvents();assert hasattr(window,'capcut_page')
+            from .capcut.package_probe import run as probe_capcut
+            capcut=probe_capcut(root)
             report={'passed':True,'frozen':bool(getattr(sys,'frozen',False)),'version':VERSION,'platform':app.platformName(),'dpr':window.devicePixelRatioF(),
+                    'tts':tts,'capcut':capcut,
                     'txt_docx_fixture':True,'docx_export_units':2,'source_files_unchanged':original_hashes=={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in (text,word)},
                     'themes':['light','dark'],'srt_placeholder':True,'workspace_preserved':True,'queue_clear':True,'search_replace_undo':True,
                     'manual_popup':True,'auto_no_popup':True,'later_no_download':True,'download_verified':True,'real_http_requests':0,'installer_processes':0,

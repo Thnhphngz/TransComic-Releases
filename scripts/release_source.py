@@ -10,6 +10,7 @@ from transcomic.update.metadata import UpdateError
 ROOT_FILES={'.gitignore','README.md','TransComic.spec','run_transcomic.py',
             'release_transcomic.bat','pyproject.toml','requirements-release.lock','requirements-tts-cuda.lock','conftest.py'}
 TTS_CATALOG_FILES={'transcomic/tts/setup-catalog.json','transcomic/tts/calibration.json'}
+CAPCUT_RESOURCES={'transcomic/capcut/mau-origin.json','transcomic/capcut/mau-structure.zip','transcomic/capcut/mau-animations.zip'}
 SECRET=re.compile(rb'gh[oopsu]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AIza[A-Za-z0-9_-]{25,}|sk-[A-Za-z0-9_-]{24,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----')
 
 def git(root,*args):
@@ -17,7 +18,7 @@ def git(root,*args):
 
 def allowed(name):
     p=Path(name)
-    return (name in ROOT_FILES or name in TTS_CATALOG_FILES or name=='installer/TransComic.iss' or name=='installer/TransComic.ico'
+    return (name in ROOT_FILES or name in TTS_CATALOG_FILES or name in CAPCUT_RESOURCES or name=='installer/TransComic.iss' or name=='installer/TransComic.ico'
         or (p.parts[0] in ('transcomic','scripts','tests') and p.suffix in ('.py','.svg'))
         or (p.parts[0]=='docs' and p.suffix=='.md')) and '..' not in p.parts
 
@@ -26,6 +27,7 @@ def releaseable(name):
     return allowed(name) and not name.startswith('docs/') and name!='README.md'
 
 def normalized(name,raw):
+    if name in CAPCUT_RESOURCES and name.endswith('.zip'):return raw
     raw=raw.replace(b'\r\n',b'\n')
     if name=='transcomic/version.py':
         raw=re.sub(rb'(?m)^VERSION\s*=\s*[\'\"][^\'\"]+[\'\"]',b'VERSION = "GENERATED"',raw)
@@ -75,7 +77,20 @@ def inspect(root):
         if SECRET.search(raw):raise UpdateError('SOURCE_SECRET_DETECTED: '+name)
         if name=='installer/TransComic.ico' and not raw.startswith(b'\x00\x00\x01\x00'):
             raise UpdateError('INVALID_ICON_BINARY')
-        if name!='installer/TransComic.ico':
+        if name in CAPCUT_RESOURCES and name.endswith('.zip'):
+            import io,zipfile
+            package=root/'transcomic/capcut';origin=json.loads((package/'mau-origin.json').read_text(encoding='utf8'))
+            effect=name.endswith('mau-animations.zip')
+            expected=origin['animation_resources'] if effect else {'sha256':origin['structure_sha256'],'files':origin['files']}
+            if hashlib.sha256(raw).hexdigest()!=expected['sha256']:raise UpdateError('CAPCUT_RESOURCE_HASH_MISMATCH')
+            with zipfile.ZipFile(io.BytesIO(raw)) as packed:
+                if set(packed.namelist())!=set(expected['files']):raise UpdateError('CAPCUT_RESOURCE_INVENTORY_MISMATCH')
+                for member,digest in expected['files'].items():
+                    rel=Path(member);data=packed.read(member)
+                    if rel.is_absolute() or '..' in rel.parts or '\\' in member or ':' in member:raise UpdateError('UNSAFE_CAPCUT_RESOURCE')
+                    if hashlib.sha256(data).hexdigest()!=digest or SECRET.search(data):raise UpdateError('CAPCUT_RESOURCE_CONTENT_MISMATCH')
+                    if re.search(rb'(?<![A-Za-z0-9])[A-Za-z]:[/\\]',data):raise UpdateError('PRIVATE_PATH_IN_CAPCUT_RESOURCE')
+        elif name!='installer/TransComic.ico':
             if b'\0' in raw:raise UpdateError('BINARY_SOURCE_REQUIRES_REVIEW: '+name)
             try:raw.decode('utf8')
             except UnicodeError:raise UpdateError('NON_UTF8_SOURCE_REQUIRES_REVIEW: '+name) from None

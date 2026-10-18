@@ -19,6 +19,7 @@ FIELDS.update({'source_locale','target_locale','check','conclusion','confidence'
 FIELDS.update({'validator_seconds','connect_seconds','headers_seconds','body_seconds','http_started_at','connection_pool_limit','http_version','stack_trace'})
 FIELDS.update({'batch_created_at','sqlite_commit_seconds'})
 EVENTS = {
+    'recovery_phase': ('INFO','SCHEDULER','Durable global translation/error review phase'),
     'gateway_backoff': ('WARNING','SCHEDULER','Observed HTTP 504; bounded shared pacing, not provider quota'),
     'shutdown_error': ('ERROR','UI','Safe exit failed; committed results retained, inspect redacted stack frames'),
     'language_checked': ('INFO','QUALITY','Offline target-language check; not semantic certification'),

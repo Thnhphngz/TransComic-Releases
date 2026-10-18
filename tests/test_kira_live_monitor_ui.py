@@ -20,7 +20,7 @@ from test_kira_multikey_ui import gui
 def wait_gui(app,condition,timeout=10):
     deadline=time.monotonic()+timeout
     while not condition() and time.monotonic()<deadline:
-        app.processEvents();QTest.qWait(10)
+        app.processEvents();time.sleep(.01)  # Yield the GIL to SQLite/HTTP workers.
     assert condition()
 
 
@@ -33,7 +33,7 @@ def make_run(app,store,window,*,keys=2,files=3,count=15,cap=2,outcome=None):
         doc=store.import_document(store.path.parent/f'{i}'/'same-name.txt',decode_txt(raw),'vi','en')[0]
         docs.append(doc);window.open_document(doc)
     window.open_document(docs[0]);window.refresh_kira_keys();app.processEvents()
-    run,jobs=store.create_run(docs,['en'],provider='kira',model='mock',source_lang='vi',concurrency=cap,config={'kira_multi_key':True})
+    run,jobs=store.create_run(docs,['en'],provider='kira',model='mock',source_lang='vi',concurrency=cap,config={'kira_multi_key':True,'kira_recovery_version':1})
     gate=threading.Event();calls=[];failed=[]
     async def handler(req):
         calls.append(req)
@@ -168,12 +168,34 @@ def test_monitor_refresh_does_not_stall_150_http_slots(gui):
     d.refresh_data();assert '600 dòng đã lưu' in d.summary.text()
 
 
+def test_monitor_refresh_with_bounded_mock_slots(gui):
+    """Small GUI regression for hosts where stress runs are intentionally avoided."""
+    app,store,w=gui
+    docs,run,jobs,pool,scheduler,gate,calls=make_run(app,store,w,keys=2,files=3,count=12,cap=4)
+    try:
+        wait_gui(app,lambda:len(calls)==8)
+        QTest.mouseClick(w.kira_manage_button,Qt.LeftButton)
+        d=w.kira_monitor_dialog;app.processEvents()
+        for _ in range(5):d.refresh_data();app.processEvents()
+        assert len(calls)==8
+        snapshot=pool.monitor_snapshot(4)
+        assert sum(k['in_flight_requests'] for k in snapshot['per_key'].values())==8
+        assert all(k['in_flight_requests']==4 for k in snapshot['per_key'].values())
+    finally:
+        gate.set()
+        wait_gui(app,lambda:not scheduler._thread.is_alive(),timeout=10)
+    d.refresh_data()
+    assert '36 dòng đã lưu' in d.summary.text()
+    assert store.run(run)['state']=='finished'
+    assert len(calls)==12
+
+
 def test_idle_key_status_changes_and_removal_keep_other_cards_stable(gui):
     app,store,w=gui
     store.add_kira_keys('sk-idle-state-A sk-idle-state-B');w.refresh_kira_keys()
     QTest.mouseClick(w.kira_manage_button,Qt.LeftButton);d=w.kira_monitor_dialog
     a,b=[k['id'] for k in store.kira_keys()];card_b=d.cards[b]
-    for state,text in [('QUOTA_EXHAUSTED','Hết quota'),('INVALID','Key không hợp lệ'),
+    for state,text in [('QUOTA_EXHAUSTED','Quota model'),('INVALID','Key không hợp lệ'),
         ('COOLDOWN','Đang cooldown'),('UNKNOWN_ERROR','Lỗi chưa phân loại')]:
         store.kira_key_status(a,state,time.time()+60 if state=='COOLDOWN' else 0)
         d.refresh_data();assert text in d.cards[a].header.toolTip()

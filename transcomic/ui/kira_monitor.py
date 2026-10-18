@@ -7,15 +7,21 @@ from ..kira_telemetry import counters
 
 
 RUN_STATES = {'not_started':'Chưa bắt đầu','running':'Đang dịch','user_paused':'Tạm dừng',
+    'waiting_rate_limit':'Kira giới hạn tốc độ · tự chờ và tiếp tục','network_waiting':'Chờ mạng phục hồi',
+    'provider_recovering':'Chờ Kira/key phục hồi','retry_scheduled':'Đang tự xử lý dòng lỗi',
     'stopped':'Đã dừng','finished':'Đã hoàn thành','interrupted':'Đã gián đoạn',
-    'needs_intervention':'Cần kiểm tra','quota_exhausted':'Chờ key'}
+    'needs_intervention':'Cần kiểm tra','quota_exhausted':'Chờ key',
+    'blocked':'Bị chặn · kiểm tra quyền/ngân sách','completed_with_errors':'Hoàn thành còn lỗi'}
 REASONS = {'ready':'Sẵn sàng nhưng rảnh','no_pending_work':'Không có batch chưa gửi',
     'account_slots_full':'Đã hết slot tài khoản','key_slots_full':'Đã hết slot key',
     'account_rpm':'Chờ RPM','account_tpm':'Chờ TPM','account_cooldown':'Đang cooldown',
-    'key_cooldown':'Đang cooldown','cooldown':'Đang cooldown','quota_exhausted':'Hết quota','invalid':'Key không hợp lệ',
+    'key_cooldown':'Đang cooldown','cooldown':'Đang cooldown','quota_exhausted':'Quota model · chờ reset/xác minh','invalid':'Key không hợp lệ',
     'disabled':'Đã tắt','removed':'Đã xóa key','unknown_error':'Lỗi chưa phân loại',
     'credential_unavailable':'Không đọc được key','network_paused':'Tạm dừng do mạng',
+    'adaptive_pacing':'Đang giảm tốc độ gửi','temporary_error':'Lỗi tạm thời · tự phục hồi',
+    'permission_denied':'Không có quyền dùng model','model_unavailable':'Model không khả dụng','credential_error':'Không giải mã được key',
     'request_exceeds_tpm':'Batch vượt trần TPM'}
+REASONS['account_quota_exhausted']='Nhóm đã xác nhận: provider báo hết quota model'
 
 
 def kira_pool(owner):
@@ -33,7 +39,7 @@ def idle_snapshot(owner):
     import time
     for row in rows:
         ready=row['enabled'] and (row['status']=='READY' or row['status']=='COOLDOWN' and 0<row['cooldown_until']<=time.time())
-        scope=owner.store.kira_account_scope(row['id'])
+        scope=owner.store.kira_effective_scope(row['id'])
         if ready:groups[scope]=groups.get(scope,0)+per_key
         reason='ready' if ready else 'disabled' if not row['enabled'] else row['status'].lower()
         keys[row['id']]={**counters(),**row,'account_scope':scope,'slot_limit':min(limit,per_key),
@@ -205,17 +211,20 @@ class KiraMonitorDialog(QDialog):
         for key in set(self.cards)-set(snapshot['per_key']):
             card=self.cards.pop(key);self.card_layout.removeWidget(card);card.deleteLater()
         state=snapshot['state'];state_text=RUN_STATES.get(state,state)
-        if state=='user_paused' and snapshot.get('intervention_reason')=='kira_keys_unavailable':
-            state_text='Chờ key'
+        if snapshot.get('recovery_phase') and state in ('running','retry_scheduled','provider_recovering','waiting_rate_limit'):
+            state_text=f"Rà soát lỗi lần {snapshot['recovery_phase']}/2 · {state_text}"
         self.summary.setText(f"Kira Live Monitor — {state_text}\n"
             f"{snapshot['enabled']} key bật · {snapshot['keys']} khả dụng · {snapshot['busy']}/{snapshot['maximum']} luồng · {snapshot['active_files']} file đang xử lý\n"
             f"{snapshot['translated_lines']} dòng đã lưu · {snapshot['unique_translated_lines']} dòng duy nhất\n"
-            f"Request: gửi {snapshot['requests']} · thành công {snapshot['successful_requests']} · lỗi {snapshot['failed_requests']} · unknown {snapshot['unknown_requests']}")
+            f"Request: gửi {snapshot['requests']} · thành công {snapshot['successful_requests']} · lỗi {snapshot['failed_requests']} · unknown {snapshot['unknown_requests']} · RPM TB {snapshot.get('effective_rpm',0):.1f} · chờ {snapshot.get('queued_batches',0)}")
         self.note.setText(self._navigation_note or ('Chưa có lượt dịch để theo dõi. Không có dữ liệu chi tiết cho lịch sử trước Live Monitor.' if not run_id else
             ('Chưa có batch được cấp trong lượt này.' if state=='running' else 'Không có dữ liệu chi tiết của lượt cũ.') if not snapshot.get('detail_available') else
             ('Lượt gần nhất đã lưu · ' if snapshot.get('archived') else '')+'Chọn tên file để xem bản dịch. Đang dịch chỉ tính dòng đã gửi và đang chờ HTTP.'))
         if snapshot.get('persistence_error'):
             self.note.setText(self.note.text()+'\nChưa lưu được summary; thống kê hiện tại vẫn có trong bộ nhớ.')
+        if snapshot.get('intervention_reason'):
+            from ..kira_recovery import reason_label
+            self.note.setText(self.note.text()+'\n'+reason_label(snapshot['intervention_reason']))
         for key,value in snapshot['per_key'].items():
             if key not in self.cards:
                 card=KeyCard(self,key);self.cards[key]=card;self.card_layout.insertWidget(self.card_layout.count()-1,card)

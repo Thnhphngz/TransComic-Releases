@@ -128,7 +128,7 @@ def test_two_keys_same_121_docx_live_and_restart(tmp_path,monkeypatch):
 
 @pytest.mark.parametrize('failure',['quota','rate','504','timeout','wrong_id'])
 def test_failure_and_unknown_are_not_successful_lines(tmp_path,failure):
-    store,docs,run,jobs=setup(tmp_path,2,1,files=4,batches=3)
+    store,docs,run,jobs=setup(tmp_path,2,1,files=4,batches=3,kira_recovery_version=0)
     failed=[];seen=[]
     async def handler(req):
         ids=tuple(r['id'] for r in lines(req));seen.append(ids)
@@ -142,7 +142,6 @@ def test_failure_and_unknown_are_not_successful_lines(tmp_path,failure):
             return httpx.Response(200,json={'choices':[{'message':{'content':json.dumps({'lines':[{'id':'foreign','text':'A translated story'}]})}}]})
         return success(req)
     scheduler,pool=start(store,run,jobs,handler)
-    if failure=='timeout':wait_for(lambda:scheduler._paused.is_set());scheduler.resume()
     scheduler.join(15);assert not scheduler._thread.is_alive()
     snapshot=pool.monitor_snapshot(30)
     assert len(seen)==len(set(seen))==snapshot['requests']
@@ -254,7 +253,8 @@ def test_normalization_rejection_is_failed_data_not_a_revision_rejection(tmp_pat
     snapshot=pool.monitor_snapshot(1);file=next(iter(snapshot['per_key'].values()))['files'][0]
     assert snapshot['translated_lines']==snapshot['successful_requests']==0
     assert file['failed_lines']==3 and file['rejected_lines']==0
-    assert snapshot['failed_requests']==1
+    assert snapshot['failed_requests']==3 and scheduler.retry_count==2
+    assert scheduler.success_requests==0
     store.close()
 
 

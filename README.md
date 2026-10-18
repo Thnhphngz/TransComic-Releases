@@ -8,6 +8,10 @@ Các tài liệu Stage A/B1/B2.1 là lịch sử thiết kế; trạng thái pre
 
 **TTS V4** có lịch sử/tìm kiếm/xóa bản ghi, popup Xem câu và player chung. Hỗ trợ TXT/DOCX hàng loạt, nhập trực tiếp, WAV/MP3 và tối đa hai worker. **Tạm dừng cho phép tiếp tục; Dừng/Hủy kết thúc lượt**, giữ audio đã xuất. Bản Windows tự chuẩn bị runtime/model/voice qua **TTS → Cài đặt → Tải model**; lần đầu cần internet. CUDA tùy phần cứng/driver, có CPU fallback; không yêu cầu cài Python/CUDA Toolkit/cuDNN thủ công. Không hỗ trợ tiếng Việt. Xem [hướng dẫn](docs/tts-workflow.md), [release notes](docs/release-notes-1.1.0.md), [giấy phép](docs/tts-licenses.md).
 
+## Xuất Project CapCut — source chưa phát hành
+
+Trang **Xuất Project CapCut — v1.2.0** nhập nhiều cặp thư mục, ghép theo vị trí sau sắp xếp. Audio theo tên tự nhiên; ảnh chọn theo tên hoặc Date created cho từng nhóm. Giao diện hai cột có thumbnail, Phát/Dừng và Xem ảnh trên từng hàng. Xuất riêng, gộp hoặc chia đều thành nhiều part, đặt tên tùy chỉnh và tạo cover theo ảnh đầu mỗi project. Project liên kết media gốc, không copy ảnh/audio, không tạo MP4 hoặc MP3 gộp, gap = 0. Effect MAU được đóng gói riêng trong project. Xem [hướng dẫn](docs/capcut-positional-import.md) và [release notes](docs/release-notes-1.2.0.md).
+
 ## Gemini và dịch hàng loạt
 
 - **Quản lý API → Google Gemini:** thêm key đơn/hàng loạt, mã hóa Windows DPAPI, phát hiện trùng và sắp thứ tự ưu tiên. Thêm key không gọi API.

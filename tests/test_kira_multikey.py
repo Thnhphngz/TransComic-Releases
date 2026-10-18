@@ -31,15 +31,17 @@ def success(req):
         'usage':{'prompt_tokens':10,'completion_tokens':12,'total_tokens':22}})
 
 
-def setup(tmp_path, keys=2, per_key=2, files=12, batches=3):
+def setup(tmp_path, keys=2, per_key=2, files=12, batches=3, **policy):
     store=Store(tmp_path/'state.db')
     store.add_kira_keys(' '.join(f'sk-synthetic-{i:04d}-not-real' for i in range(keys)))
+    ids=[k['id'] for k in store.kira_keys()]
+    for key in ids:store.set_kira_account_scope(key,ids[0])
     store.set_setting('concurrency',str(per_key))
     docs=[]
     for i in range(files):
         raw='\r\n'.join(f'Nguồn tổng hợp {j}' for j in range(3*(batches if i%2 else 1))).encode()
         doc=store.import_document(tmp_path/f'{i}.txt',decode_txt(raw),'vi','en')[0];docs.append(doc)
-    run,jobs=store.create_run(docs,['en'],provider='kira',model='mock',source_lang='vi',concurrency=per_key,config={'kira_multi_key':True})
+    run,jobs=store.create_run(docs,['en'],provider='kira',model='mock',source_lang='vi',concurrency=per_key,config={'kira_multi_key':True,'kira_recovery_version':1,**policy})
     return store,docs,run,jobs
 
 
@@ -135,7 +137,7 @@ def test_mock_load_fair_slots_mapping_and_single_os_worker(tmp_path,keys,cap):
         snapshot,rows=s.export_snapshot([doc])[0];assert validate_snapshot(snapshot,rows).state=='complete'
     assert all(len(s.attempts(b['id']))==1 for j in jobs for b in s.batches(j))
     assert all(len(s.batches(j)[0]['payload'][0].get('context',[]))<=8 for j in jobs)
-    assert all(not s.job(j)['retry_504'] and s.job(j)['auto_retries']==0 for j in jobs)
+    assert all(not s.job(j)['retry_504'] and s.job(j)['auto_retries']==2 for j in jobs)
     evidence=Path('artifacts/kira-multikey');evidence.mkdir(parents=True,exist_ok=True)
     elapsed=time.monotonic()-began
     current_bytes,peak_bytes=tracemalloc.get_traced_memory();tracemalloc.stop()
@@ -150,8 +152,9 @@ def test_mock_load_fair_slots_mapping_and_single_os_worker(tmp_path,keys,cap):
 
 @pytest.mark.parametrize('failure',['401','403','quota','rate','504','timeout','connect','500'])
 def test_error_isolation_no_retry_no_key_failover_same_batch(tmp_path,failure):
-    s,docs,run,jobs=setup(tmp_path,2,1,files=4,batches=2)
+    s,docs,run,jobs=setup(tmp_path,2,1,files=4,batches=2,kira_recovery_version=0)
     key_ids=[k['id'] for k in s.kira_keys()];seen=[];failed=[]
+    for key in key_ids:s.set_kira_account_scope(key,key)
     async def handler(req):
         batch=tuple(r['id'] for r in lines(req));seen.append(batch)
         if req.headers['authorization'].endswith('0000-not-real') and not failed:
@@ -164,31 +167,31 @@ def test_error_isolation_no_retry_no_key_failover_same_batch(tmp_path,failure):
         await asyncio.sleep(.01);return success(req)
     scheduler,pool=start(s,run,jobs,handler)
     wait_for(lambda:failed)
-    if failure in ('timeout','connect'):
-        wait_for(lambda:scheduler._paused.is_set());scheduler.stop()
     scheduler.join(10)
     assert not scheduler._thread.is_alive()
     assert seen.count(failed[0])==1
     assert scheduler.retry_count==0
     assert s.run(run)['state']!='finished'
     first=s.kira_keys()[0]['status']
-    assert first==({'401':'INVALID','403':'UNKNOWN_ERROR','quota':'QUOTA_EXHAUSTED','rate':'READY'}.get(failure,'UNKNOWN_ERROR')) or failure=='rate' and first=='COOLDOWN'
+    assert first in ({'401':{'INVALID'},'403':{'PERMISSION_DENIED'},'quota':{'QUOTA_EXHAUSTED'},'rate':{'READY','COOLDOWN'}}.get(failure,{'TEMPORARY_ERROR','READY'}))
+    assert not scheduler._paused.is_set()
     if failure not in ('timeout','connect'):assert pool.stats[key_ids[1]]['requests']>=1
     assert all(len(s.attempts(b['id']))<=1 for j in jobs for b in s.batches(j))
     s.close()
 
 
-def test_all_keys_unavailable_pause_add_resume_no_unsure_resend(tmp_path):
-    s,docs,run,jobs=setup(tmp_path,1,1,files=3)
+def test_all_keys_unavailable_requires_explicit_start_without_false_pause(tmp_path):
+    s,docs,run,jobs=setup(tmp_path,1,1,files=3,kira_recovery_version=0)
     calls=[]
     def handler(req):
         calls.append(tuple(r['id'] for r in lines(req)))
         return httpx.Response(401) if len(calls)==1 else success(req)
     scheduler,pool=start(s,run,jobs,handler)
-    wait_for(lambda:scheduler._paused.is_set() and s.run(run)['state']=='user_paused')
-    assert len(calls)==1 and s.run(run)['state']=='user_paused'
+    scheduler.join(3)
+    assert not scheduler._thread.is_alive() and not scheduler._paused.is_set()
+    assert len(calls)==1 and s.run(run)['state']=='needs_intervention'
     s.add_kira_keys('sk-added-synthetic');time.sleep(.1);assert len(calls)==1
-    scheduler.resume();scheduler.join(8)
+    scheduler.start_many(jobs,run);scheduler.join(8)
     assert not scheduler._thread.is_alive() and len(calls)>1 and len(calls)==len(set(calls))
     s.close()
 
@@ -244,7 +247,7 @@ def test_durable_account_budget_and_shared_cooldown(tmp_path):
 @pytest.mark.parametrize('problem',['missing','extra','duplicate','newline'])
 def test_partial_mapping_error_keeps_verified_data_and_blocks_export(tmp_path,problem):
     from transcomic.bulk import plan_exports,write_exports
-    s,docs,run,jobs=setup(tmp_path,2,2,files=1)
+    s,docs,run,jobs=setup(tmp_path,2,2,files=1,kira_recovery_version=0)
     def handler(req):
         rows=[{'id':r['id'],'text':'The story continues'} for r in lines(req)]
         if problem=='missing':rows.pop()
@@ -260,10 +263,15 @@ def test_partial_mapping_error_keeps_verified_data_and_blocks_export(tmp_path,pr
     assert sum(v['translated_lines'] for v in pool.stats.values())==(3 if problem=='extra' else 2)
     doc,rows=s.export_snapshot(docs)[0]
     report=validate_snapshot(doc,rows)
-    assert report.structural and report.state=='structure_error'
+    if problem=='extra':
+        # An out-of-batch ID was discarded. All three intended IDs were uniquely
+        # verified and committed; retain the failed request in monitor history.
+        assert not report.structural and report.state=='complete'
+    else:assert report.structural and report.state=='structure_error'
     assert any(r['translation'] for r in rows)
     result=write_exports(s,plan_exports([(doc,rows)],tmp_path/'out'),existing='overwrite',allow_incomplete=True)
-    assert result[0]['state']=='blocked_structure' and not (tmp_path/'out').exists()
+    if problem=='extra':assert result[0]['state']=='exported'
+    else:assert result[0]['state']=='blocked_structure' and not (tmp_path/'out').exists()
     s.close()
 
 
@@ -276,7 +284,7 @@ def test_multiple_languages_order_and_docx_blank_units(tmp_path):
     # Match the current DOCX importer API rather than visual Word lines.
     data=ImportedText(tuple(TextLine(u.text,'') for u in imported.units),'docx',imported.raw)
     doc=s.import_document(path,data,'vi','en',document_format='docx',locators=[u.locator for u in imported.units])[0]
-    run,jobs=s.create_run([doc],['en','de'],provider='kira',model='mock',source_lang='vi',concurrency=2,config={'kira_multi_key':True})
+    run,jobs=s.create_run([doc],['en','de'],provider='kira',model='mock',source_lang='vi',concurrency=2,config={'kira_multi_key':True,'kira_recovery_version':1})
     order=[]
     def handler(req):
         content=json.loads(req.content)['messages'][0]['content'];order.append(content)
@@ -303,7 +311,7 @@ def test_safe_exit_cancellation_fences_late_results(tmp_path):
 
 
 def test_no_keys_and_secret_redaction(tmp_path):
-    s,docs,run,jobs=setup(tmp_path,2,1,files=1)
+    s,docs,run,jobs=setup(tmp_path,2,1,files=1,kira_recovery_version=0)
     secrets=[k['secret'] for k in s.kira_keys(decrypt=True)]
     def handler(req):return httpx.Response(429,headers={'x-ratelimit-secret':secrets[1],'retry-after':'1'},json={})
     scheduler,pool=start(s,run,jobs,handler);scheduler.join(5)
@@ -331,11 +339,12 @@ def test_100_file_queue_work_stealing_and_ready_no_keys(tmp_path):
     async def handler(req):
         calls.append(tuple(r['id'] for r in lines(req)));await asyncio.sleep(.002);return success(req)
     scheduler,pool=start(s,run,jobs,handler)
-    wait_for(lambda:scheduler._paused.is_set())
+    scheduler.join(3)
+    assert not scheduler._thread.is_alive() and not scheduler._paused.is_set()
     assert not calls
     s.add_kira_keys('sk-added-A sk-added-B sk-added-C')
     time.sleep(.05);assert not calls
-    scheduler.resume();scheduler.join(15)
+    scheduler.start_many(jobs,run);scheduler.join(15)
     assert not scheduler._thread.is_alive() and len(calls)==100 and len(set(calls))==100
     assert s.run(run)['state']=='finished'
     s.close()

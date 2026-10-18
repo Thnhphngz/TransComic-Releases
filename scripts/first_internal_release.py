@@ -43,6 +43,9 @@ FIRST_SCOPE=ReleaseScope(VERSION,TAG,OUT,NAMES)
 OFFICIAL_SCOPE=ReleaseScope('1.0.0','v1.0.0',ROOT/'artifacts/official-release-1.0.0',
     ('TransComic-Setup-1.0.0-windows-x64.exe','transcomic-update.json','SHA256SUMS.txt'))
 _AUTOMATIC_SCOPES={}
+PACKAGING_120_GATES=('MUTAGEN_PASS','THIRDPARTY_PASS','PORTABLE_MAU_PASS','BUILD_PASS',
+    'EXE_STARTUP_PASS','KOKORO_PASS','CAPCUT_FROZEN_EXPORT_PASS','VERSION_UPDATER_PASS',
+    'DATA_SECURITY_PASS','ARTIFACT_HASH_PASS')
 
 def automatic_scope(version):
     """Per-version command boundary for the user-invoked automatic entry."""
@@ -176,11 +179,37 @@ def require_current_tests(scope=FIRST_SCOPE):
         raise UpdateError('RELEASE_NOTES_CHANGED_AFTER_REVIEW')
     if scope is OFFICIAL_SCOPE or any(scope is s for s in _AUTOMATIC_SCOPES.values()):
         from scripts.official_release import GATE_NAMES
-        if set(proof.get('release_gates',{}))!=set(GATE_NAMES) or not all(v is True for v in proof['release_gates'].values()):
+        # Explicit user-authorized v1.2.0 packaging/smoke contract. Prior full
+        # regression is retained with its minor focus FAIL, never relabeled PASS.
+        required=PACKAGING_120_GATES if scope.version=='1.2.0' and proof.get('gate_profile')=='packaging_smoke_120' else GATE_NAMES
+        if required is PACKAGING_120_GATES and proof.get('prior_regression_accepted_by_user') is not True:
+            raise UpdateError('PACKAGING_120_USER_ACCEPTANCE_REQUIRED')
+        if set(proof.get('release_gates',{}))!=set(required) or not all(v is True for v in proof['release_gates'].values()):
             raise UpdateError('OFFICIAL_RELEASE_GATES_NOT_ALL_PASS')
         if scope is not OFFICIAL_SCOPE and proof.get('version')!=scope.version:
             raise UpdateError('AUTOMATIC_VERSION_PROOF_MISMATCH')
     return proof
+
+
+def inspect_scoped_asset(scope,name,path,base):
+    """Only the explicit 1.2.0 source distribution may use a ZIP asset."""
+    if Path(path).suffix.lower()!='.zip':return Asset.inspect(name,path,base)
+    checked_scope(scope)
+    if scope.version!='1.2.0' or name!='TransComic-1.2.0-ThirdParty-Sources.zip':
+        raise UpdateError('PRIVATE_DATA_NOT_AN_ASSET')
+    import zipfile
+    from transcomic.update.metadata import MAX_DOWNLOAD
+    path=safe_path(path,base)
+    if path.name!=name or not path.is_file() or not 0<path.stat().st_size<=MAX_DOWNLOAD:
+        raise UpdateError('INVALID_SOURCE_ASSET')
+    with zipfile.ZipFile(path) as packed:
+        names=packed.namelist()
+        if len(names)!=len(set(names)) or 'ThirdParty/manifest.json' not in names:
+            raise UpdateError('INVALID_SOURCE_ARCHIVE')
+        if any(not n.startswith('ThirdParty/') or '..' in Path(n).parts or '\\' in n or ':' in n for n in names):
+            raise UpdateError('UNSAFE_SOURCE_ARCHIVE')
+    with path.open('rb') as stream:digest=hashlib.file_digest(stream,'sha256').hexdigest()
+    return Asset(name,path,path.stat().st_size,digest)
 
 
 class FirstReleaseCommands:
@@ -230,7 +259,7 @@ class FirstReleaseCommands:
             if source_identity().commit!=self.commit:raise UpdateError('SOURCE_CHANGED_BEFORE_WRITE')
             require_current_tests(self.scope)
             for asset in self.assets.values():
-                if Asset.inspect(asset.name,asset.path,ROOT)!=asset:raise UpdateError('ASSET_CHANGED_BEFORE_WRITE')
+                if inspect_scoped_asset(self.scope,asset.name,asset.path,ROOT)!=asset:raise UpdateError('ASSET_CHANGED_BEFORE_WRITE')
         intent=None
         if write and any(self.scope is s for s in _AUTOMATIC_SCOPES.values()):
             intent=safe_path(self.scope.out/'remote-intent.json',ROOT)

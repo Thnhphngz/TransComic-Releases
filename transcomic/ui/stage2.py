@@ -308,6 +308,8 @@ class Stage2Mixin(KiraApiMixin):
 
     def make_provider(self, job, kira_key=None):
         if job['provider'] == 'kira':
+            from ..kira_recovery import adopt_authorized_recovery
+            adopt_authorized_recovery(self.store,job)
             if self.store.kira_keys():
                 from ..kira_pool import KiraPoolProvider
                 return KiraPoolProvider(self.store,job['model'],timeout=job['timeout'],prompt_version=job['prompt_version'])
@@ -338,7 +340,7 @@ class Stage2Mixin(KiraApiMixin):
         if provider == 'kira':
             key = self._key()
             if not key: return
-            config={'kira_multi_key':True,'auto_retries':0,'retry_504':False}
+            config={'kira_multi_key':True,'retry_504':False}
         else:
             if not self.gemini_verified.isChecked(): QMessageBox.information(self, 'Giới hạn Gemini', 'Đối chiếu và xác nhận quota/model trong Quản lý API trước khi chạy.'); return
             keys = self.store.gemini_keys()

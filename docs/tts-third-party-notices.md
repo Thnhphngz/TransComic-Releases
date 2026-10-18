@@ -31,6 +31,13 @@ SOFTWARE.
 
 ```
 
+## CapCut MP3 metadata dependency
+
+Mutagen 1.48.1 is used to read MP3 duration and metadata. Its original license
+notices are delivered under `ThirdParty/notices/mutagen`; the exact upstream
+source archive, download URL and SHA-256 are recorded in
+`ThirdParty/source-provenance.json`. It is separate from the Kokoro worker.
+
 ## misaki 0.7.4
 
 ### misaki-0.7.4.dist-info/LICENSE

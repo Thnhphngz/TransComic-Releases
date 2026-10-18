@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QFileDialog, QFormLayout, QFrame,
     QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget,
     QMainWindow, QMessageBox, QProgressBar, QPushButton, QSpinBox, QStackedWidget, QDialog, QPlainTextEdit,
-    QSizePolicy, QTableView, QVBoxLayout, QWidget, QMenu, QSystemTrayIcon, QCheckBox, QButtonGroup,
+    QSizePolicy, QTableView, QVBoxLayout, QWidget, QMenu, QSystemTrayIcon, QCheckBox, QButtonGroup, QScrollArea,
 )
 from .controls import QComboBox, QSpinBox
 from .glass import GlassButton as QPushButton, SkySwitch, install_glass_skin
@@ -114,14 +114,22 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         self.nav_buttons = []
         self.navigation_group = QButtonGroup(self)
         self.navigation_group.setExclusive(True)
+        self.navigation_scroll=QScrollArea();self.navigation_scroll.setWidgetResizable(True)
+        self.navigation_scroll.setFrameShape(QFrame.NoFrame)
+        self.navigation_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.navigation_scroll.setToolTip('Cuộn để xem các chức năng khi cửa sổ thấp')
+        nav_body=QWidget();nav_items=QVBoxLayout(nav_body);nav_items.setContentsMargins(0,0,0,0);nav_items.setSpacing(9)
+        self.navigation_scroll.setWidget(nav_body);nav.addWidget(self.navigation_scroll,1)
         for title, index in self.navigation_items():
             control = button(title)
             control.setCheckable(True); self.navigation_group.addButton(control,index)
             control.setMinimumHeight(46)
+            control.setSizePolicy(QSizePolicy.Ignored,QSizePolicy.Fixed)
+            if index==8:control.setStyleSheet('padding-left: 0px; padding-right: 0px;')
             control.clicked.connect(lambda _=False, i=index: self.pages.setCurrentIndex(i))
-            nav.addWidget(control)
+            nav_items.addWidget(control)
             self.nav_buttons.append(control)
-        nav.addStretch()
+        nav_items.addStretch()
         self.collapse_button = button("‹  Thu gọn")
         self.collapse_button.clicked.connect(self.toggle_sidebar)
         nav.addWidget(self.collapse_button)
@@ -150,6 +158,9 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         srt_layout.addStretch();self.pages.addWidget(srt_page)
         self.tts_container=QWidget();self.tts_layout=QVBoxLayout(self.tts_container)
         self.tts_layout.setContentsMargins(0,0,0,0);self.pages.addWidget(self.tts_container)
+        self.capcut_container=QWidget();self.capcut_layout=QVBoxLayout(self.capcut_container)
+        self.capcut_layout.setContentsMargins(0,0,0,0);self.pages.addWidget(self.capcut_container)
+        self.pages.currentChanged.connect(self.open_capcut_page)
         self.pages.currentChanged.connect(self.open_tts_page)
         self.pages.currentChanged.connect(lambda _: self.update_branding())
         self.change_font(self.font_spin.value())
@@ -164,7 +175,6 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
 
         # Install after the existing V3/technical settings composition is finished.
         from .update_panel import UpdatePanel
-        from PySide6.QtWidgets import QScrollArea
         settings_page=self.pages.widget(3)
         self.update_panel=UpdatePanel(self)
         settings_page.layout().insertWidget(2,self.update_panel)
@@ -779,7 +789,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             if encrypted:
                 try:return unprotect_key(encrypted[0])
                 except Exception:
-                    self.store.kira_key_status(record['id'],'UNKNOWN_ERROR')
+                    self.store.kira_key_status(record['id'],'CREDENTIAL_ERROR',reason='credential_unavailable')
         if self.store.kira_keys():
             QMessageBox.information(self,'Kira key chưa khả dụng','Bật hoặc khôi phục key trong trang API; không có request nào được gửi.')
             self.pages.setCurrentIndex(2);return None
@@ -1089,7 +1099,12 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             job_state = self.store.job(self.scheduler.job_id)["state"]
             missing = total-done
             finished = f"Đã xử lý lượt dịch · còn {errors} dòng lỗi/cũ · {missing} dòng chưa có bản dịch · {self.scheduler.retry_count} retry"
-            self.active_label.setText({"finished": finished, "stopped": "Đã dừng — không tự gửi lại", "interrupted": "Bị gián đoạn — chưa tự tiếp tục"}.get(job_state, job_state))
+            from ..kira_recovery import reason_label
+            self.active_label.setText({"finished": finished, "stopped": "Đã dừng — không tự gửi lại", "interrupted": "Bị gián đoạn — chưa tự tiếp tục",
+                'needs_intervention':reason_label(getattr(self.scheduler,'intervention_reason',None)) or 'Cần kiểm tra lỗi không thể tự phục hồi an toàn',
+                'completed_with_errors':'Đã rà soát · còn lỗi sau giới hạn tự phục hồi',
+                'blocked':'Bị chặn · kiểm tra quyền truy cập hoặc ngân sách',
+                'quota_exhausted':'Hết quota/số dư; các bản dịch đã lưu được giữ'}.get(job_state, job_state))
             self.stats_label.setText(f"{total:,} dòng cần dịch · {done:,} hoàn tất · {errors:,} cần xem lại")
         elif running and self.scheduler._paused.is_set():
             self.active_label.setText(f"Đã tạm dừng · {self.scheduler.active} request đang hoàn tất")
@@ -1241,6 +1256,15 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             self.tts_page=TtsPage(self.store.path.parent,self)
             self.tts_layout.addWidget(self.tts_page)
 
+    def open_capcut_page(self,index):
+        if index==8 and not hasattr(self,'capcut_page'):
+            from .capcut_page import CapcutPage
+            try:
+                self.capcut_page=CapcutPage(self.store,self)
+                self.capcut_layout.addWidget(self.capcut_page)
+            except (ValueError,TypeError,KeyError) as exc:
+                QMessageBox.warning(self,'Không đọc được nhóm CapCut',str(exc))
+
     def _close_event(self, event):
         panel=getattr(self,'update_panel',None)
         if panel and panel.handoff_pending:
@@ -1283,6 +1307,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
                 self._exit_deadline = time.monotonic()+self.shutdown_grace_seconds
                 if self.scheduler: self.scheduler.stop()
                 if tts:tts.request_stop()
+                if hasattr(self,'capcut_page'):self.capcut_page.request_stop()
                 self.notice.setText("Đang thoát an toàn: chờ request đang chạy lưu kết quả…")
                 self.exit_timer.start()
                 event.ignore()
@@ -1305,6 +1330,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         if hasattr(self,'line_check'):self.line_check.shutdown()
         if hasattr(self,'kira_monitor_dialog'):self.kira_monitor_dialog.close()
         if tts:tts.shutdown()
+        if hasattr(self,'capcut_page'):self.capcut_page.shutdown()
         self.store.close()
         self._closed = True
         if update_exit:

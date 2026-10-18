@@ -165,7 +165,9 @@ def test_attempt_constraint_migration_preserves_trace_foreign_keys(tmp_path):
     store, doc, job=setup(tmp_path)
     store.job_state(job,'running'); batch=store.batches(job)[0]; store.claim_batch(batch['id']); attempt=store.prepare_attempt(batch['id'],1)
     store.finish_batch(batch['id'], {batch['payload'][0]['id']:'Valid'}, 'Partial', diagnostics={'failure_kind':'partial_response'}, expected_attempt_id=attempt)
-    store.complete_attempt(attempt, {'failure_kind':'partial_response'}); store.close()
+    store.complete_attempt(attempt, {'failure_kind':'partial_response'})
+    with store.transaction():store.db.execute('UPDATE request_attempts SET reserved_tokens=12345 WHERE id=?',(attempt,))
+    store.close()
     with sqlite3.connect(tmp_path/'state.db') as db:
         db.execute('PRAGMA writable_schema=ON')
         db.execute("UPDATE sqlite_master SET sql=replace(sql,'BETWEEN 1 AND 6','BETWEEN 1 AND 4') WHERE name='request_attempts'")
@@ -173,6 +175,7 @@ def test_attempt_constraint_migration_preserves_trace_foreign_keys(tmp_path):
     store=Store(tmp_path/'state.db')
     assert not store.db.execute('PRAGMA foreign_key_check').fetchall()
     assert store.attempts(batch['id'])[0]['id']==attempt
+    assert store.attempts(batch['id'])[0]['reserved_tokens']==12345
     assert store.db.execute('SELECT COUNT(*) FROM api_text_versions').fetchone()[0]==1
     assert store.job(job)['auto_retries']==5
     assert 'BETWEEN 1 AND 6' in store.db.execute("SELECT sql FROM sqlite_master WHERE name='request_attempts'").fetchone()[0]

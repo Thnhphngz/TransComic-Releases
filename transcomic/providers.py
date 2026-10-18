@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import time
 import re
+import math
 from .prompts import messages, PROMPT_VERSION
 from dataclasses import dataclass
 
@@ -38,10 +39,20 @@ def parse_line_response(content: str, expected: set[str]) -> BatchResult:
             fenced = re.fullmatch(r"\s*```(?:json)?\s*\n?(.*?)\n?```\s*", content, re.S | re.I)
             if fenced:
                 content = fenced.group(1)
-        obj = json.loads(content)
+        def pairs(items):
+            result={};duplicate_keys=[]
+            for key,value in items:
+                if key in result:duplicate_keys.append(key)
+                result[key]=value
+            if duplicate_keys:result['__duplicate_protocol_keys__']=duplicate_keys
+            return result
+        obj = json.loads(content,object_pairs_hook=pairs)
     except (json.JSONDecodeError, TypeError):
         return BatchResult({}, "Model response is not JSON", diagnostics={'structure_errors':[{'code':'invalid_json','line_ids':sorted(expected)}]})
-    if not isinstance(obj, dict) or not isinstance(obj.get("lines"), list):
+    # Only a single known wrapper is unambiguous; never extract arbitrary prose
+    # or infer IDs from list positions. Conflicting/duplicated JSON keys fail.
+    if isinstance(obj,dict) and set(obj) in ({'data'},{'result'}):obj=next(iter(obj.values()))
+    if not isinstance(obj, dict) or '__duplicate_protocol_keys__' in obj or not isinstance(obj.get("lines"), list):
         return BatchResult({}, "Response must contain a lines array", diagnostics={'structure_errors':[{'code':'invalid_schema','line_ids':sorted(expected)}]})
     values: dict[str, str] = {}
     seen: set[str] = set()
@@ -49,7 +60,7 @@ def parse_line_response(content: str, expected: set[str]) -> BatchResult:
     duplicate = False
     structure = []
     for entry in obj["lines"]:
-        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str) or not isinstance(entry.get("text"), str):
+        if not isinstance(entry, dict) or '__duplicate_protocol_keys__' in entry or not isinstance(entry.get("id"), str) or not isinstance(entry.get("text"), str):
             invalid = True
             structure.append({'code':'invalid_entry','line_ids':[entry['id']] if isinstance(entry,dict) and isinstance(entry.get('id'),str) and entry['id'] in expected else []})
             if isinstance(entry,dict) and isinstance(entry.get('id'),str):
@@ -57,10 +68,11 @@ def parse_line_response(content: str, expected: set[str]) -> BatchResult:
                 seen.add(entry['id'])
             continue
         line_id, value = entry["id"], entry["text"]
-        if line_id not in expected or line_id in seen or "\n" in value or "\r" in value or not value.strip():
+        controls=bool(re.search(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff]',value))
+        if line_id not in expected or line_id in seen or "\n" in value or "\r" in value or controls or not value.strip():
             invalid = True
             duplicate = duplicate or line_id in seen
-            code = 'unexpected_id' if line_id not in expected else 'duplicate_id' if line_id in seen else 'linebreak' if '\n' in value or '\r' in value else 'empty_value'
+            code = 'unexpected_id' if line_id not in expected else 'duplicate_id' if line_id in seen else 'linebreak' if '\n' in value or '\r' in value else 'control_character' if controls else 'empty_value'
             structure.append({'code':code,'line_ids':[line_id] if line_id in expected else []})
             if line_id in values:
                 values.pop(line_id, None)
@@ -180,6 +192,10 @@ class KiraProvider:
             diagnostics["timeout_type"] = type(exc).__name__
             return result({}, f"Client timeout ({type(exc).__name__}): request may have consumed tokens; no automatic retry", True, kind="client_timeout")
         except httpx.ConnectError:
+            # ConnectError means establishing the connection failed. A transport
+            # reporting a completed body is still treated as uncertain.
+            if not diagnostics['sent_body_observed']:
+                return result({}, "Cannot connect to Kira; no request body sent", kind="connect_not_sent")
             return result({}, "Cannot connect to Kira; delivery status is uncertain", True, kind="connect_error")
         except httpx.RequestError as exc:
             return result({}, f"Network error ({type(exc).__name__}); delivery status is uncertain", True, kind="network_error")
@@ -196,6 +212,10 @@ class KiraProvider:
         except ValueError:
             envelope = None
         usage = envelope.get("usage") if isinstance(envelope, dict) else None
+        error_body=envelope.get('error') if isinstance(envelope,dict) else None
+        code=error_body.get('code') if isinstance(error_body,dict) else None
+        if isinstance(code,str) and re.fullmatch(r'[a-zA-Z0-9_.:-]{1,80}',code):
+            diagnostics['provider_error_code']=code.replace(self.api_key,'[redacted]') if self.api_key else code
         measured = {key: int(usage[key]) for key in ("prompt_tokens", "completion_tokens", "total_tokens") if isinstance(usage, dict) and isinstance(usage.get(key), int)}
         details = usage.get('completion_tokens_details') if isinstance(usage, dict) else None
         if isinstance(details, dict) and isinstance(details.get('reasoning_tokens'), int):
@@ -208,30 +228,64 @@ class KiraProvider:
             return result({}, "Kira rejected the API key (HTTP 401)", kind="authentication")
         if response.status_code == 403:
             return result({}, f"Kira denied access to model {self.model} (HTTP 403); check account permissions", kind="permission")
+        quota_codes=('insufficient_quota','quota_exhausted','billing_hard_limit_reached','vnd_balance_exhausted')
+        quota_confirmed=isinstance(error_body,dict) and any(value in quota_codes for value in (code,error_body.get('type')))
+        if isinstance(error_body,dict) and error_body.get('scope') in ('key','model','account'):
+            diagnostics['quota_scope']=error_body['scope']
+        if response.status_code==402 and code in ('pro_membership_required','model_permission_denied','model_access_denied'):
+            return result({},'Kira model permission required (HTTP 402)',kind='permission')
+        if response.status_code==402:
+            diagnostics['quota_type']='exhausted' if quota_confirmed else 'unverified'
+            reset=response.headers.get('retry-after')
+            try:
+                value=float(reset)
+                if math.isfinite(value) and value>=0:diagnostics['retry_after_seconds']=value
+            except (ValueError,TypeError):
+                if reset:
+                    from email.utils import parsedate_to_datetime
+                    try:
+                        value=parsedate_to_datetime(reset).timestamp()-time.time()
+                        if math.isfinite(value):diagnostics['retry_after_seconds']=max(0,value)
+                    except (ValueError,TypeError,OverflowError):pass
+            return result({},'Kira HTTP 402: provider confirmed quota' if quota_confirmed else 'Kira HTTP 402: billing/access requires verification',kind='quota_exhausted' if quota_confirmed else 'http_error')
         if response.status_code == 429:
             from email.utils import parsedate_to_datetime
             from datetime import datetime, timezone
             retry_after = response.headers.get('retry-after')
-            diagnostics['retry_after'] = retry_after
-            diagnostics['rate_limit_headers'] = {k: v for k, v in response.headers.items() if k.lower().startswith(('x-ratelimit-', 'ratelimit-'))}
+            diagnostics['retry_after'] = retry_after.replace(self.api_key,'[redacted]') if retry_after and self.api_key else retry_after
+            diagnostics['rate_limit_headers'] = {k: v.replace(self.api_key,'[redacted]') if self.api_key else v for k, v in response.headers.items() if k.lower().startswith(('x-ratelimit-', 'ratelimit-'))}
             seconds = None
             if retry_after:
-                try: seconds = max(0.0, float(retry_after))
+                try:
+                    value=float(retry_after)
+                    if math.isfinite(value) and value>=0:seconds=value
                 except ValueError:
                     try: seconds = max(0.0, (parsedate_to_datetime(retry_after)-datetime.now(timezone.utc)).total_seconds())
                     except (ValueError, TypeError, OverflowError): pass
+            if seconds is None:
+                reset=response.headers.get('x-ratelimit-reset-requests') or response.headers.get('ratelimit-reset')
+                if reset:
+                    try:
+                        value=float(reset)
+                        if math.isfinite(value) and value>=0:seconds=max(0,value-time.time()) if value>1000000000 else value
+                    except ValueError:
+                        match=re.fullmatch(r'(\d+(?:\.\d+)?)(ms|s|m)',reset)
+                        if match:seconds=float(match[1])*{'ms':.001,'s':1,'m':60}[match[2]]
             diagnostics['retry_after_seconds'] = seconds
-            code = (envelope.get('error') or {}).get('code') if isinstance(envelope, dict) and isinstance(envelope.get('error'), dict) else None
-            exhausted = code in ('insufficient_quota', 'quota_exhausted', 'billing_hard_limit_reached')
+            exhausted = quota_confirmed
             diagnostics['quota_type'] = 'exhausted' if exhausted else 'temporary' if seconds is not None else 'unverified'
             return result({}, 'HTTP 429: quota exhausted' if exhausted else 'HTTP 429: cooldown required' if seconds is not None else 'HTTP 429: reset time unknown; bounded backoff required', kind='quota_exhausted' if exhausted else 'rate_limit')
         if response.status_code >= 500:
             return result({}, f"Kira HTTP {response.status_code}: request may have consumed tokens", True, kind="http_server_error")
+        if response.status_code==408:
+            return result({},'Kira HTTP 408: delivery status uncertain',True,kind='http_timeout')
         if response.status_code in (400, 404):
             return result({}, f"Kira rejected model {self.model} (HTTP {response.status_code}); check model ID and account access", kind="model_or_request")
         if response.status_code >= 400:
             return result({}, f"Kira HTTP {response.status_code} for model {self.model}", kind="http_error")
         try:
+            finish_reason=envelope['choices'][0].get('finish_reason')
+            diagnostics['finish_reason']=finish_reason if finish_reason in ('stop','length','content_filter','tool_calls','function_call') else 'unknown'
             content = envelope["choices"][0]["message"]["content"]
             if not isinstance(content, str):
                 raise ValueError("content is not text")

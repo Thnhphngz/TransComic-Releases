@@ -22,7 +22,7 @@ a = Analysis(
     [str(root/'run_transcomic.py')],
     pathex=[str(root)],
     binaries=plugins+tts_binaries,
-    datas=[(str(p), 'transcomic/ui/assets') for p in (root/'transcomic/ui/assets').glob('*.svg')]+tts_datas,
+    datas=[(str(p), 'transcomic/ui/assets') for p in (root/'transcomic/ui/assets').glob('*.svg')]+[(str(root/'transcomic/capcut'/name),'transcomic/capcut') for name in ('mau-structure.zip','mau-origin.json','mau-animations.zip')]+tts_datas,
     hiddenimports=collect_submodules('docx')+['PySide6.QtSvg','PySide6.QtNetwork','charset_normalizer']+tts_hidden,
     hookspath=[],
     hooksconfig={},

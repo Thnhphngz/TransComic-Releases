@@ -7,7 +7,7 @@ name = "transcomic"
 dynamic = ["version"]
 description = "Windows TXT and DOCX translation editor for Kira AI and official Gemini API"
 requires-python = ">=3.11"
-dependencies = ["PySide6>=6.7", "httpx>=0.27", "charset-normalizer>=3.3", "python-docx>=1.1", "lxml>=5", "cryptography>=43"]
+dependencies = ["PySide6>=6.7", "httpx>=0.27", "charset-normalizer>=3.3", "python-docx>=1.1", "lxml>=5", "cryptography>=43", "mutagen>=1.47,<2"]
 
 [project.optional-dependencies]
 test = ["pytest>=8", "pillow==12.3.0"]
@@ -25,7 +25,9 @@ version = {attr = "transcomic.version.VERSION"}
 [tool.setuptools.package-data]
 "transcomic.ui" = ["assets/*.svg"]
 "transcomic.tts" = ["calibration.json", "gpu-pack.json", "setup-catalog.json"]
+"transcomic.capcut" = ["mau-structure.zip", "mau-origin.json", "mau-animations.zip"]
 
 [tool.pytest.ini_options]
 cache_dir = "${TRANSCOMIC_PYTEST_CACHE}"
+testpaths = ["tests"]
 

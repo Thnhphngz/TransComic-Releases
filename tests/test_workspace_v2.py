@@ -114,8 +114,8 @@ def test_kira_saved_limit_provider_switch_and_gemini_cap(tmp_path, monkeypatch):
     w.provider_selector.setCurrentIndex(0); assert w.concurrency.value() == 20
     assert store.setting('concurrency') == '20'
     w.toggle_theme(); assert store.setting('dark') == '1' and not w.windowIcon().isNull()
-    assert [p for _, p in w.navigation_items()] == [0, 6, 7, 5, 1, 2, 4, 3]
-    assert [p for _, p in w.navigation_items() if p not in (6,7)] == [0, 5, 1, 2, 4, 3]
+    assert [p for _, p in w.navigation_items()] == [0, 6, 7, 8, 5, 1, 2, 4, 3]
+    assert [p for _, p in w.navigation_items() if p not in (6,7,8)] == [0, 5, 1, 2, 4, 3]
     w.close()
 
 
