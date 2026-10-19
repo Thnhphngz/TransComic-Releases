@@ -1,5 +1,6 @@
 """Small source/frozen UI checks, called only inside the isolated build smoke."""
 from pathlib import Path
+import time
 from PySide6.QtCore import Qt,QMimeData,QUrl,QPoint,QPointF,QTimer
 from PySide6.QtGui import QDragEnterEvent,QDropEvent
 from PySide6.QtWidgets import QApplication,QComboBox,QInputDialog
@@ -23,7 +24,16 @@ def run(window,root):
             entry=dialog.entries[-1];focus=app.focusWidget()
             drop(entry.image,image);assert entry.audio.text()==''
             drop(entry.audio,audio);assert dialog.entries[-1] is entry
-            QTest.qWait(10);assert len(dialog.entries)==i+2 and dialog.entries[-1].blank()
+            deadline=time.monotonic()+1
+            while time.monotonic()<deadline:
+                QTest.qWait(10)
+                if len(dialog.entries)!=i+2:continue
+                spare=dialog.entries[-1];viewport=dialog.scroll.viewport()
+                if spare.isVisible() and viewport.rect().contains(spare.mapTo(viewport,QPoint(0,0))) and viewport.rect().contains(spare.mapTo(viewport,QPoint(spare.width()-1,spare.height()-1))):break
+            assert len(dialog.entries)==i+2 and dialog.entries[-1].blank()
+            spare=dialog.entries[-1];viewport=dialog.scroll.viewport()
+            assert viewport.rect().contains(spare.mapTo(viewport,QPoint(0,0))), (i,spare.geometry(),viewport.rect(),spare.mapTo(viewport,QPoint(0,0)))
+            assert viewport.rect().contains(spare.mapTo(viewport,QPoint(spare.width()-1,spare.height()-1))), (i,spare.geometry(),viewport.rect())
             assert app.focusWidget() is focus
         QTest.qWait(40);assert dialog.scroll.verticalScrollBar().value()>0
         assert len(dialog.values())==10

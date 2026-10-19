@@ -3,7 +3,7 @@ from pathlib import Path
 import os
 from PySide6.QtCore import Qt,QTimer
 from PySide6.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QFormLayout,QLabel,
-    QLineEdit,QScrollArea,QWidget,QFrame,QFileDialog,QDialogButtonBox,QMessageBox)
+    QLineEdit,QScrollArea,QWidget,QFrame,QFileDialog,QDialogButtonBox,QMessageBox,QLayout)
 from .controls import QComboBox
 from .glass import GlassButton
 from ..capcut.media import MediaGroup
@@ -84,12 +84,14 @@ class PairEntry(QFrame):
 class MultiGroupDialog(QDialog):
     def __init__(self,parent,existing=(),group=None):
         super().__init__(parent);self.existing=tuple(existing);self.entries=[];self.result_groups=();self.editing=group is not None;self.spare_scheduled=False
+        self.pending_scroll=None;self.scroll_timer=QTimer(self);self.scroll_timer.setSingleShot(True);self.scroll_timer.setInterval(20)
+        self.scroll_timer.timeout.connect(lambda:self.scroll_to_spare(self.pending_scroll))
         self.setWindowTitle('Sửa cặp thư mục' if group else 'Thêm các cặp thư mục ảnh và audio')
         screen=self.screen().availableGeometry();self.resize(min(760,screen.width()-40),min(640,screen.height()-60));self.setMinimumSize(460,300)
         layout=QVBoxLayout(self)
         note=QLabel('Chọn thủ công từng cặp. Ảnh/audio chỉ lấy trực tiếp trong thư mục đã chọn; không tự tìm thư mục voice.');note.setWordWrap(True);layout.addWidget(note)
         self.scroll=QScrollArea();self.scroll.setWidgetResizable(True);self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        body=QWidget();self.rows=QVBoxLayout(body);self.rows.setContentsMargins(0,0,0,0);self.rows.addStretch();self.scroll.setWidget(body);layout.addWidget(self.scroll,1)
+        body=QWidget();self.rows=QVBoxLayout(body);self.rows.setSizeConstraint(QLayout.SetMinAndMaxSize);self.rows.setContentsMargins(0,0,0,0);self.rows.addStretch();self.scroll.setWidget(body);layout.addWidget(self.scroll,1)
         self.add_button=GlassButton('+ Thêm cặp thư mục');self.add_button.clicked.connect(lambda:self.add_entry());self.add_button.setVisible(group is None);layout.addWidget(self.add_button)
         self.error=QLabel();self.error.setWordWrap(True);layout.addWidget(self.error)
         buttons=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel)
@@ -100,7 +102,7 @@ class MultiGroupDialog(QDialog):
 
     def add_entry(self,group=None):
         if group is None and self.entries and self.entries[-1].blank():return self.entries[-1]
-        entry=PairEntry(self,group);self.entries.append(entry);self.rows.insertWidget(self.rows.count()-1,entry);self.renumber();return entry
+        entry=PairEntry(self,group);self.entries.append(entry);self.rows.insertWidget(self.rows.count()-1,entry);entry.show();self.renumber();return entry
     def remove_entry(self,entry):
         self.entries.remove(entry);self.rows.removeWidget(entry);entry.deleteLater();self.renumber()
         self.schedule_spare()
@@ -118,9 +120,13 @@ class MultiGroupDialog(QDialog):
         added=None
         if not self.entries or self.entries[-1].complete():added=self.add_entry()
         self.renumber()
-        if added:QTimer.singleShot(0,self,lambda:self.scroll_to_spare(added))
+        if added:self.pending_scroll=added;self.scroll_timer.start()
     def scroll_to_spare(self,entry):
-        if entry in self.entries:self.scroll.ensureWidgetVisible(entry,0,8)
+        if entry in self.entries:
+            # The queued callback can precede QScrollArea's resize/layout event.
+            # Realize the new row geometry before asking Qt to reveal it.
+            self.rows.activate();self.scroll.widget().adjustSize()
+            bar=self.scroll.verticalScrollBar();bar.setValue(bar.maximum())
     def renumber(self):
         for i,entry in enumerate(self.entries):entry.heading.setText(f'Cặp {i+1:02}')
     def values(self):

@@ -1,9 +1,11 @@
 """Explorer MIME events and one spare pair; never enumerate folder contents."""
 from pathlib import Path
+import time
 import pytest
 from PySide6.QtCore import Qt,QMimeData,QUrl,QPointF,QPoint
 from PySide6.QtGui import QDragEnterEvent,QDropEvent
 from PySide6.QtWidgets import QApplication,QWidget
+from PySide6.QtTest import QTest
 from transcomic.ui.capcut_import import MultiGroupDialog
 from test_capcut_ui import page
 
@@ -37,8 +39,16 @@ def test_thirty_pairs_unicode_stable_targets_no_scan_no_focus_theft(page,tmp_pat
         assert drop(*[fields[0][0],[fields[0][1]]]);app.processEvents();assert d.entries[-1] is entry
         assert drop(fields[1][0],[fields[1][1]])
         assert d.entries[-1] is entry,'Drop must finish before adding/scrolling'
-        app.processEvents();app.processEvents()
+        app.processEvents()
+        deadline=time.monotonic()+1
+        while time.monotonic()<deadline:
+            spare=d.entries[-1];viewport=d.scroll.viewport()
+            if spare.isVisible() and viewport.rect().contains(spare.mapTo(viewport,QPoint(0,0))) and viewport.rect().contains(spare.mapTo(viewport,QPoint(spare.width()-1,spare.height()-1))):break
+            QTest.qWait(10)
         assert len(d.entries)==i+2 and d.entries[-1].blank()
+        spare=d.entries[-1];viewport=d.scroll.viewport()
+        assert viewport.rect().contains(spare.mapTo(viewport,QPoint(0,0)))
+        assert viewport.rect().contains(spare.mapTo(viewport,QPoint(spare.width()-1,spare.height()-1)))
         assert entry.name.text()==image.name
         assert app.focusWidget() is focus
         pairs.append((str(image.resolve()),str(audio.resolve())))

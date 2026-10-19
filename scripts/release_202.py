@@ -30,7 +30,7 @@ from transcomic.update.metadata import canonical,release_url,asset_url,UpdateErr
 VERSION='2.0.2'
 KIT=ROOT/'artifacts/release-1.2.0/packaging-followup/ThirdParty'
 OUT=ROOT/'artifacts/release-2.0.2'
-BUILD=OUT/'build'
+BUILD=OUT/'build-final'
 FOLDER=ROOT/'releases'/VERSION
 SCOPE=automatic_scope(VERSION)
 EXTRAS=(f'TransComic-{VERSION}-ThirdParty-Sources.zip','build-manifest.json','ThirdParty-SHA256SUMS.txt')
