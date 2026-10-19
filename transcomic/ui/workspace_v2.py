@@ -14,7 +14,7 @@ from ..languages import language
 
 class WorkspaceV2Mixin:
     def retry_workspace_errors(self):
-        from ..workspace_retry import retry_plan, WorkspaceRetryScheduler
+        from ..workspace_retry import retry_plan, WorkspaceRetryScheduler, fresh_retry_config
         if self.scheduler and self.scheduler._thread and self.scheduler._thread.is_alive(): return
         try: plan = retry_plan(self.store, self.workspace_ids)
         except ValueError as exc:
@@ -38,12 +38,12 @@ class WorkspaceV2Mixin:
             with self.store.transaction():
                 for g in plan:
                     j = g['original']
-                    scope = (j['provider'], j['model'], j['concurrency'], j['config'])
+                    retry_config=fresh_retry_config(self.store,j)
+                    scope = (j['provider'], j['model'], j['concurrency'],json.dumps(retry_config,sort_keys=True))
                     if scope not in runs:
                         import uuid
                         runs[scope] = str(uuid.uuid4())
-                        self.store.db.execute('INSERT INTO translation_runs(id,config) VALUES (?,?)', (runs[scope], j['config']))
-                    retry_config=json.loads(j['config'])
+                        self.store.db.execute('INSERT INTO translation_runs(id,config) VALUES (?,?)', (runs[scope], json.dumps(retry_config)))
                     if j['provider']=='kira':retry_config['kira_multi_key']=True
                     new = self.store.create_job(j['document_id'], j['model'], j['source_lang'], j['target_lang'], j['concurrency'], g['line_ids'], j['timeout'], provider=j['provider'], config=retry_config, allow_shared_document=True, run_id=runs[scope])
                     frozen = self.store.job(new); adapters[new] = self.make_provider(frozen, kira_key)

@@ -49,9 +49,12 @@ PACKAGING_120_GATES=('MUTAGEN_PASS','THIRDPARTY_PASS','PORTABLE_MAU_PASS','BUILD
 PACKAGING_200_GATES=('VERSION_SYNC','SOURCE_PRESERVED','INSTALLER_BUILD','FROZEN_STARTUP',
     'AUTOMATION_RESOURCES','KOKORO_DEPENDENCIES','MAU_EXPORT','SQLITE_120_MIGRATION',
     'BASELINE_UPDATER','DATA_SECURITY','PUBLIC_PRIVACY','INSTALLER_SHA256')
+HTTP504_201_GATES=tuple('SQLITE_200_MIGRATION' if n=='SQLITE_120_MIGRATION' else n for n in PACKAGING_200_GATES)+(
+    'HTTP504_BOUND','MANUAL_DISPATCH','ADAPTIVE_RECOVERY')
 
 
 def release_title(scope):
+    if scope.version=='2.0.1':return 'TransComic v2.0.1 — Sửa lỗi dịch HTTP 504 và khôi phục API'
     if scope.version=='2.0.0':return 'TransComic v2.0.0 — Tự động hóa Dịch → Kokoro → CapCut'
     return 'TransComic '+scope.version
 
@@ -191,6 +194,7 @@ def require_current_tests(scope=FIRST_SCOPE):
         # regression is retained with its minor focus FAIL, never relabeled PASS.
         required=PACKAGING_120_GATES if scope.version=='1.2.0' and proof.get('gate_profile')=='packaging_smoke_120' else GATE_NAMES
         if scope.version=='2.0.0' and proof.get('gate_profile')=='automation_smoke_200':required=PACKAGING_200_GATES
+        if scope.version=='2.0.1' and proof.get('gate_profile')=='http504_hotfix_201':required=HTTP504_201_GATES
         if required is PACKAGING_120_GATES and proof.get('prior_regression_accepted_by_user') is not True:
             raise UpdateError('PACKAGING_120_USER_ACCEPTANCE_REQUIRED')
         if set(proof.get('release_gates',{}))!=set(required) or not all(v is True for v in proof['release_gates'].values()):
@@ -201,10 +205,10 @@ def require_current_tests(scope=FIRST_SCOPE):
 
 
 def inspect_scoped_asset(scope,name,path,base):
-    """Only reviewed 1.2.0/2.0.0 corresponding-source kits may be ZIP assets."""
+    """Only explicitly reviewed corresponding-source kits may be ZIP assets."""
     if Path(path).suffix.lower()!='.zip':return Asset.inspect(name,path,base)
     checked_scope(scope)
-    if scope.version not in ('1.2.0','2.0.0') or name!=f'TransComic-{scope.version}-ThirdParty-Sources.zip':
+    if scope.version not in ('1.2.0','2.0.0','2.0.1') or name!=f'TransComic-{scope.version}-ThirdParty-Sources.zip':
         raise UpdateError('PRIVATE_DATA_NOT_AN_ASSET')
     import zipfile
     from transcomic.update.metadata import MAX_DOWNLOAD

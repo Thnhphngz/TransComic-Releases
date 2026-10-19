@@ -32,6 +32,54 @@ def verify_baseline(window,root):
             'legacy_records_and_ciphertext_unchanged':True,'external_files_unchanged':True,'autostart':False}
 
 
+def verify_gateway_recovery(window,root,wait):
+    """Actual frozen engine and manual button, with synthetic legacy 504 state."""
+    expected_path=root/'baseline-expected.json'
+    if not expected_path.exists():return {'passed':False,'reason':'baseline fixture required'}
+    expected=json.loads(expected_path.read_text(encoding='utf8'));doc=expected.get('failed_document')
+    if not doc:return {'passed':False,'reason':'v2.0.0 failed-line fixture required'}
+    import httpx
+    from PySide6.QtWidgets import QMessageBox,QApplication
+    from .documents import import_txt
+    from .kira_pool import KiraPoolProvider
+    from .translation import Scheduler
+    store=window.store;calls=[];mode={'fail':False};original_provider=window.make_provider;question=QMessageBox.question
+    def handler(request):
+        status=504 if mode['fail'] else 200
+        calls.append({'status':status,'new_key':request.headers.get('authorization')=='Bearer release-synthetic-replacement'})
+        if mode['fail']:return httpx.Response(504)
+        payload=json.loads(json.loads(request.content)['messages'][1]['content'])
+        return httpx.Response(200,json={'choices':[{'message':{'content':json.dumps({'lines':[{'id':r['id'],'text':'The synthetic story continues to the next chapter'} for r in payload['lines']]})},'finish_reason':'stop'}]})
+    def provider(job,key=None):return KiraPoolProvider(store,job['model'],transport=httpx.MockTransport(handler),rpm=100000,tpm=100000000)
+    try:
+        QMessageBox.question=lambda *a,**k:QMessageBox.Yes;window.make_provider=provider
+        window.workspace_ids=[doc];window.open_document(doc)
+        old_jobs={j['id'] for j in store.jobs()};window.retry_all_errors()
+        wait(lambda:window.scheduler is not None and not window.scheduler._thread.is_alive(),15)
+        assert len(calls)==1 and all(r['state']=='done' for r in store.lines(doc))
+        assert any(j['id'] not in old_jobs for j in store.jobs())
+        source=root/'gateway-cycle.txt';source.write_text('Synthetic gateway failure source',encoding='utf8')
+        doc,_=store.import_document(source,import_txt(source),'vi','en')
+        job=store.create_job(doc,'longcat-2.5-preview-free','vi','en',1,config={'kira_multi_key':True,'kira_recovery_version':3,'kira_retry_backoff':0})
+        window.workspace_ids=[doc];window.open_document(doc);mode['fail']=True
+        window.scheduler=Scheduler(store,provider(store.job(job)),window.bridge.changed.emit)
+        window.scheduler.start(job);wait(lambda:not window.scheduler._thread.is_alive(),100)
+        assert len(calls)==6 and store.job(job)['state']=='completed_with_errors'
+        batch=store.batches(job)[0];assert len(store.attempts(batch['id']))==5
+        assert not any(k['status']=='QUOTA_EXHAUSTED' for k in store.kira_keys())
+        for key in store.kira_keys():store.change_kira_key(key['id'],enabled=False)
+        store.add_kira_keys('release-synthetic-replacement');mode['fail']=False
+        window.model.load(doc);window.retry_all_errors()
+        wait(lambda:not window.scheduler._thread.is_alive(),15)
+        assert len(calls)==7 and calls[-1]['new_key'] and all(r['state']=='done' for r in store.lines(doc))
+        assert len(store.attempts(batch['id']))==5
+        QApplication.processEvents()
+        return {'passed':True,'legacy_v200_manual_dispatch':1,'continuous_504_attempts':5,
+                'new_manual_cycle_dispatch':1,'new_key_used':True,'fake_quota':False,
+                'historical_attempts_preserved':True,'real_api_requests':0}
+    finally:window.make_provider=original_provider;QMessageBox.question=question
+
+
 def run_automation(window,root,wait):
     from PySide6.QtWidgets import QApplication,QSystemTrayIcon
     from PySide6.QtGui import QImage,QColor

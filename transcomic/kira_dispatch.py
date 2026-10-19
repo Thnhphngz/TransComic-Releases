@@ -3,7 +3,7 @@
 One event loop creates bounded HTTP tasks, not an OS thread per request. Durable
 attempt UUID + inflight state + source/target revisions are the generation fence.
 Recovery follows the frozen policy, including explicitly authorized uncertain
-resends. No lease expiry, key/model failover or positional matching is used.
+resends. No lease expiry, provider/model failover or positional matching is used.
 """
 import asyncio
 import json
@@ -46,6 +46,7 @@ async def run(scheduler):
     order=deque(j for j,q in queues.items() if q)
     active_sources=[]; inflight={}; tasks=set();unassigned_lease=None
     config=json.loads(next(iter(jobs.values()))['config'])
+    pool.configure_gateway(next(iter(jobs.values()))['concurrency'] if version>=3 or config.get('automation_owner') else min(30,next(iter(jobs.values()))['concurrency'])*max(1,len(pool.keys)))
     interval=max(0,float(config.get('request_interval',0))); next_send=0.0
     s.active_files=0; s.key_metrics={}; s.dispatch_latencies=[]
     wait_used=sum(float(json.loads(job['config']).get('kira_wait_used',0)) for job in store.run_jobs(s.run_id)) if s.run_id else float(config.get('kira_wait_used',0))
@@ -96,7 +97,7 @@ async def run(scheduler):
                     diagnostics=batch.get('diagnostics') or {}
                     if float(diagnostics.get('retry_not_before',0))>time.time():continue
                     preferred=diagnostics.get('retry_key_id')
-                    if preferred in pool.keys and pool._reason(preferred,cap,time.time()):
+                    if version<3 and preferred in pool.keys and pool._reason(preferred,cap,time.time()):
                         # A pinned retry must not leave another eligible key's
                         # batch idle, including retries in the same document.
                         if blocked is None:blocked=(j,batch)
@@ -221,7 +222,7 @@ async def run(scheduler):
                 cap=per_key();pool.refresh()
                 s.key_metrics=pool.snapshot(cap)
                 s.effective_concurrency=s.key_metrics['maximum']
-                s.configured_concurrency=s.key_metrics['theoretical']
+                s.configured_concurrency=pool.gateway_maximum if version>=3 else s.key_metrics['theoretical']
                 s.ready_batches=sum(len(q) for q in queues.values())
                 s.waiting_retries=sum(bool((b.get('diagnostics') or {}).get('auto_retry_scheduled')) for q in queues.values() for b in q)
                 pool.pending_batches=s.ready_batches
@@ -249,9 +250,9 @@ async def run(scheduler):
                 prior=store.attempts(batch['id']);number=len(prior)+1
                 preferred=(prior[-1]['diagnostics'] or {}).get('retry_key_id') if prior else None
                 payload=batch['payload']
-                if preferred:
+                if prior:
                     row=pool.keys.get(preferred)
-                    if not row or not row['enabled'] or row['status'] not in ('READY','COOLDOWN','TEMPORARY_ERROR') or pool.quota_scopes.get(pool.scopes[preferred],False):
+                    if version<3 and (not row or not row['enabled'] or row['status'] not in ('READY','COOLDOWN','TEMPORARY_ERROR') or pool.quota_scopes.get(pool.scopes[preferred],False)):
                         queues[j].remove(batch);reasons[j]='retry_original_key_unavailable';continue
                     if (prior[-1]['diagnostics'] or {}).get('retry_model')!=jobs[j]['model']:
                         queues[j].remove(batch);reasons[j]='retry_model_changed';continue
@@ -266,6 +267,7 @@ async def run(scheduler):
                 refused=budget_reason(store,jobs[j],retry=number>1,cost=cost)
                 if refused:
                     queues[j].remove(batch);reasons[j]=refused;continue
+                if version>=3:preferred=None
                 lease=pool.reserve(cap,cost,preferred_key=preferred)
                 if not lease:
                     keys=[preferred] if preferred else list(pool.keys)

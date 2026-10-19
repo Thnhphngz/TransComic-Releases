@@ -222,6 +222,16 @@ class KiraProvider:
             diagnostics['reasoning_tokens'] = details['reasoning_tokens']
         if not request_id and isinstance(envelope, dict) and isinstance(envelope.get("id"), str):
             diagnostics["provider_request_id"] = envelope["id"][:256].replace(self.api_key, "[redacted]") if self.api_key else envelope["id"][:256]
+        if response.status_code in (408,500,502,503,504):
+            hint=response.headers.get('retry-after')
+            if hint:
+                diagnostics['retry_after']=hint.replace(self.api_key,'[redacted]') if self.api_key else hint
+                try:seconds=float(hint)
+                except ValueError:
+                    from email.utils import parsedate_to_datetime
+                    try:seconds=parsedate_to_datetime(hint).timestamp()-time.time()
+                    except (ValueError,TypeError,OverflowError):seconds=None
+                if isinstance(seconds,(int,float)) and math.isfinite(seconds):diagnostics['retry_after_seconds']=max(0,seconds)
         if response.status_code == 504:
             return result({}, "Kira gateway HTTP 504: request may have consumed tokens; retry is controlled by job policy", True, measured or None, "http_504")
         if response.status_code == 401:

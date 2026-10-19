@@ -941,7 +941,8 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             return
         key = self._key() if provider == 'kira' else None
         if provider == 'kira' and not key: return
-        config = json.loads(original['config']) if original else {}
+        from ..workspace_retry import fresh_retry_config
+        config = fresh_retry_config(self.store,original) if original else {}
         if provider=='kira':config['kira_multi_key']=True
         if provider == 'gemini' and not config:
             QMessageBox.information(self, 'Cấu hình Gemini', 'Bắt đầu một lượt có snapshot key/quota trước khi dịch lại.'); return

@@ -293,6 +293,11 @@ class Store(KiraKeysMixin):
             eligible = [r for r in rows if translatable(r["source"]) and (wanted is None and r["state"] == "pending" and not usable(r) or wanted is not None and r["id"] in wanted)]
             if not eligible:
                 raise ValueError("No lines need translation")
+            if any(r['state']=='processing' for r in eligible):raise ValueError('Selected lines still have an in-flight request')
+            wanted_ids={r['id'] for r in eligible}
+            for active in self.db.execute("SELECT payload FROM batches WHERE state='inflight'"):
+                if any(r['id'] in wanted_ids for r in json.loads(active[0])):
+                    raise ValueError('Selected lines still have an in-flight request')
             if not self.db.execute('SELECT 1 FROM jobs WHERE document_id=?', (doc_id,)).fetchone() and not any(r['translation'] for r in rows):
                 self.db.execute('UPDATE documents SET source_lang=?,target_lang=? WHERE id=?', (source_lang, target_lang, doc_id))
             job_id = str(uuid.uuid4())

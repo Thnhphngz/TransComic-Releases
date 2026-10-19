@@ -22,7 +22,7 @@ def test_recovery_controls_labels_and_saved_model(gui,dark):
         assert window.model_name.findData(model)>=0
     assert window.model_name.findData('longcat-2.5-preview-fre')<0
     controls=window.kira_recovery_controls
-    assert controls['kira_retry_limit'].value()==2
+    assert controls['kira_retry_limit'].value()==4
     controls['kira_retry_limit'].setValue(0)
     controls['kira_request_limit'].setValue(7)
     assert store.setting('kira_retry_limit')=='0' and store.setting('kira_request_limit')=='7'

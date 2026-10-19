@@ -58,14 +58,16 @@ def frozen_policy(store, config):
     # An explicit legacy snapshot retains its original no-retry policy.
     if config.get('kira_recovery_version')==0:
         return dict(config,auto_retries=0,retry_504=False)
+    version=config.get('kira_recovery_version',3)
+    if version not in (1,2,3):raise ValueError('Unsupported Kira recovery policy')
     for name,default,minimum,maximum in (
-        ('kira_retry_limit',2,0,5),('kira_retry_budget',30,0,10000),
+        ('kira_retry_limit',4 if version>=3 else 2,0,5),('kira_retry_budget',30,0,10000),
         ('kira_request_limit',0,0,1000000),('kira_token_limit',0,0,1000000000000),('kira_retry_backoff',1,0,30),
         ('rate_wait_budget',300,0,3600),('rate_cooldown_limit',10,0,100),('rate_backoff_max',30,0,300)):
         value=float(config.get(name,store.setting(name,str(default))))
         if not math.isfinite(value) or not minimum<=value<=maximum:raise ValueError('Invalid Kira recovery limit: '+name)
         config[name]=value if name in ('kira_retry_backoff','rate_wait_budget','rate_backoff_max') else int(value)
-    version=1 if config.get('kira_recovery_version')==1 else 2
+    if version>=3:config['kira_retry_limit']=min(4,config['kira_retry_limit'])
     return dict(config,kira_recovery_version=version,auto_retries=config['kira_retry_limit'],retry_504=False,
                 uncertain_retry_authorized=version>=2)
 

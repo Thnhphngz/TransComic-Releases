@@ -6,6 +6,20 @@ from collections import defaultdict
 from .translation import Scheduler
 
 
+def fresh_retry_config(store, original):
+    """A user-confirmed cycle keeps provider policy, never execution checkpoints."""
+    if original['provider']=='kira':
+        # Resolve current settings and live credentials; do not carry depleted
+        # counters, derived token budgets, main_drained or recovery_phase.
+        return {'kira_multi_key':True,'kira_recovery_version':3}
+    old=json.loads(original.get('config') or '{}')
+    config={k:old[k] for k in ('rpm','tpm','rpd','auto_retries','rate_wait_budget',
+        'rate_cooldown_limit','rate_backoff_max','request_interval','targets','language_order') if k in old}
+    keys=[k for k in store.gemini_keys() if k['status'] not in ('invalid','disabled','authentication','permission','quota_exhausted')]
+    config.update(key_ids=[k['id'] for k in keys],key_projects={k['id']:k['project'] for k in keys})
+    return config
+
+
 def retry_plan(store, document_ids):
     origins = {}
     wanted = {r['id']: r for d in document_ids for r in store.lines(d) if r['state'] in ('error', 'unknown', 'wrong_target_language')}

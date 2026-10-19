@@ -71,13 +71,15 @@ def main():
     def exercise():
         try:
             assert store.path.resolve().is_relative_to(root)
-            from .release_smoke import verify_baseline,run_automation,verify_reopen
+            from .release_smoke import verify_baseline,run_automation,verify_reopen,verify_gateway_recovery
             if os.environ.get('TRANSCOMIC_SMOKE_REOPEN')=='1':
                 verify_reopen(window,root)
                 window.confirm_exit=lambda running:'safe';window.close()
                 QTimer.singleShot(900,app.quit)
                 return
             migration=verify_baseline(window,root)
+            recovery=verify_gateway_recovery(window,root,wait)
+            window.workspace_ids=[]
             from docx import Document
             from .docx_document import render_docx,inspect_docx
             text=root/'fixture.txt';text.write_bytes(b'Alpha one\nAlpha two')
@@ -158,7 +160,7 @@ def main():
                 assert window.navigation_group.checkedId()==page
             automation=run_automation(window,root,wait)
             report={'passed':True,'frozen':bool(getattr(sys,'frozen',False)),'version':VERSION,'platform':app.platformName(),'dpr':window.devicePixelRatioF(),
-                    'tts':tts,'capcut':capcut,'automation':automation,'migration':migration,
+                    'tts':tts,'capcut':capcut,'automation':automation,'migration':migration,'gateway_recovery':recovery,
                     'txt_docx_fixture':True,'docx_export_units':2,'source_files_unchanged':original_hashes=={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in (text,word)},
                     'themes':['light','dark'],'visible_pages':[0,7,8,9,1,2,3],'workspace_preserved':True,'queue_clear':True,'search_replace_undo':True,
                     'manual_popup':True,'auto_no_popup':True,'later_no_download':True,'download_verified':True,'real_http_requests':0,'installer_processes':0,

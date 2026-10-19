@@ -1,4 +1,6 @@
-# TransComic v2.0.0 · Dịch → Kokoro → CapCut
+# TransComic v2.0.1 · Dịch → Kokoro → CapCut
+
+**Hotfix v2.0.1:** Chu kỳ dịch lại mới cho dòng lỗi, retry 504 có giới hạn và điều tiết tải gateway. Xem [release notes](docs/release-notes-2.0.1.md).
 
 **Phát hành tự động V2:** Sửa và lưu source, chạy `release_transcomic.bat`. BAT tự kiểm tra, chọn version carry 0–9, commit cục bộ, test/build/package, publish và xác minh GitHub khi mọi gate PASS. `--check` chỉ đọc; `--build-only` không ghi GitHub. Không gọi API dịch thật. [Hướng dẫn](docs/release-workflow.md) · [Báo cáo triển khai](docs/automatic-release-system-v2.md).
 

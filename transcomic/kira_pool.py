@@ -37,6 +37,8 @@ class KiraPoolProvider(KiraProvider):
         self._reservation_lock=threading.RLock()
         self.health={}
         self.quota_scopes={}
+        self.gateway_limit=None;self.gateway_maximum=0;self.gateway_until=0
+        self.gateway_successes=0;self.gateway_events=[]
         store.recover_kira_transient_statuses(legacy=True)
         self.refresh(force=True)
 
@@ -123,6 +125,7 @@ class KiraPoolProvider(KiraProvider):
         scope = self.scopes[key_id]
         if self.quota_scopes.get(scope):return 'account_quota_exhausted'
         if self.network_paused: return 'network_paused'
+        if self.gateway_limit is not None and sum(self.busy.values())>=self.gateway_limit:return 'gateway_slots_full'
         if now < self.cooldowns.get(scope,0): return 'account_cooldown'
         if row['status'] in ('COOLDOWN','TEMPORARY_ERROR') and not 0 < row['cooldown_until'] <= now: return 'key_cooldown'
         if self.busy[key_id] >= per_key: return 'key_slots_full'
@@ -221,6 +224,7 @@ class KiraPoolProvider(KiraProvider):
         if result is None: return
         d=result.diagnostics or {}; kind=d.get('failure_kind'); state=None; until=0
         scope=self.scopes[key_id];health=self.health[scope];now=time.time()
+        self.gateway_feedback(result,now)
         if kind=='authentication': state='INVALID'
         elif kind=='quota_exhausted':
             state='QUOTA_EXHAUSTED'
@@ -259,7 +263,10 @@ class KiraPoolProvider(KiraProvider):
             if self.cooldowns.get(scope,0)<=now:
                 health['strikes']+=1
                 until=now+min(30,2**min(health['strikes'],5))
+                if d.get('http_status') in (502,503,504):health['limit']=max(1,health['limit']//2)
             else:until=self.cooldowns[scope]
+            hint=d.get('retry_after_seconds')
+            if isinstance(hint,(int,float)) and math.isfinite(hint):until=max(until,now+max(0,hint))
             health.update(last_error=now,successes=0)
             self.cooldowns[scope]=max(self.cooldowns.get(scope,0),until)
         elif kind=='http_error':state='UNKNOWN_ERROR'
@@ -280,6 +287,31 @@ class KiraPoolProvider(KiraProvider):
         self.store.set_setting('kira_health:'+scope,json.dumps(health))
         self.refresh()
 
+    def configure_gateway(self,maximum):
+        self.gateway_maximum=max(1,int(maximum))
+        self.gateway_limit=min(self.gateway_maximum,self.gateway_limit or self.gateway_maximum)
+
+    def gateway_feedback(self,result,now):
+        if self.gateway_limit is None:return
+        d=result.diagnostics or {}
+        before=self.gateway_limit
+        if d.get('http_status') in (502,503,504):
+            self.gateway_successes=0
+            # Already in-flight failures form one cohort, not repeated halvings.
+            if now>=self.gateway_until:self.gateway_limit=max(1,self.gateway_limit//2)
+            hint=d.get('retry_after_seconds')
+            delay=float(hint) if isinstance(hint,(int,float)) and math.isfinite(hint) else 1
+            self.gateway_until=max(self.gateway_until,now+max(.02,delay))
+        elif not result.error and not result.unknown and now>=self.gateway_until:
+            self.gateway_successes+=1
+            if self.gateway_successes>=5:
+                self.gateway_limit=min(self.gateway_maximum,self.gateway_limit+1);self.gateway_successes=0
+        if before!=self.gateway_limit:
+            record={'reason':'gateway_timeout' if d.get('http_status') in (502,503,504) else 'stable_success',
+                    'previous':before,'effective':self.gateway_limit,'maximum':self.gateway_maximum}
+            self.gateway_events.append(record);self.gateway_events=self.gateway_events[-100:]
+            self.store.log.emit('concurrency_changed',provider='kira',**record)
+
     def snapshot(self, per_key):
         with self.monitor.lock:return self._snapshot(per_key)
 
@@ -288,7 +320,8 @@ class KiraPoolProvider(KiraProvider):
         return {'keys':len(available),'enabled':sum(bool(k['enabled']) for k in list(self.keys.values())),
                 'queued_batches':self.pending_batches or 0,
                 'next_send_at':max((h['next_send'] for h in self.health.values()),default=0),
-                'busy':sum(self.busy.values()),'maximum':capacity,
+                'busy':sum(self.busy.values()),'maximum':min(capacity,self.gateway_limit) if self.gateway_limit is not None else capacity,
+                'gateway_limit':self.gateway_limit,'gateway_maximum':self.gateway_maximum,
                 'theoretical':len(available)*per_key,'account_limit':self.account_limit,
                 'accounts':len({self.scopes[k] for k in available}),
                 'per_key':{k:{**s,'wait_reasons':dict(s['wait_reasons']),

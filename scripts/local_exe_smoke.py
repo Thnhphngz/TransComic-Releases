@@ -15,12 +15,26 @@ sys.path.insert(0,str(ROOT))
 from transcomic.release_adapters import safe_path
 
 
+def native_monitor_scale():
+    """Read primary monitor scale; do not change Windows DPI settings."""
+    import ctypes
+    from ctypes import wintypes
+    user=ctypes.windll.user32;shcore=ctypes.windll.shcore
+    user.MonitorFromWindow.argtypes=[wintypes.HWND,wintypes.DWORD]
+    user.MonitorFromWindow.restype=wintypes.HANDLE
+    shcore.GetScaleFactorForMonitor.argtypes=[wintypes.HANDLE,ctypes.POINTER(ctypes.c_int)]
+    factor=ctypes.c_int();monitor=user.MonitorFromWindow(None,1)
+    if shcore.GetScaleFactorForMonitor(monitor,ctypes.byref(factor)) or factor.value<=0:raise ValueError('Cannot read native monitor DPI')
+    return factor.value/100
+
+
 def main(argv=None):
     parser=argparse.ArgumentParser();parser.add_argument('--exe',required=True,type=Path)
     parser.add_argument('--scale',default='1');parser.add_argument('--source',action='store_true')
     parser.add_argument('--output',type=Path,help='Evidence directory; preserve previous build smoke by selecting a new directory')
     parser.add_argument('--cpu-cache',type=Path,help='Existing isolated CPU acceptance cache, never a production profile')
     parser.add_argument('--baseline',type=Path,help='Actual v1.2.0 app EXE, read only to seed synthetic legacy data')
+    parser.add_argument('--baseline-version',default='1.2.0',choices=('1.2.0','2.0.0'))
     args=parser.parse_args(argv)
     exe=safe_path(args.exe,ROOT)
     if exe.name!='TransComic.exe' and not (args.source and exe.name=='run_transcomic.py'):raise ValueError('Only app EXE/source smoke, never installer/helper')
@@ -28,9 +42,10 @@ def main(argv=None):
     with TemporaryDirectory(prefix='TransComic-build-smoke-') as directory:
         root=Path(directory);(root/'isolated-smoke.json').write_text(json.dumps({'mode':'isolated-build-smoke'}),encoding='utf8')
         env=dict(os.environ,LOCALAPPDATA=directory,QT_SCALE_FACTOR=args.scale,QT_QPA_PLATFORM='windows',TEMP=str(root.parent),TMP=str(root.parent))
-        env.update(QT_OPENGL='software',QT_QUICK_BACKEND='software',QT_SCALE_FACTOR='1',QT_SCREEN_SCALE_FACTORS=args.scale)
+        env.update(QT_OPENGL='software',QT_QUICK_BACKEND='software',QT_SCALE_FACTOR=str(float(args.scale)/native_monitor_scale()))
+        env.pop('QT_SCREEN_SCALE_FACTORS',None)
         if args.baseline:
-            subprocess.run([sys.executable,str(ROOT/'scripts/release_baseline_data.py'),'--baseline',str(args.baseline.resolve()),'--root',directory],env=env,cwd=root,check=True,timeout=30)
+            subprocess.run([sys.executable,str(ROOT/'scripts/release_baseline_data.py'),'--baseline',str(args.baseline.resolve()),'--current',args.baseline_version,'--root',directory],env=env,cwd=root,check=True,timeout=30)
         if args.cpu_cache:env['TRANSCOMIC_SMOKE_CPU_CACHE']=str(args.cpu_cache.resolve())
         argv=[sys.executable,str(exe),'--local-build-smoke'] if args.source else [str(exe),'--local-build-smoke']
         with (out/'process.log').open('wb') as log:

@@ -28,7 +28,7 @@ class KiraApiMixin:
             form.addRow(title,box);self.kira_limits[key]=box
         layout.addLayout(form)
         recovery=QFormLayout();self.kira_recovery_controls={}
-        for key,title,default,maximum in [('kira_retry_limit','Kira: thử lại an toàn mỗi batch (0 = tắt)',2,5),
+        for key,title,default,maximum in [('kira_retry_limit','Kira: thử lại mỗi batch, gồm rescue cuối (0 = tắt)',4,4),
             ('kira_retry_budget','Kira: tổng request thử lại mỗi lượt',30,10000),
             ('kira_request_limit','Kira: trần tổng request/lượt (0 = tự tính hữu hạn)',0,1000000),
             ('kira_token_limit','Kira: trần token dự phòng/lượt (0 = tự tính hữu hạn)',0,1000000000)]:
@@ -36,7 +36,7 @@ class KiraApiMixin:
             box.valueChanged.connect(lambda value,k=key:self.store.set_setting(k,str(value)))
             recovery.addRow(title,box);self.kira_recovery_controls[key]=box
         layout.addLayout(recovery)
-        policy=QLabel('Lượt mới giữ key/model và ngân sách cố định. Tự phục hồi 429, JSON, timeout/504/5xx trong giới hạn; timeout/504 tối đa hai lần gửi lại mỗi batch trong toàn job, có rủi ro token trùng. Tự rà soát tối đa hai lượt cuối. Không đổi sang model trả phí. Thời gian chờ tối đa nằm trong Cài đặt. Tiếp tục lượt cũ áp dụng quyền phục hồi mới nhưng giữ nguyên trần và bộ đếm đã lưu; lượt đã tắt retry vẫn giữ nguyên.')
+        policy=QLabel('Lượt mới giữ provider/model và ngân sách cố định; có thể dùng key Kira khác còn hợp lệ. Mỗi batch tối đa request đầu + 3 retry + 1 rescue cuối, có backoff; timeout/504 có thể đã tốn token. Dịch lại chủ động tạo chu kỳ mới và đọc pool key hiện tại. Tiếp tục job cũ giữ trần/bộ đếm đã lưu; lượt đã tắt retry vẫn giữ nguyên. Giảm tải hiệu dụng khi gateway lỗi, không sửa số luồng đã lưu.')
         policy.setWordWrap(True);layout.addWidget(policy)
         self.kira_metrics=QLabel();self.kira_metrics.setWordWrap(True);layout.addWidget(self.kira_metrics)
         self.refresh_kira_keys()

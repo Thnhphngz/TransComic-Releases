@@ -1,4 +1,4 @@
-"""Main translation then at most two durable, global error review passes."""
+"""Main translation then bounded, durable review passes from the frozen policy."""
 import asyncio
 from datetime import datetime,timezone
 import json
@@ -58,7 +58,7 @@ def run(s):
     for jid in s.job_ids:groups.setdefault(language(store.job(jid)['target_lang']).locale,[]).append(jid)
     order=list(dict.fromkeys((frozen.get('language_order') or [])+list(groups)))
     start_phase=int(frozen.get('kira_recovery_phase',0)) if frozen.get('kira_main_drained') else 0
-    for phase in range(start_phase,3):
+    for phase in range(start_phase,5 if frozen.get('kira_recovery_version',0)>=3 else 3):
         if phase and not list(_remaining(store,s.job_ids)):break
         if s._stopped.is_set():break
         s.recovery_phase=phase;s.provider.monitor.recovery_phase=phase
