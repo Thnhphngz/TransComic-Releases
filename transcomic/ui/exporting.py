@@ -2,6 +2,23 @@
 from pathlib import Path
 from PySide6.QtWidgets import QInputDialog, QFileDialog, QMessageBox
 from ..bulk import plan_exports, workspace_status
+from .controls import install_combo_popup
+from PySide6.QtWidgets import QComboBox as NativeComboBox
+
+
+class ExportInputDialog(QInputDialog):
+    """Qt creates a native combo internally; give it our explicit text painter."""
+    @staticmethod
+    def getItem(parent, title, label, items, current=0, editable=False):
+        dialog=ExportInputDialog(parent)
+        dialog.setWindowTitle(title);dialog.setLabelText(label)
+        dialog.setComboBoxItems(items);dialog.setComboBoxEditable(editable)
+        dialog.setTextValue(items[current] if items else '')
+        combo=dialog.findChild(NativeComboBox)
+        if combo is not None:install_combo_popup(combo)
+        accepted=bool(dialog.exec())
+        value=dialog.textValue();dialog.deleteLater()
+        return value,accepted
 
 MODES = [('Xuất trực tiếp cạnh file nguồn', 'direct'),
          ('Xuất vào TransComic/<Ngôn ngữ> cạnh nguồn', 'transcomic'),
@@ -12,7 +29,7 @@ def choose_export_plan(owner, ids):
     store = owner.store
     previous = store.setting('export_mode', 'transcomic')
     index = next((i for i, (_, mode) in enumerate(MODES) if mode == previous), 1)
-    choice, ok = QInputDialog.getItem(owner, 'Phương thức xuất', 'Chọn vị trí xuất:', [label for label, _ in MODES], index, False)
+    choice, ok = ExportInputDialog.getItem(owner, 'Phương thức xuất', 'Chọn vị trí xuất:', [label for label, _ in MODES], index, False)
     if not ok: return None
     mode = dict(MODES)[choice]; root = None
     snapshot = store.export_snapshot(ids)
@@ -42,7 +59,7 @@ def choose_export_plan(owner, ids):
     if QMessageBox.question(owner, 'Xác nhận đường dẫn xuất', paths, QMessageBox.Yes|QMessageBox.No, QMessageBox.No) != QMessageBox.Yes: return None
     policy = 'cancel'
     if any(p['target'].exists() for p in plan):
-        selected, ok = QInputDialog.getItem(owner, 'File đích đã tồn tại', 'Áp dụng cho các file đích trùng:', ['Lưu phiên bản mới', 'Ghi đè', 'Hủy'], 0, False)
+        selected, ok = ExportInputDialog.getItem(owner, 'File đích đã tồn tại', 'Áp dụng cho các file đích trùng:', ['Lưu phiên bản mới', 'Ghi đè', 'Hủy'], 0, False)
         if not ok or selected == 'Hủy': return None
         policy = 'version' if selected == 'Lưu phiên bản mới' else 'overwrite'
     store.set_setting('export_mode', mode)

@@ -1,12 +1,40 @@
 """Manual batch folder pairing. Cancel never writes persisted workspace."""
 from pathlib import Path
 import os
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt,QTimer
 from PySide6.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QFormLayout,QLabel,
     QLineEdit,QScrollArea,QWidget,QFrame,QFileDialog,QDialogButtonBox,QMessageBox)
 from .controls import QComboBox
 from .glass import GlassButton
 from ..capcut.media import MediaGroup
+from .theme import colors
+
+
+class FolderDropEdit(QLineEdit):
+    """Accept exactly one Explorer folder without inspecting its contents."""
+    @staticmethod
+    def folder(mime):
+        if not mime.hasUrls() or len(mime.urls())!=1:return None
+        url=mime.urls()[0]
+        if not url.isLocalFile():return None
+        try:
+            path=Path(url.toLocalFile()).resolve()
+            return str(path) if path.is_dir() else None
+        except (OSError,ValueError):return None
+    def highlight(self,on):
+        self.setProperty('folderDrop',on)
+        self.setStyleSheet(f'QLineEdit[folderDrop="true"] {{ border:1px solid {colors(self)["accent"]}; }}')
+    def dragEnterEvent(self,event):
+        accepted=self.folder(event.mimeData()) is not None
+        self.highlight(accepted)
+        if accepted:event.acceptProposedAction()
+        else:event.ignore()
+    def dragMoveEvent(self,event):self.dragEnterEvent(event)
+    def dragLeaveEvent(self,event):self.highlight(False);event.accept()
+    def dropEvent(self,event):
+        folder=self.folder(event.mimeData());self.highlight(False)
+        if folder is None:event.ignore();return
+        self.setText(folder);event.acceptProposedAction()
 
 
 class PairEntry(QFrame):
@@ -15,7 +43,9 @@ class PairEntry(QFrame):
         form=QFormLayout(self);form.setContentsMargins(10,8,10,8)
         self.heading=QLabel();form.addRow(self.heading)
         self.name=QLineEdit(group.name if group else '');form.addRow('Tên nhóm',self.name)
-        self.image=QLineEdit(group.image_dir if group else '');self.audio=QLineEdit(group.audio_dir if group else '')
+        self.image=FolderDropEdit(group.image_dir if group else '');self.audio=FolderDropEdit(group.audio_dir if group else '')
+        self.image.setToolTip('Kéo đúng một thư mục ảnh vào đây hoặc bấm Chọn…')
+        self.audio.setToolTip('Kéo đúng một thư mục audio vào đây hoặc bấm Chọn…')
         for label,field in [('Thư mục ảnh',self.image),('Thư mục audio',self.audio)]:
             row=QHBoxLayout();row.addWidget(field,1);button=GlassButton('Chọn…');row.addWidget(button)
             button.clicked.connect(lambda _=False,f=field:self.browse(f));form.addRow(label,row)
@@ -23,6 +53,17 @@ class PairEntry(QFrame):
         self.sort.setCurrentIndex(1 if group and group.image_sort=='created' else 0)
         row=QHBoxLayout();row.addWidget(self.sort,1);self.remove=GlassButton('Xóa cặp');self.remove.clicked.connect(lambda:dialog.remove_entry(self));row.addWidget(self.remove)
         form.addRow('Sắp xếp ảnh',row)
+        self.image.textChanged.connect(self.image_changed)
+        for field in (self.image,self.audio,self.name):field.textChanged.connect(dialog.schedule_spare)
+
+    def image_changed(self,text):
+        if text.strip() and not self.name.text().strip():self.name.setText(Path(text.strip()).name)
+
+    def blank(self):return not any(field.text().strip() for field in (self.image,self.audio,self.name))
+
+    def complete(self):
+        try:return all(field.text().strip() and Path(field.text().strip()).is_dir() for field in (self.image,self.audio))
+        except (OSError,ValueError):return False
 
     def browse(self,field):
         start=field.text().strip() or self.image.text().strip()
@@ -42,7 +83,7 @@ class PairEntry(QFrame):
 
 class MultiGroupDialog(QDialog):
     def __init__(self,parent,existing=(),group=None):
-        super().__init__(parent);self.existing=tuple(existing);self.entries=[];self.result_groups=()
+        super().__init__(parent);self.existing=tuple(existing);self.entries=[];self.result_groups=();self.editing=group is not None;self.spare_scheduled=False
         self.setWindowTitle('Sửa cặp thư mục' if group else 'Thêm các cặp thư mục ảnh và audio')
         screen=self.screen().availableGeometry();self.resize(min(760,screen.width()-40),min(640,screen.height()-60));self.setMinimumSize(460,300)
         layout=QVBoxLayout(self)
@@ -58,15 +99,36 @@ class MultiGroupDialog(QDialog):
         self.add_entry(group)
 
     def add_entry(self,group=None):
+        if group is None and self.entries and self.entries[-1].blank():return self.entries[-1]
         entry=PairEntry(self,group);self.entries.append(entry);self.rows.insertWidget(self.rows.count()-1,entry);self.renumber();return entry
     def remove_entry(self,entry):
         self.entries.remove(entry);self.rows.removeWidget(entry);entry.deleteLater();self.renumber()
+        self.schedule_spare()
+    def schedule_spare(self,*args):
+        if self.editing or self.spare_scheduled:return
+        self.spare_scheduled=True;QTimer.singleShot(0,self,self.ensure_spare)
+    def ensure_spare(self):
+        self.spare_scheduled=False
+        if self.editing:return
+        # Empty rows in the middle carry no input. Partial/name-only rows stay
+        # visible and must pass validation; only the trailing spare is ignored.
+        for entry in list(self.entries[:-1]):
+            if entry.blank():
+                self.entries.remove(entry);self.rows.removeWidget(entry);entry.deleteLater()
+        added=None
+        if not self.entries or self.entries[-1].complete():added=self.add_entry()
+        self.renumber()
+        if added:QTimer.singleShot(0,self,lambda:self.scroll_to_spare(added))
+    def scroll_to_spare(self,entry):
+        if entry in self.entries:self.scroll.ensureWidgetVisible(entry,0,8)
     def renumber(self):
         for i,entry in enumerate(self.entries):entry.heading.setText(f'Cặp {i+1:02}')
     def values(self):
-        if not self.entries:raise ValueError('Thêm ít nhất một cặp; không tạo nhóm rỗng')
+        if not self.editing:self.ensure_spare()
+        entries=self.entries[:-1] if not self.editing and self.entries and self.entries[-1].blank() else self.entries
+        if not entries:raise ValueError('Thêm ít nhất một cặp; không tạo nhóm rỗng')
         values=[]
-        for i,entry in enumerate(self.entries):
+        for i,entry in enumerate(entries):
             try:values.append(entry.value())
             except ValueError as exc:raise ValueError(f'Cặp {i+1}: {exc}') from exc
         return tuple(values)

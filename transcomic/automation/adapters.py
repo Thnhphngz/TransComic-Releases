@@ -44,7 +44,7 @@ class Translation:
         with self.dispatch_lock:
             self.stopping=True
             if self.scheduler:self.scheduler.stop()
-    def run(self,id,groups,config,stop,changed):
+    def run(self,id,groups,config,stop,changed,*,line_ids=None,scope=None,exclude_ids=()):
         cycle=self.repo.workset(id)['cycle'];boundaries={};line_groups={}
         for group in groups:
             from ..documents import translatable
@@ -66,35 +66,41 @@ class Translation:
         for phase in range(5):
             if stop.is_set():return
             jobs=[]
-            for group in groups:
-                selected=[];mapping=self.repo.field(group['id'],'batch_jobs',{})
-                for index,chunk in enumerate(boundaries[group['id']]):
-                    wanted=[r['id'] for old in chunk if not usable(r:=self.store.line(old['id'])) and r['attempt_kind']!='manual']
-                    if not wanted:continue
-                    key=f'{cycle}:{index}';prior=mapping.get(key,[])
-                    attempts=[a for batch_id in self.repo.batch_ids(prior) for a in self.store.attempts(batch_id)]
-                    if len(attempts)>=5:continue
-                    if attempts and not retryable(attempts[-1].get('diagnostics') or {}):continue
-                    selected.append((key,wanted,prior,index))
-                if not selected:continue
-                cfg={'automation_owner':id,'automation_cycle':cycle,'automation_boundaries':[ids for key,ids,prior,index in selected],
-                     'auto_retries':0,'kira_multi_key':config['provider']=='kira','kira_retry_limit':0,'kira_retry_budget':0,'kira_recovery_version':2,'uncertain_retry_authorized':True}
-                if config['provider']=='gemini':
-                    keys=[k for k in self.store.gemini_keys() if k['status'] not in ('invalid','disabled','exhausted','authentication','permission','quota_exhausted','model_not_found')]
-                    cfg.update(key_ids=[k['id'] for k in keys],key_projects={k['id']:k['project'] for k in keys},
-                               **{k:int(self.store.setting('gemini_'+k,str(v))) for k,v in (('rpm',1),('tpm',3000),('rpd',1))})
-                with self.store.transaction():
-                    job=self.store.create_job(group['document_id'],config['model'],config['source_lang'],config['target_lang'],config['workers'],
-                        [i for key,ids,prior,index in selected for i in ids],provider=config['provider'],config=cfg,max_requests=len(selected),retry_504=True,allow_shared_document=True)
-                    frozen=json.loads(self.store.job(job)['config']);frozen.update(auto_retries=0)
-                    self.store.db.execute('UPDATE jobs SET auto_retries=0,config=? WHERE id=?',(json.dumps(frozen),job))
-                    by_ids={tuple(p['id'] for p in b['payload']):b['id'] for b in self.store.batches(job)}
-                    mapping=dict(mapping)
-                    for key,ids,prior,index in selected:mapping[key]=[*prior,by_ids[tuple(ids)]]
-                    self.repo.update_group(group['id'],batch_jobs=mapping,state='translating')
-                jobs.append(job)
-                for key,ids,prior,index in selected:self.repo.event(id,group['id'],'translation',f'Batch {index+1}: '+('cứu lỗi cuối' if phase==4 else f'lượt {phase+1}/5'))
-            if not jobs:return
+            with self.dispatch_lock:
+                reserved=set(exclude_ids)
+                if scope is None:
+                    reserved.update(i for q in self.repo.workset(id)['checkpoint'].get('translation_retries',[])
+                                    if q['state'] in ('pending','running') for i in q['line_ids'])
+                for group in groups:
+                    selected=[];mapping=self.repo.field(group['id'],'batch_jobs',{})
+                    for index,chunk in enumerate(boundaries[group['id']]):
+                        wanted=[r['id'] for old in chunk if not usable(r:=self.store.line(old['id'])) and
+                                r['id'] not in reserved and (line_ids is None and r['attempt_kind']!='manual' or line_ids is not None and r['id'] in line_ids)]
+                        if not wanted:continue
+                        key=f'{scope or cycle}:{index}';prior=mapping.get(key,[])
+                        attempts=[a for batch_id in self.repo.batch_ids(prior) for a in self.store.attempts(batch_id)]
+                        if len(attempts)>=5:continue
+                        if attempts and not retryable(attempts[-1].get('diagnostics') or {}):continue
+                        selected.append((key,wanted,prior,index))
+                    if not selected:continue
+                    cfg={'automation_owner':id,'automation_cycle':cycle,'automation_boundaries':[ids for key,ids,prior,index in selected],
+                         'auto_retries':0,'kira_multi_key':config['provider']=='kira','kira_retry_limit':0,'kira_retry_budget':0,'kira_recovery_version':2,'uncertain_retry_authorized':True}
+                    if config['provider']=='gemini':
+                        keys=[k for k in self.store.gemini_keys() if k['status'] not in ('invalid','disabled','exhausted','authentication','permission','quota_exhausted','model_not_found')]
+                        cfg.update(key_ids=[k['id'] for k in keys],key_projects={k['id']:k['project'] for k in keys},
+                                   **{k:int(self.store.setting('gemini_'+k,str(v))) for k,v in (('rpm',1),('tpm',3000),('rpd',1))})
+                    with self.store.transaction():
+                        job=self.store.create_job(group['document_id'],config['model'],config['source_lang'],config['target_lang'],config['workers'],
+                            [i for key,ids,prior,index in selected for i in ids],provider=config['provider'],config=cfg,max_requests=len(selected),retry_504=True,allow_shared_document=True)
+                        frozen=json.loads(self.store.job(job)['config']);frozen.update(auto_retries=0)
+                        self.store.db.execute('UPDATE jobs SET auto_retries=0,config=? WHERE id=?',(json.dumps(frozen),job))
+                        by_ids={tuple(p['id'] for p in b['payload']):b['id'] for b in self.store.batches(job)}
+                        mapping=dict(mapping)
+                        for key,ids,prior,index in selected:mapping[key]=[*prior,by_ids[tuple(ids)]]
+                        self.repo.update_group(group['id'],batch_jobs=mapping,state='translating')
+                    jobs.append(job)
+                    for key,ids,prior,index in selected:self.repo.event(id,group['id'],'translation',f'Batch {index+1}: '+('cứu lỗi cuối' if phase==4 else f'lượt {phase+1}/5'))
+                if not jobs:return
             provider=self.provider_factory(self.store,self.store.job(jobs[0]))
             with self.dispatch_lock:
                 if stop.is_set() or self.stopping:
@@ -116,7 +122,7 @@ class Translation:
                 self.repo.event(id,None,'translation','Mất mạng; chờ kết nối. Kiểm tra mạng không gửi API và không tiêu thụ lượt thử.')
                 while not stop.is_set() and not self.network_probe(config['provider']):stop.wait(3)
             if phase<4 and not stop.is_set():
-                delay=max([self.backoff(phase),*[float(d.get('retry_after_seconds') or 0) for d in diagnostics if d.get('http_status')==429]])
+                delay=max([self.backoff(phase),*[float(d.get('retry_after_seconds') or 0) for d in diagnostics if d.get('http_status') in (408,429,500,502,503,504)]])
                 if delay>300:
                     self.repo.event(id,None,'translation','Retry-After vượt thời gian chờ; giữ checkpoint, không gửi sớm.');return
                 stop.wait(delay)

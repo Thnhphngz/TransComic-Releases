@@ -884,6 +884,16 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
     def retry_all_errors(self):
         self.retry_selected(all_errors=True)
 
+    def route_automation_retry(self, ids):
+        if not self.automation_repo.active():return False
+        try:
+            count=self.automation_controller.enqueue_retry(ids)
+            self.notice.setText(f'Đã đưa {count} dòng lỗi vào hàng đợi dịch của Tự động hóa.' if count else 'Các dòng đã nằm trong hàng đợi hoặc đang được dịch; không gửi trùng.')
+            self.refresh()
+        except ValueError as exc:
+            QMessageBox.information(self,'Không thể dịch lại',str(exc))
+        return True
+
     def retry_selected(self, _checked=False, *, all_errors=False):
         if getattr(self,'queue_clear_busy',False):return
         if not self.doc_id:
@@ -896,6 +906,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         if not ids:
             QMessageBox.information(self, "Chọn dòng", "Chọn checkbox dòng có văn bản, đang hiển thị và không xử lý để dịch lại.")
             return
+        if self.route_automation_retry(ids):return
         origins = {}
         for j in self.store.jobs():
             if j["document_id"] == self.doc_id:

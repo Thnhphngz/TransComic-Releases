@@ -169,7 +169,11 @@ def verify_reopen(window,root):
     assert repo.workset(expected['completed_id'])['checkpoint']==expected['completed_checkpoint']
     assert repo.workset(expected['trial_id'])['state']=='interrupted'
     assert repo.workset(expected['trial_id'])['checkpoint']==expected['trial_checkpoint']
-    assert repo.group(expected['trial_group_id'])['data']==expected['trial_data']
+    actual=repo.group(expected['trial_group_id'])['data'];saved=dict(expected['trial_data'])
+    # Opening now reconciles the derived label, not the durable checkpoint,
+    # source mapping or artifact metadata. This trial has untranslated rows.
+    assert actual['state']=='waiting'
+    saved['state']='waiting';assert actual==saved
     assert rows(window.store.db,'request_attempts')==expected['attempts']
     assert all(digest(root/name)==value for name,value in expected['files'].items())
     proof={'passed':True,'frozen':bool(getattr(__import__('sys'),'frozen',False)),

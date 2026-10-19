@@ -9,6 +9,8 @@ from .repository import file_hash,fingerprint
 from .validation import validate,read_source,speakable
 from ..status import usable
 from ..documents import translatable
+from .retranslation import Retranslation
+from .reconciliation import Reconciliation
 
 
 class StagePool(ThreadPoolExecutor):
@@ -20,7 +22,7 @@ class StagePool(ThreadPoolExecutor):
         return super().__exit__(kind,value,trace)
 
 
-class Controller:
+class Controller(Retranslation,Reconciliation):
     def __init__(self,repo,services,changed=lambda:None,finished=lambda *args:None,resource_check=lambda:None,editor_check=lambda:None):
         self.repo=repo;self.services=services;self.changed=changed;self.finished=finished
         self.resource_check=resource_check;self.editor_check=editor_check;self.thread=None;self.stop_event=threading.Event();self.lock=threading.RLock();self.current=None
@@ -32,6 +34,7 @@ class Controller:
             self.repo.state(id,self.pending_terminal);self.pending_terminal=None
         self.repo.editable(id);self.reconcile_sources(id)
         proof=validate(self.repo,id,self.services,reuse_inputs=reuse_inputs,force_config=force_config)
+        self.reconcile_stages(id)
         proof['pending']=self.has_pending(id,proof) if proof['passed'] and self.repo.workset(id)['state']=='completed' else True
         self.checkpoint(id,validation=dict(passed=proof['passed'],errors=proof['errors'],config_fingerprint=proof['config_fingerprint'],pending=proof['pending']),validation_sections=proof['sections'])
         return proof
@@ -39,6 +42,8 @@ class Controller:
         with self.lock:
             if self.busy or self.repo.active():raise ValueError('Chỉ một bộ Automation được chạy.')
             work=self.repo.workset(id);proof=work['checkpoint'].get('validation',{})
+            from .validation import project_name_error
+            if error:=project_name_error(work['config']):raise ValueError(error)
             if proof.get('config_fingerprint')!=fingerprint(work['config']) or proof.get('errors') or not work['started'] and not proof.get('passed'):
                 raise ValueError('Kiểm tra trước khi bắt đầu chưa PASS hoặc cấu hình đã thay đổi.')
             if work['state']=='completed' and proof.get('pending') is False:raise ValueError('Đã hoàn thành, không có công việc cần cập nhật.')
@@ -49,7 +54,7 @@ class Controller:
             if not work['started']:selected=None
             self.editor_check();self.resource_check()
             with self.repo.store.transaction():self.repo.activate(id);self.checkpoint(id,tts_config_fingerprint=tts_fp)
-            self.current=id;self.stop_event.clear();self.internal_abort=False
+            self.current=id;self.stop_event.clear();self.internal_abort=False;self.closing_translation=False
             if hasattr(self.services.translation,'reset'):self.services.translation.reset()
             self.changed()
             self.thread=threading.Thread(target=self._run,args=(id,selected),daemon=True,name='TransComic-Automation')
@@ -110,8 +115,7 @@ class Controller:
             # Keep failed groups in part definitions so merged export cannot omit them.
             parts=[dict(p,id=fingerprint(p['group_ids']),state='waiting') for p in proof['parts']]
             self.checkpoint(id,started=time.time(),ended=None,parts=parts)
-            for group in groups:
-                self.repo.update_group(group['id'],state='waiting' if group['valid'] else 'needs_attention')
+            audio_ready,_=self.reconcile_stages(id)
             for group in proof['groups']:
                 if not group['valid']:self.repo.update_group(group['id'],state='needs_attention')
             self.repo.store.set_setting('automation_last_config',json.dumps(cfg))
@@ -122,14 +126,41 @@ class Controller:
                 for group in groups:
                     if all(usable(r) for r in self.repo.store.lines(group['document_id']) if translatable(r['source'])):
                         self.repo.update_group(group['id'],translation_ready_cycle=cycle,translation_ready_at=time.monotonic_ns())
-                translation=pool.submit(self.services.translation.run,id,groups,cfg,self.stop_event,self.changed)
+                translation=pool.submit(self.normal_translation,id,groups,cfg)
                 while True:
+                    pending_groups=self.pending_retry_groups(id)
+                    # A request waits for the current translation scheduler and any
+                    # dependent stage using its old snapshot. No second lane starts.
+                    if translation.done() and not self.stop_event.is_set():
+                        translation.result()
+                        for request in self.retry_requests(id):
+                            if request['state'] not in ('pending','running'):continue
+                            requested_docs={self.repo.store.line(i)['document_id'] for i in request['line_ids']}
+                            targets=[g for g in proof['groups'] if g['valid'] and g['document_id'] in requested_docs]
+                            for target in targets:eligible[target['id']]=target
+                            target_ids={g['id'] for g in targets}
+                            if not targets:continue
+                            if tts_future and tts_group['id'] in target_ids or cap_future and target_ids.intersection(cap_part['group_ids']):continue
+                            for gid in target_ids:
+                                queued.discard(gid);tts_done.discard(gid);tts_failed.discard(gid);audio_ready.discard(gid)
+                                self.repo.update_group(gid,translation_ready_cycle=None,error='')
+                            ready[:]=[g for g in ready if g not in target_ids]
+                            rescue_queue[:]=[g for g in rescue_queue if g not in target_ids]
+                            for part in parts:
+                                if target_ids.intersection(part['group_ids']):exported.discard(part['id']);part.update(state='waiting')
+                            translation=pool.submit(self.run_retry,id,request,targets,cfg);break
                     completed=self.repo.rows("SELECT id FROM automation_groups WHERE workset_id=? AND json_extract(data,'$.translation_ready_cycle')=? ORDER BY json_extract(data,'$.translation_ready_at')",(id,cycle))
                     for entry in completed:
                         gid=entry['id']
+                        if gid in pending_groups:continue
                         if gid not in eligible:continue
                         if gid in queued:continue
-                        queued.add(gid);ready.append(gid);self.repo.update_group(gid,state='waiting_tts');self.repo.event(id,gid,'translation','Dịch hợp lệ; đã xếp hàng Kokoro.')
+                        queued.add(gid)
+                        if gid in audio_ready:
+                            self.export_translation(id,eligible[gid],cfg)
+                            tts_done.add(gid);self.repo.update_group(gid,state='waiting_capcut')
+                        else:
+                            ready.append(gid);self.repo.update_group(gid,state='waiting_tts');self.repo.event(id,gid,'translation','Dịch hợp lệ; đã xếp hàng Kokoro.')
                     if tts_future and tts_future.done():
                         try:
                             folder=tts_future.result();tts_done.add(tts_group['id']);self.repo.update_group(tts_group['id'],state='waiting_capcut',audio_folder=folder)
@@ -153,8 +184,9 @@ class Controller:
                             for gid in cap_part['group_ids']:self.fail(id,gid,'capcut',exc)
                         cap_future=None;self.checkpoint(id,parts=parts)
                     if not self.stop_event.is_set():
-                        if ready and not tts_future and not tts_blocked:
-                            gid=ready.pop(0);tts_group=self.repo.group(gid);rescuing=False
+                        next_ready=next((gid for gid in ready if gid not in pending_groups),None)
+                        if next_ready and not tts_future and not tts_blocked:
+                            gid=next_ready;ready.remove(gid);tts_group=self.repo.group(gid);rescuing=False
                             try:self.export_translation(id,tts_group,cfg)
                             except Exception as exc:
                                 tts_failed.add(gid);self.fail(id,gid,'translation_export',exc);errors.append(type(exc).__name__)
@@ -166,12 +198,16 @@ class Controller:
                         if not cap_future:
                             for part in parts:
                                 if part['id'] in exported or not set(part['group_ids'])<=tts_done:continue
+                                if pending_groups.intersection(part['group_ids']):continue
                                 cap_part=part;part['state']='exporting';self.checkpoint(id,parts=parts)
+                                for gid in part['group_ids']:self.repo.update_group(gid,state='exporting')
                                 payload=dict(part,groups=[self.repo.group(gid) for gid in part['group_ids']])
                                 cap_future=pool.submit(self.services.capcut.run,id,payload,cfg,self.stop_event,self.changed);break
                     self.changed()
                     if translation.done() and not tts_future and not cap_future:
-                        if self.stop_event.is_set() or not ready and not rescue_queue or tts_blocked:break
+                        with self.lock:
+                            if self.stop_event.is_set() or (not ready and not rescue_queue or tts_blocked) and not self.pending_retry_groups(id):
+                                self.closing_translation=True;break
                     time.sleep(.05)
                 translation.result()
             for group in self.repo.groups(id):
@@ -184,6 +220,10 @@ class Controller:
             try:self.fail(id,None,'pipeline',exc);self.checkpoint(id,ended=time.time())
             except Exception:self.repo.store.log.emit('gui_error',reason='automation_checkpoint_failed',exception=type(exc).__name__)
         finally:
+            try:
+                self.reconcile_stages(id)
+                if terminal=='completed' and any(g['data']['state']!='completed' for g in self.repo.groups(id)):terminal='needs_attention'
+            except Exception:self.repo.store.log.emit('gui_error',reason='automation_stage_reconcile_failed')
             from .reports import write
             try:self.checkpoint(id,reports=write(self.repo,id,self.services.tts_store,state=terminal))
             except Exception as exc:
@@ -199,6 +239,7 @@ class Controller:
         from ..tts.documents import segments
         from .adapters import project_hash
         cfg=self.repo.workset(id)['config'];artifacts=self.repo.artifacts(id)
+        if self.pending_retry_groups(id):return True
         try:
             for group in proof['groups']:
                 meta=self.repo.group(group['id'])['data'];rows=self.repo.store.units(group['document_id'])

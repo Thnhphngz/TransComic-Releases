@@ -106,6 +106,11 @@ def input_stamp(group,path,rows):
                             lines=[(r['id'],r['source_revision']) for r in rows],sha=meta['source_sha256']))
 
 
+def project_name_error(config):
+    from ..capcut.planning import ProjectPart,name_errors
+    return name_errors((ProjectPart(config.get('project_name',''),1,1,()),)).get(1,'')
+
+
 def check_config(section,config):
     from ..languages import validate_pair,language
     from ..tts.catalog import voice_names,LANGUAGES
@@ -122,6 +127,7 @@ def check_config(section,config):
         if not .5<=float(config['speed'])<=2 or config['variant'] not in ('standard','light'):raise ValueError('Cấu hình Kokoro không hợp lệ.')
         if config['format']!='wav':raise ValueError('Automation yêu cầu WAV để giữ mapping/duration.')
     else:
+        if error:=project_name_error(config):raise ValueError(error)
         output=Path(config['output'])
         if not config['output'] or not output.is_dir():raise ValueError('Chọn thư mục xuất CapCut hiện có.')
         if shutil.disk_usage(output).free<32*1024*1024:raise ValueError('Không đủ dung lượng thư mục CapCut.')

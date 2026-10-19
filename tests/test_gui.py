@@ -13,6 +13,7 @@ from transcomic.providers import KiraProvider
 from transcomic.storage import Store
 from transcomic.translation import Scheduler
 from transcomic.ui.main import MainWindow
+from transcomic.ui.exporting import ExportInputDialog
 
 
 def test_import_edit_export_through_window(tmp_path: Path, monkeypatch):
@@ -30,7 +31,7 @@ def test_import_edit_export_through_window(tmp_path: Path, monkeypatch):
     assert window.model.rowCount() == 3
     assert window.model.setData(window.model.index(0, 1), "Xin chào")
     assert window.model.setData(window.model.index(2, 1), "Thế giới")
-    monkeypatch.setattr(QInputDialog, 'getItem', lambda *args: (args[3][0], True))
+    monkeypatch.setattr(ExportInputDialog, 'getItem', lambda *args: (args[3][0], True))
     monkeypatch.setattr(QMessageBox, 'question', lambda *args: QMessageBox.Yes)
     window.export_file()
     for _ in range(200):
@@ -123,7 +124,7 @@ def test_docx_gui_import_resume_mock_translate_export(tmp_path: Path, monkeypatc
     output = tmp_path / "chapter_VI.docx"
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(output), ""))
     monkeypatch.setattr(QMessageBox, "exec", lambda self: self.buttons()[0].click())
-    monkeypatch.setattr(QInputDialog, 'getItem', lambda *args: (args[3][2], True))
+    monkeypatch.setattr(ExportInputDialog, 'getItem', lambda *args: (args[3][2], True))
     monkeypatch.setattr(QFileDialog, 'getExistingDirectory', lambda *args: str(tmp_path))
     monkeypatch.setattr(QMessageBox, 'question', lambda *args: QMessageBox.Yes)
     monkeypatch.setattr(QMessageBox, 'warning', lambda *args: QMessageBox.Yes)

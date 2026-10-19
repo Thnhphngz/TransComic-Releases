@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QInputDialog
 from transcomic.documents import decode_txt
 from transcomic.storage import Store
 from transcomic.ui.main import MainWindow
-from transcomic.ui.exporting import choose_export_plan, MODES
+from transcomic.ui.exporting import choose_export_plan, MODES, ExportInputDialog
 
 
 @pytest.fixture
@@ -123,7 +123,7 @@ def test_undo_redo_replace_and_navigation_reuse_editor(gui,tmp_path):
 
 def test_export_ui_blocks_structure_and_incomplete_defaults_no_write(gui,tmp_path,monkeypatch):
     app,s,w=gui;doc=load(gui,tmp_path/'a.txt',2)
-    monkeypatch.setattr(QInputDialog,'getItem',lambda *a,**k:(MODES[0][0],True))
+    monkeypatch.setattr(ExportInputDialog,'getItem',lambda *a,**k:(MODES[0][0],True))
     questions=[]
     monkeypatch.setattr(QMessageBox,'question',lambda *a:questions.append(a) or QMessageBox.No)
     assert choose_export_plan(w,[doc]) is None

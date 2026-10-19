@@ -468,6 +468,7 @@ class AutomationPage(QWidget):
         self.current=self.worksets.currentData();self.proof=None;self.validation_generation+=1;self.validation_timer.stop();self.validation_again=False;self.validation_force=False
         self.set_validation_status('Chưa kiểm tra','Kết quả lưu trước đó sẽ được xác minh lại trước khi sử dụng.')
         if self.current:
+            if not self.controller.busy:self.controller.reconcile_stages(self.current)
             self.loading=True;cfg=self.repo.workset(self.current)['config']
             for key in ('provider','tts_language'):self.set_field(key,cfg[key])
             self.fill_models();self.fill_voices()
@@ -533,7 +534,9 @@ class AutomationPage(QWidget):
         self.proof=None;self.mark_dirty();self.queue_validation()
     def new_workset(self):
         name,ok=QInputDialog.getText(self,'Bộ công việc mới','Tên bộ truyện:')
-        if ok and name.strip():self.load_worksets(self.repo.create(name,defaults(self.repo.store)))
+        if ok and name.strip():
+            cfg=defaults(self.repo.store);cfg.update(project_name='',part_names={})
+            self.load_worksets(self.repo.create(name,cfg))
     def delete_workset(self):
         if not self.current:return
         self.repo.editable(self.current)
@@ -672,7 +675,16 @@ class AutomationPage(QWidget):
         bad=sum(not g['valid'] for g in proof['groups'])
         text='✓ Đầu vào hợp lệ' if proof['passed'] else f'⚠ {bad} nhóm cần kiểm tra' if bad else '⚠ Kiểm tra cấu hình'
         self.set_validation_status(text,'Đầu vào và cấu hình đã được xác minh.' if proof['passed'] else '\n'.join(faults),'success' if proof['passed'] else 'warning');self.refresh()
+        self.check_project_name()
+    def check_project_name(self):
+        from ..automation.validation import project_name_error
+        if self.current and (error:=project_name_error(self.repo.workset(self.current)['config'])):
+            self.notice.setText('Tên project CapCut: '+error)
+            self.fields['project_name'].setFocus(Qt.OtherFocusReason)
+            return False
+        return True
     def start_clicked(self):
+        if not self.check_project_name():return
         if not self.current or not self.proof:return
         id=self.current;work=self.repo.workset(id);cfg=work['config']
         if not work['started']:

@@ -10,9 +10,10 @@ from test_capcut_media import media_group
 @pytest.mark.parametrize('count',[1,2,10,20])
 def test_multiple_manual_pairs_single_dialog(page,tmp_path,count):
     app,w,p=page;d=MultiGroupDialog(p)
-    for _ in range(count-1):d.add_entry()
-    for i,e in enumerate(d.entries):
-        e.name.setText(f'Chương {i}');e.image.setText(str(tmp_path/f'g{i}'));e.audio.setText(str(tmp_path/f'g{i}'/'voice'));e.sort.setCurrentIndex(i%2)
+    for i in range(count):
+        folder=tmp_path/f'g{i}';(folder/'voice').mkdir(parents=True)
+        e=d.entries[-1]
+        e.name.setText(f'Chương {i}');e.image.setText(str(folder));e.audio.setText(str(folder/'voice'));e.sort.setCurrentIndex(i%2);app.processEvents()
     d.accept();assert d.result()==QDialog.Accepted and len(d.result_groups)==count
     assert all(g.image_sort==('created' if i%2 else 'name') for i,g in enumerate(d.result_groups))
     assert not p.manager.groups
@@ -20,7 +21,8 @@ def test_multiple_manual_pairs_single_dialog(page,tmp_path,count):
 
 
 def test_incomplete_cancel_delete_and_duplicate_warning(page,tmp_path,monkeypatch):
-    app,w,p=page;d=MultiGroupDialog(p);d.add_entry();d.entries[0].image.setText(str(tmp_path));d.entries[0].audio.setText(str(tmp_path/'voice'))
+    app,w,p=page;d=MultiGroupDialog(p);(tmp_path/'voice').mkdir();d.entries[0].image.setText(str(tmp_path));d.entries[0].audio.setText(str(tmp_path/'voice'))
+    d.add_entry().image.setText(str(tmp_path))
     d.accept();assert not d.result_groups and 'Cặp 2' in d.error.text()
     d.remove_entry(d.entries[1]);d.reject();assert not p.manager.groups
     d=MultiGroupDialog(p);e=d.entries[0];e.image.setText(str(tmp_path));e.audio.setText(str(tmp_path/'voice'))
@@ -59,8 +61,8 @@ def test_compact_expand_sort_refresh_and_latest_export(page,tmp_path):
 def test_add_button_dialog_applies_all_entries_once(page,tmp_path,monkeypatch):
     app,w,p=page;groups=[media_group(tmp_path/f'g{i}',1) for i in range(2)]
     def execute(dialog):
-        dialog.add_entry()
-        for entry,group in zip(dialog.entries,groups):entry.image.setText(group.image_dir);entry.audio.setText(group.audio_dir);entry.name.setText(group.name)
+        for group in groups:
+            entry=dialog.entries[-1];entry.image.setText(group.image_dir);entry.audio.setText(group.audio_dir);entry.name.setText(group.name);app.processEvents()
         dialog.accept();return dialog.result()
     monkeypatch.setattr(MultiGroupDialog,'exec',execute)
     p.add_button.click();wait(app,p)

@@ -16,6 +16,11 @@ class WorkspaceV2Mixin:
     def retry_workspace_errors(self):
         from ..workspace_retry import retry_plan, WorkspaceRetryScheduler, fresh_retry_config
         if self.scheduler and self.scheduler._thread and self.scheduler._thread.is_alive(): return
+        if self.automation_repo.active():
+            ids=[r['id'] for doc in self.workspace_ids for r in self.store.lines(doc) if r['state'] in ('error','unknown','wrong_target_language')]
+            if ids:self.route_automation_retry(ids)
+            else:QMessageBox.information(self,'Dịch lại tất cả lỗi','Workspace không còn dòng lỗi')
+            return
         try: plan = retry_plan(self.store, self.workspace_ids)
         except ValueError as exc:
             QMessageBox.information(self, 'Không thể dịch lại', str(exc)); return

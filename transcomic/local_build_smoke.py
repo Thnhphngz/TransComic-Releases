@@ -155,12 +155,14 @@ def main():
             window.pages.setCurrentIndex(8);QApplication.processEvents();assert hasattr(window,'capcut_page')
             from .capcut.package_probe import run as probe_capcut
             capcut=probe_capcut(root)
+            from .workflow_smoke_202 import run as workflow_202
+            workflow=workflow_202(window,root)
             for page in (0,7,8,9,1,2,3):
                 window.pages.setCurrentIndex(page);QApplication.processEvents()
                 assert window.navigation_group.checkedId()==page
             automation=run_automation(window,root,wait)
             report={'passed':True,'frozen':bool(getattr(sys,'frozen',False)),'version':VERSION,'platform':app.platformName(),'dpr':window.devicePixelRatioF(),
-                    'tts':tts,'capcut':capcut,'automation':automation,'migration':migration,'gateway_recovery':recovery,
+                    'tts':tts,'capcut':capcut,'automation':automation,'migration':migration,'gateway_recovery':recovery,'workflow_202':workflow,
                     'txt_docx_fixture':True,'docx_export_units':2,'source_files_unchanged':original_hashes=={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in (text,word)},
                     'themes':['light','dark'],'visible_pages':[0,7,8,9,1,2,3],'workspace_preserved':True,'queue_clear':True,'search_replace_undo':True,
                     'manual_popup':True,'auto_no_popup':True,'later_no_download':True,'download_verified':True,'real_http_requests':0,'installer_processes':0,

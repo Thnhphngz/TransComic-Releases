@@ -34,7 +34,7 @@ def main(argv=None):
     parser.add_argument('--output',type=Path,help='Evidence directory; preserve previous build smoke by selecting a new directory')
     parser.add_argument('--cpu-cache',type=Path,help='Existing isolated CPU acceptance cache, never a production profile')
     parser.add_argument('--baseline',type=Path,help='Actual v1.2.0 app EXE, read only to seed synthetic legacy data')
-    parser.add_argument('--baseline-version',default='1.2.0',choices=('1.2.0','2.0.0'))
+    parser.add_argument('--baseline-version',default='1.2.0',choices=('1.2.0','2.0.0','2.0.1'))
     args=parser.parse_args(argv)
     exe=safe_path(args.exe,ROOT)
     if exe.name!='TransComic.exe' and not (args.source and exe.name=='run_transcomic.py'):raise ValueError('Only app EXE/source smoke, never installer/helper')

@@ -13,7 +13,7 @@ from PyInstaller.archive.readers import CArchiveReader
 def main():
     parser=argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument('--baseline',type=Path,required=True);parser.add_argument('--root',type=Path,required=True)
-    parser.add_argument('--current',default='1.2.0',choices=('1.2.0','2.0.0'))
+    parser.add_argument('--current',default='1.2.0',choices=('1.2.0','2.0.0','2.0.1'))
     args=parser.parse_args();root=args.root.resolve()
     assert root.name.startswith('TransComic-build-smoke-') and (root/'isolated-smoke.json').is_file()
     assert not (root/'TransComic/transcomic.sqlite3').exists()
@@ -50,7 +50,7 @@ def main():
     for rel in ('legacy-project/draft_content.json','TransComic/TTS/Models/fixture-cache.txt','TransComic/TTS/Runtimes/fixture-cache.txt'):
         p=root/rel;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('synthetic-preserved-cache-or-project',encoding='utf8')
     failed_doc=None
-    if VERSION=='2.0.0':
+    if VERSION in ('2.0.0','2.0.1'):
         from transcomic.automation.repository import Repository
         from transcomic.automation.validation import defaults
         repo=Repository(store);work=repo.create('Legacy v2 checkpoint',defaults(store))
@@ -72,7 +72,7 @@ def main():
            'tts_history':rows(tts.db,'runs'),
            'files':{str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in (source,audio,root/'legacy-project/draft_content.json',app/'TTS/Models/fixture-cache.txt',app/'TTS/Runtimes/fixture-cache.txt')}}
     proof['failed_document']=failed_doc
-    if VERSION=='2.0.0':proof['tables']['automation_worksets']=rows(store.db,'automation_worksets')
+    if VERSION in ('2.0.0','2.0.1'):proof['tables']['automation_worksets']=rows(store.db,'automation_worksets')
     (root/'baseline-expected.json').write_text(json.dumps(proof),encoding='utf8');tts.close();store.close()
     print(json.dumps({'seeded':True,'version':VERSION,'production_data_accessed':False}))
 
