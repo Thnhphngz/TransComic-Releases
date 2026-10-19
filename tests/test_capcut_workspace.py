@@ -50,7 +50,7 @@ def test_switch_group_while_scan_busy_and_late_preview_cannot_restore_old_group(
 def test_sidebar_icons_navigation_geometry_and_no_top_navigation(page,tmp_path):
     app,w,p=page;groups=populate(p,tmp_path);p.show_group(groups[0].id)
     titles=[b.text() for b in w.nav_buttons];icons=[b.icon().pixmap(24,24).toImage() for b in w.nav_buttons]
-    assert len(titles)==9 and all(not b.icon().isNull() for b in w.nav_buttons)
+    assert len(titles)==7 and all(not b.icon().isNull() for b in w.nav_buttons)
     width=w.sidebar.width()
     for index in (0,8,0,8):w.pages.setCurrentIndex(index);settle(app)
     assert w.sidebar.width()==width and [b.text() for b in w.nav_buttons]==titles

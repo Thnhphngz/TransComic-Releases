@@ -214,8 +214,11 @@ def test_unresolved_upload_intent_is_read_only_and_never_retried(tmp_path):
     with pytest.raises(UpdateError,match='OUTCOME_UNKNOWN'):auto.Runtime().reconcile_intent({'version':'1.0.1','build_id':'id'},scope,publisher)
     assert package.load(tmp_path/'remote-intent.json')['outcome']=='PENDING'
 
-def bat_fixture(root):
+def bat_fixture(root,monkeypatch):
     import shutil
+    # Child BAT must use the interpreter running this suite, not an unrelated
+    # system Python without pytest/dependencies. All operations remain fake.
+    monkeypatch.setenv('PATH',str(Path(sys.executable).parent)+os.pathsep+os.environ.get('PATH',''))
     shutil.copyfile(auto.ROOT/'release_transcomic.bat',root/'release_transcomic.bat')
     (root/'scripts').mkdir(exist_ok=True)
     driver=('import sys,json,time,os\nsys.stdout.reconfigure(encoding="utf8",errors="replace")\nfrom pathlib import Path\n'
@@ -238,8 +241,8 @@ def bat_fixture(root):
     return root/'release_transcomic.bat'
 
 @pytest.mark.skipif(os.name!='nt',reason='Windows BAT integration')
-def test_actual_bat_check_build_only_and_default_with_fake_github(project):
-    root,runtime,system=project;bat=bat_fixture(root);change(root)
+def test_actual_bat_check_build_only_and_default_with_fake_github(project,monkeypatch):
+    root,runtime,system=project;bat=bat_fixture(root,monkeypatch);change(root)
     before=system.journal.path.read_bytes();head=git(root,'rev-parse','HEAD')
     for args in (['--check'],['--build-only'],[]):
         result=subprocess.run(['cmd','/c',str(bat),*args],cwd=root.parent,capture_output=True,timeout=90)
@@ -249,9 +252,9 @@ def test_actual_bat_check_build_only_and_default_with_fake_github(project):
         else:assert b'RELEASE PUBLISHED AND VERIFIED' in result.stdout and system.journal.load()['post_publication_verified']
 
 @pytest.mark.skipif(os.name!='nt',reason='Windows concurrent BAT integration')
-def test_two_actual_bats_only_one_can_release(project):
+def test_two_actual_bats_only_one_can_release(project,monkeypatch):
     import time
-    root,runtime,system=project;bat=bat_fixture(root);change(root)
+    root,runtime,system=project;bat=bat_fixture(root,monkeypatch);change(root)
     first=subprocess.Popen(['cmd','/c',str(bat)],cwd=root.parent,env=dict(os.environ,FIXTURE_HOLD_RELEASE='1'),stdout=subprocess.PIPE,stderr=subprocess.PIPE,creationflags=0x08000000)
     try:
         deadline=time.monotonic()+20

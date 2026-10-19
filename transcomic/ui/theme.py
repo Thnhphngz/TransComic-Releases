@@ -33,6 +33,7 @@ def stylesheet(dark: bool) -> str:
     QLabel#muted {{ color: {c['muted']}; }}
     QFrame#card, QFrame#sidebar {{ background: {c['panel']}; border: 1px solid {c['border']}; border-radius: 15px; }}
     QFrame#sidebar {{ background: {c['sidebar']}; border: 0; border-radius: 0; }}
+    QScrollArea#navigationScroll, QWidget#navigationViewport, QWidget#navigationBody {{ background: transparent; border: 0; }}
     QTableView#capcutPairTable {{ selection-color: {c['ink']}; }}
     QFrame#capcutExportPanel {{ background: {c['panel']}; border: 1px solid {'#806657' if dark else '#B59B8B'}; border-radius: 15px; }}
     QTableView#capcutSplitPreview {{ background: {c['panel']}; border: 1px solid {'#806657' if dark else '#B59B8B'}; border-radius: 4px; selection-color: {c['ink']}; gridline-color: {c['border']}; }}

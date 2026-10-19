@@ -33,7 +33,7 @@ class CapcutPage(QWidget):
         try:return fn()
         except Exception as exc:self.status.setText(str(exc));return None
 
-    def is_busy(self):return self.busy
+    def is_busy(self):return self.busy or bool(getattr(self.store,'automation',None) and self.store.automation.active())
     def set_busy(self,busy):
         for w in (self.add_button,self.scan_button,self.mode,self.project_name,self.output,self.output_browse):w.setEnabled(not busy)
         self.project_name.setEnabled(not busy and self.manager.mode in ('merged','split'))
@@ -255,6 +255,8 @@ class CapcutPage(QWidget):
         if self.is_busy():return
         self.safe(self.start_export)
     def start_export(self):
+        repo=getattr(self.store,'automation',None)
+        if repo and repo.active():raise ValueError('CapCut đang thuộc Automation; dừng an toàn trước khi xuất thủ công.')
         self.commit_part_editor();self.part_count.interpretText();self.save_options()
         if not self.manager.output:raise ValueError('Chọn thư mục đầu ra')
         scans=tuple(self.scans[g.id] for g in self.manager.groups if g.id in self.scans)

@@ -18,6 +18,8 @@ from transcomic.languages import language
 @pytest.fixture
 def gui(tmp_path, monkeypatch):
     monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    from transcomic.ui.tts_page import TtsPage
+    monkeypatch.setattr(TtsPage,'check_runtime',lambda self:None)
     app = QApplication.instance() or QApplication([])
     store = Store(tmp_path/'state.db'); w = MainWindow(store)
     w.resize(1200,720); w.show(); app.processEvents()

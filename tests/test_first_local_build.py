@@ -84,7 +84,7 @@ def test_http_304_cache_popup_does_not_claim_no_network(tmp_path):
     panel.update_dialog.reject();w._exit_authorized=True;w.close();QTest.qWait(30)
 
 
-def test_srt_placeholder_navigation_preserves_editor(tmp_path):
+def test_automation_navigation_preserves_editor(tmp_path):
     from transcomic.documents import decode_txt
     app,w=window(tmp_path);doc=w.store.import_document(tmp_path/'book.txt',decode_txt(b'hello'),'Tiếng Việt','Tiếng Anh')[0]
     w.workspace_ids=[doc];w.open_document(doc);w.table.setCurrentIndex(w.model.index(0,0))
@@ -93,11 +93,10 @@ def test_srt_placeholder_navigation_preserves_editor(tmp_path):
         if w.dark!=dark:w.toggle_theme()
         for compact in (False,True):
             if (w.sidebar.width()<100)!=compact:w.toggle_sidebar()
-            w.navigation_group.button(6).click();app.processEvents()
-            assert w.pages.currentIndex()==6 and w.navigation_group.button(6).isChecked()
-            assert w.navigation_group.button(6).toolTip()=='Dịch file SRT'
-            assert any(label.text()=='Chức năng đang được cập nhật' for label in w.pages.widget(6).findChildren(QLabel))
-            assert not w.pages.widget(6).findChildren(__import__('PySide6.QtWidgets',fromlist=['QPushButton']).QPushButton)
+            assert [w.navigation_group.id(b) for b in w.nav_buttons]==[0,7,8,9,1,2,3]
+            assert w.navigation_group.button(6) is None
+            w.navigation_group.button(9).click();app.processEvents()
+            assert w.pages.currentIndex()==9 and w.navigation_group.button(9).isChecked()
             w.navigation_group.button(0).click();assert w.store.lines(doc)==before and w.target_languages()==targets and w.table.currentIndex()==selection
     w._exit_authorized=True;w.close();QTest.qWait(30)
 
@@ -106,6 +105,9 @@ def test_build_allowlist_and_permission_separation():
     from scripts.build_local import input_files,ROOT
     paths=[p.relative_to(ROOT).as_posix() for p in input_files(ROOT)]
     assert 'transcomic/ui/assets/nav-subtitles.svg' in paths
+    assert {'transcomic/automation/controller.py','transcomic/automation/repository.py',
+            'transcomic/automation/adapters.py','transcomic/ui/assets/nav-automation.svg',
+            'transcomic/release_smoke.py'}<=set(paths)
     assert not any(p.startswith(('tests/','artifacts/','.pytest_','.git/')) or p.endswith(('.db','.docx','.tc-keybackup','.pem')) for p in paths)
     from transcomic.release_adapters import ProductionCommands
     from transcomic.update.metadata import UpdateError

@@ -46,6 +46,14 @@ _AUTOMATIC_SCOPES={}
 PACKAGING_120_GATES=('MUTAGEN_PASS','THIRDPARTY_PASS','PORTABLE_MAU_PASS','BUILD_PASS',
     'EXE_STARTUP_PASS','KOKORO_PASS','CAPCUT_FROZEN_EXPORT_PASS','VERSION_UPDATER_PASS',
     'DATA_SECURITY_PASS','ARTIFACT_HASH_PASS')
+PACKAGING_200_GATES=('VERSION_SYNC','SOURCE_PRESERVED','INSTALLER_BUILD','FROZEN_STARTUP',
+    'AUTOMATION_RESOURCES','KOKORO_DEPENDENCIES','MAU_EXPORT','SQLITE_120_MIGRATION',
+    'BASELINE_UPDATER','DATA_SECURITY','PUBLIC_PRIVACY','INSTALLER_SHA256')
+
+
+def release_title(scope):
+    if scope.version=='2.0.0':return 'TransComic v2.0.0 — Tự động hóa Dịch → Kokoro → CapCut'
+    return 'TransComic '+scope.version
 
 def automatic_scope(version):
     """Per-version command boundary for the user-invoked automatic entry."""
@@ -182,6 +190,7 @@ def require_current_tests(scope=FIRST_SCOPE):
         # Explicit user-authorized v1.2.0 packaging/smoke contract. Prior full
         # regression is retained with its minor focus FAIL, never relabeled PASS.
         required=PACKAGING_120_GATES if scope.version=='1.2.0' and proof.get('gate_profile')=='packaging_smoke_120' else GATE_NAMES
+        if scope.version=='2.0.0' and proof.get('gate_profile')=='automation_smoke_200':required=PACKAGING_200_GATES
         if required is PACKAGING_120_GATES and proof.get('prior_regression_accepted_by_user') is not True:
             raise UpdateError('PACKAGING_120_USER_ACCEPTANCE_REQUIRED')
         if set(proof.get('release_gates',{}))!=set(required) or not all(v is True for v in proof['release_gates'].values()):
@@ -192,10 +201,10 @@ def require_current_tests(scope=FIRST_SCOPE):
 
 
 def inspect_scoped_asset(scope,name,path,base):
-    """Only the explicit 1.2.0 source distribution may use a ZIP asset."""
+    """Only reviewed 1.2.0/2.0.0 corresponding-source kits may be ZIP assets."""
     if Path(path).suffix.lower()!='.zip':return Asset.inspect(name,path,base)
     checked_scope(scope)
-    if scope.version!='1.2.0' or name!='TransComic-1.2.0-ThirdParty-Sources.zip':
+    if scope.version not in ('1.2.0','2.0.0') or name!=f'TransComic-{scope.version}-ThirdParty-Sources.zip':
         raise UpdateError('PRIVATE_DATA_NOT_AN_ASSET')
     import zipfile
     from transcomic.update.metadata import MAX_DOWNLOAD
@@ -239,7 +248,7 @@ class FirstReleaseCommands:
             return True
         if endpoint == prefix+'/releases':
             payload=self.scope.out/'draft-request.json'
-            expected={'tag_name':self.scope.tag,'name':'TransComic '+self.scope.version,'target_commitish':self.distribution,
+            expected={'tag_name':self.scope.tag,'name':release_title(self.scope),'target_commitish':self.distribution,
                       'draft':True,'prerelease':False,'body':self.notes}
             if tail==['--method','POST','--input',str(payload)] and load(payload)==expected:return True
         if self.release_id is not None:
@@ -375,7 +384,7 @@ class FirstReleasePublisher(GitHubPublisher):
             raise UpdateError('ONLY_V0_1_1_AUTHORIZED')
         self.check_tag(version,distribution_sha)
         payload=self.scope.out/'draft-request.json'
-        raw=canonical({'tag_name':self.scope.tag,'name':'TransComic '+self.scope.version,'target_commitish':distribution_sha,
+        raw=canonical({'tag_name':self.scope.tag,'name':release_title(self.scope),'target_commitish':distribution_sha,
                        'draft':True,'prerelease':False,'body':self.commands.notes})
         if payload.exists():
             if payload.read_bytes()!=raw:raise UpdateError('DRAFT_REQUEST_CHANGED')

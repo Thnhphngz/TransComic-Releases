@@ -142,7 +142,7 @@ def test_two_column_geometry_sidebar_splitter_and_hit_targets(page,tmp_path,dark
     assert min(p.workspace.sizes())>=220
     p.workspace.setSizes([240,1000]);settle(app);before=p.workspace.sizes()
     p.show_group(b.id);assert p.workspace.sizes()==before
-    assert len(w.nav_buttons)==9
+    assert len(w.nav_buttons)==7
     w.toggle_sidebar();settle(app);w.toggle_sidebar();settle(app)
     assert p.selected_group_id==b.id and p.workspace.widget(1).width()>=310
     p.settings_toggle.setChecked(False);p.settings_toggle.click();settle(app);assert not p.settings_body.isVisible() and p.export_button.isVisible()

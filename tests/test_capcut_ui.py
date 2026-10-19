@@ -38,7 +38,7 @@ def test_page_pair_details_filter_preview_and_order(page,tmp_path,dark):
     p.move_group(b.id,-1);assert p.manager.groups[0].id==b.id
     d.errors.setCurrentIndex(1);assert d.proxy.rowCount()==0
     p.remove_group(a.id);assert p.group_model.rowCount()==1
-    assert len(w.nav_buttons)==9 and p.thumbs.limit==128
+    assert len(w.nav_buttons)==7 and p.thumbs.limit==128
     assert p.player is None  # Selection never automatically starts audio/TTS.
 
 

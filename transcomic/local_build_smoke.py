@@ -47,22 +47,37 @@ def main():
         if not isinstance(client._transport,httpx.MockTransport):raise AssertionError('Real HTTP forbidden')
         return original(client,*args,**kwargs)
     httpx.Client.send=guard
-    httpx.AsyncClient.send=lambda *a,**k:(_ for _ in ()).throw(AssertionError('Real HTTP forbidden'))
+    original_async=httpx.AsyncClient.send
+    async def guard_async(client,*args,**kwargs):
+        if not isinstance(client._transport,httpx.MockTransport):raise AssertionError('Real HTTP forbidden')
+        return await original_async(client,*args,**kwargs)
+    httpx.AsyncClient.send=guard_async
     app=QApplication(sys.argv);app.setApplicationName('TransComic');app.setAttribute(Qt.AA_DontUseNativeDialogs,True)
-    store=Store(root/'TransComic/transcomic.sqlite3');window=MainWindow(store);window.update_panel.auto.setChecked(False)
+    # This opt-in test never discovers/downloads a runtime or probes a GPU.
+    from .ui.tts_page import TtsPage
+    TtsPage.check_runtime=lambda self:None
+    store=Store(root/'TransComic/transcomic.sqlite3');store.set_setting('update_auto_check','0')
+    window=MainWindow(store);window.update_panel.auto.setChecked(False)
     window.show();app.setQuitOnLastWindowClosed(False)
-    def wait(condition):
+    def wait(condition,seconds=5):
         if condition():return
         loop=QEventLoop();poll=QTimer();poll.setInterval(20);poll.setTimerType(Qt.PreciseTimer)
         poll.timeout.connect(lambda:loop.quit() if condition() else None)
         deadline=QTimer();deadline.setSingleShot(True);deadline.setTimerType(Qt.PreciseTimer);deadline.timeout.connect(loop.quit)
-        poll.start();deadline.start(5000)
+        poll.start();deadline.start(int(seconds*1000))
         try:loop.exec()
         finally:poll.stop();deadline.stop()
         assert condition(),'Smoke condition timeout'
     def exercise():
         try:
             assert store.path.resolve().is_relative_to(root)
+            from .release_smoke import verify_baseline,run_automation,verify_reopen
+            if os.environ.get('TRANSCOMIC_SMOKE_REOPEN')=='1':
+                verify_reopen(window,root)
+                window.confirm_exit=lambda running:'safe';window.close()
+                QTimer.singleShot(900,app.quit)
+                return
+            migration=verify_baseline(window,root)
             from docx import Document
             from .docx_document import render_docx,inspect_docx
             text=root/'fixture.txt';text.write_bytes(b'Alpha one\nAlpha two')
@@ -85,8 +100,9 @@ def main():
                     if (window.sidebar.width()<100)!=compact:window.toggle_sidebar()
                     if compact:window.showMaximized()
                     else:window.showNormal();window.resize(900,580)
-                    window.pages.setCurrentIndex(6);QTest.qWait(150)
-                    assert window.navigation_group.button(6).isChecked()
+                    window.pages.setCurrentIndex(9);QTest.qWait(150)
+                    assert window.navigation_group.checkedId()==9
+                    assert [window.navigation_group.id(b) for b in window.nav_buttons]==[0,7,8,9,1,2,3]
                     # Navigation now lives inside its own scroll viewport;
                     # compare coordinates in the sidebar, not different parents.
                     last=window.nav_buttons[-1];window.navigation_scroll.ensureWidgetVisible(last)
@@ -94,9 +110,9 @@ def main():
                     assert window.navigation_scroll.viewport().rect().contains(last.mapTo(window.navigation_scroll.viewport(),last.rect().center()))
                     assert last.mapTo(window.sidebar,QPoint(0,last.height())).y()<=window.collapse_button.y()
                     QTest.mouseClick(last,Qt.LeftButton);assert window.pages.currentIndex()==3
-                    window.pages.setCurrentIndex(6)
+                    window.pages.setCurrentIndex(9)
                     assert window.sky_switch.geometry().bottom()<=window.sidebar.height()
-                    window.grab().save(str(root/f'srt-{dark}-{compact}.png'))
+                    window.grab().save(str(root/f'automation-{dark}-{compact}.png'))
                     window.pages.setCurrentIndex(0);assert store.lines(doc)==before and window.target_languages()==targets,repr({'lines_before':before,'lines_after':store.lines(doc),'targets_before':targets,'targets_after':window.target_languages()})
                 window.search.open(True);window.search.scope.setCurrentIndex(2);window.search.query.setText('Alpha');window.search.replacement.setText('Beta');window.search.navigate(1);window.search.replace_current()
                 assert store.lines(doc)[0]['translation']=='Beta translation';window.search.undo();window.search.hide()
@@ -137,10 +153,14 @@ def main():
             window.pages.setCurrentIndex(8);QApplication.processEvents();assert hasattr(window,'capcut_page')
             from .capcut.package_probe import run as probe_capcut
             capcut=probe_capcut(root)
+            for page in (0,7,8,9,1,2,3):
+                window.pages.setCurrentIndex(page);QApplication.processEvents()
+                assert window.navigation_group.checkedId()==page
+            automation=run_automation(window,root,wait)
             report={'passed':True,'frozen':bool(getattr(sys,'frozen',False)),'version':VERSION,'platform':app.platformName(),'dpr':window.devicePixelRatioF(),
-                    'tts':tts,'capcut':capcut,
+                    'tts':tts,'capcut':capcut,'automation':automation,'migration':migration,
                     'txt_docx_fixture':True,'docx_export_units':2,'source_files_unchanged':original_hashes=={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in (text,word)},
-                    'themes':['light','dark'],'srt_placeholder':True,'workspace_preserved':True,'queue_clear':True,'search_replace_undo':True,
+                    'themes':['light','dark'],'visible_pages':[0,7,8,9,1,2,3],'workspace_preserved':True,'queue_clear':True,'search_replace_undo':True,
                     'manual_popup':True,'auto_no_popup':True,'later_no_download':True,'download_verified':True,'real_http_requests':0,'installer_processes':0,
                     'isolated_database':str(store.path),'default_data_path_unchanged':True,'safe_exit_deadline_ms':900,'process_exit_observed_by_launcher':False}
             (root/'report.json').write_text(json.dumps(report,indent=2),encoding='utf8')

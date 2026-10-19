@@ -22,6 +22,8 @@ class HistoryCard(QFrame):
     def update_data(self,doc):
         self.doc=doc;config=json.loads(doc['config']);date=datetime.fromtimestamp(doc['created']).strftime('%d/%m %H:%M');self.name.setText(doc['name']);self.name.setStyleSheet('font-weight:600;')
         backend=(doc.get('backend') or 'Chưa chạy').replace('ExecutionProvider','');self.meta.setText(f'{date} · {config.get("voice","Chưa chọn giọng")} · {config.get("speed",1)}x\n{doc["success"] or 0}/{doc["total"]} audio · {STATES.get(doc["run_state"],doc["run_state"])}\n{backend} · {config.get("format","wav").upper()}')
+        repo=getattr(self.page.store,'automation',None);self.automation_owned=bool(repo and repo.tts_owner(doc['run_id']))
+        if self.automation_owned:self.meta.setText('Automation · Chỉ đọc\n'+self.meta.text())
         self.meta.setToolTip(f'{doc.get("folder") or "Chưa tạo thư mục"}\n{doc["duration"] or 0:.1f}s')
         single_input=not doc['path'] and (config.get('split')=='none' or doc['total']<=1)
         self.single_input=single_input;missing=self.id in self.panel.missing
@@ -34,11 +36,12 @@ class HistoryCard(QFrame):
             action=menu.addAction(title);action.setEnabled(enabled);action.triggered.connect(lambda:page.guard(callback))
         exists=bool(self.doc['folder'] and Path(self.doc['folder']).is_dir());add('Mở thư mục',lambda:page.open_folder(self.id),exists)
         if not exists:menu.addAction('Chưa có thư mục' if not self.doc['folder'] else 'Thư mục thiếu — dùng Liên kết lại').setEnabled(False)
-        add('Liên kết lại',page.relink,not page.is_busy());add('Chi tiết',lambda:page.open_details(self.id))
+        owned=self.automation_owned
+        add('Liên kết lại',page.relink,not page.is_busy() and not owned);add('Chi tiết',lambda:page.open_details(self.id))
         active=page.scheduler.busy and page.scheduler.run_id==self.doc['run_id'];state=self.doc['run_state']
-        if state in RECOVERABLE:add('Tiếp tục lượt',page.resume_history,not page.is_busy())
-        add('Tạm dừng lượt',page.pause,active);add('Dừng / Hủy lượt',lambda:page.stop(self.doc['run_id']),state not in TERMINAL and (not page.scheduler.busy or active))
-        menu.addSeparator();add('Xóa bản ghi (giữ audio)',page.delete_history,not page.is_busy() and state in TERMINAL);return menu
+        if state in RECOVERABLE:add('Tiếp tục lượt',page.resume_history,not page.is_busy() and not owned)
+        add('Tạm dừng lượt',page.pause,active and not owned);add('Dừng / Hủy lượt',lambda:page.stop(self.doc['run_id']),not owned and state not in TERMINAL and (not page.scheduler.busy or active))
+        menu.addSeparator();add('Xóa bản ghi (giữ audio)',page.delete_history,not owned and not page.is_busy() and state in TERMINAL);return menu
 
 
 class HistoryPanel(QWidget):

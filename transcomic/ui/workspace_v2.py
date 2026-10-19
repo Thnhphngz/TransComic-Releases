@@ -60,8 +60,9 @@ class WorkspaceV2Mixin:
 
     @staticmethod
     def navigation_items():
-        return [('✦  Dịch', 0), ('▧  Dịch file SRT', 6), ('♫  Text to Speech', 7), ('▣  Xuất Project CapCut', 8), ('▤  Hàng đợi', 5), ('◷  Lịch sử', 1),
-                ('◆  API', 2), ('⌘  Console', 4), ('⚙  Cài đặt', 3)]
+        # Retain stack IDs for saved navigation/deep links and internal services.
+        return [('✦  Dịch', 0), ('♫  Text to Speech', 7), ('▣  Xuất Project CapCut', 8), ('⚙  Tự động hóa', 9), ('◷  Lịch sử', 1),
+                ('◆  API', 2), ('⚙  Cài đặt', 3)]
 
     def setup_v2(self):
         self.workspace_selections = {}; self.workspace_editor_states = {}; self.import_errors = []
@@ -301,12 +302,14 @@ class WorkspaceV2Mixin:
         self.brand_label.setToolTip('TransComic · Translation Studio')
         from PySide6.QtGui import QIcon
         from .glass import centered_icon
-        for control, (title, _), asset in zip(self.nav_buttons, self.navigation_items(), ['translate','subtitles','audio','capcut', 'queue', 'history', 'key', 'console', 'settings']):
+        self.navigation_group.setExclusive(False)
+        for control, (title, _), asset in zip(self.nav_buttons, self.navigation_items(), ['translate','audio','capcut','automation','history','key','settings']):
             control.setCheckable(True); control.setChecked(self.pages.currentIndex() == _)
             control.setToolTip(title[2:].strip()); control.setText('' if compact else title[2:].strip())
             nav_icon = QIcon(str(Path(__file__).parent/'assets'/f'nav-{asset}.svg'))
             if compact: nav_icon = centered_icon(nav_icon, QSize(19, 19), control.devicePixelRatioF())
             control.setIcon(nav_icon); control.setIconSize(QSize(19, 19))
+        self.navigation_group.setExclusive(True)
         if self.tray: self.tray.setIcon(icon)
         self.table.viewport().update(); self.document_panel.view.viewport().update()
 
@@ -470,6 +473,8 @@ class WorkspaceV2Mixin:
         self.refresh_document_panel(); self.refresh()
 
     def dragEnterEvent(self, event):
+        if self.pages.currentIndex()==9 and hasattr(self,'automation_page'):
+            self.automation_page.dragEnterEvent(event);return
         if local_drop_paths(event.mimeData()):
             event.acceptProposedAction()
             if hasattr(self, 'document_panel'):
@@ -494,6 +499,8 @@ class WorkspaceV2Mixin:
             self.filename.setText(self._drop_previous_filename); self._drop_previous_filename = None
 
     def dropEvent(self, event):
+        if self.pages.currentIndex()==9 and hasattr(self,'automation_page'):
+            self.automation_page.dropEvent(event);return
         paths = local_drop_paths(event.mimeData())
         self.clear_drop_highlight()
         if paths: self.import_paths(paths); event.acceptProposedAction()

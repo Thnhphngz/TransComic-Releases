@@ -241,7 +241,10 @@ class Store(KiraKeysMixin):
     def edit_line(self, line_id: str, column: str, value: str):
         if column not in ("source", "translation") or "\n" in value or "\r" in value:
             raise ValueError("Only one logical line may be edited")
+        automation=getattr(self,'automation',None)
+        if automation:automation.assert_editable_line(line_id)
         with self.transaction():
+            if automation:automation.assert_editable_line(line_id)
             row = self.db.execute("SELECT * FROM lines WHERE id=?", (line_id,)).fetchone()
             if row is None:
                 raise KeyError(line_id)
@@ -259,8 +262,12 @@ class Store(KiraKeysMixin):
                             (line_id, column, row[column], value, revision))
             self.db.execute("UPDATE lines SET attempt_kind='manual' WHERE id=?", (line_id,))
             self.db.execute("DELETE FROM quality_warnings WHERE line_id=?", (line_id,))
+            if automation:automation.line_edited(line_id)
 
     def create_job(self, doc_id: str, model: str, source_lang: str, target_lang: str, concurrency: int, line_ids: list[str] | None = None, timeout: float = 90, *, retry_504: bool | None = None, max_requests: int | None = None, provider='kira', run_id=None, config=None, allow_shared_document=False) -> str:
+        automation=getattr(self,'automation',None)
+        if automation and automation.active() and (config or {}).get('automation_owner')!=automation.active():
+            raise ValueError('Translation scheduler đang thuộc Automation; dừng an toàn trước khi dịch thủ công.')
         if provider not in ('kira', 'gemini'): raise ValueError('Unsupported provider')
         from .languages import validate_pair
         source_entry,target_entry=validate_pair(source_lang,target_lang)
@@ -275,6 +282,8 @@ class Store(KiraKeysMixin):
         retry_504 = self.setting("retry_504", "1") == "1" if retry_504 is None else retry_504
         if provider == 'gemini': retry_504 = False
         with self.transaction():
+            if automation and automation.active() and (config or {}).get('automation_owner')!=automation.active():
+                raise ValueError('Translation scheduler đang thuộc Automation; dừng an toàn trước khi dịch thủ công.')
             existing = self.db.execute("SELECT id FROM jobs WHERE document_id=? AND state IN ('ready','running','paused','pausing','stopping','user_paused','waiting_rate_limit','retry_scheduled','network_waiting','provider_recovering')", (doc_id,)).fetchone()
             if existing and not allow_shared_document:
                 raise ValueError("A translation job already exists for this document")
@@ -302,8 +311,15 @@ class Store(KiraKeysMixin):
             for key, default in [('rate_wait_budget', 300), ('rate_cooldown_limit', 10), ('rate_backoff_max', 30)]:
                 frozen.setdefault(key, float(self.setting(key, str(default))))
             self.db.execute('UPDATE jobs SET run_id=?,config=?,auto_retries=?,prompt_version=? WHERE id=?', (run_id, json.dumps(frozen), retries, prompt_version, job_id))
-            for offset in range(0, len(eligible), 3):
-                chunk = eligible[offset:offset + 3]
+            chunks=[eligible[offset:offset+3] for offset in range(0,len(eligible),3)]
+            boundaries=(config or {}).get('automation_boundaries')
+            if boundaries is not None:
+                if not automation or automation.active()!=(config or {}).get('automation_owner'):raise ValueError('Explicit batch boundaries require active Automation ownership')
+                flat=[id for chunk in boundaries for id in chunk]
+                if not boundaries or any(not 1<=len(chunk)<=3 for chunk in boundaries) or len(flat)!=len(set(flat)) or set(flat)!={r['id'] for r in eligible}:
+                    raise ValueError('Stable batch boundaries must cover eligible line IDs exactly once')
+                by_id={r['id']:r for r in eligible};chunks=[[by_id[id] for id in chunk] for chunk in boundaries]
+            for chunk in chunks:
                 payload = [{"id": r["id"], "source": r["source"], "source_revision": r["source_revision"], "translation_revision": r["translation_revision"]} for r in chunk]
                 # Four neighbors on each side, at most eight reference lines and 4000 characters.
                 candidates = {r["id"]: r for x in chunk for r in rows[max(0, x["ordinal"]-4):x["ordinal"]+5]}

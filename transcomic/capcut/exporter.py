@@ -176,7 +176,7 @@ def assert_sources(pairs,cancel=None):
             if not media.unchanged():raise ValueError('Media đã thay đổi hoặc bị xóa: '+media.path)
 
 
-def write_project(scans,output,name,cancel=None,progress=None):
+def write_project(scans,output,name,cancel=None,progress=None,*,ownership=None,strict_target=False):
     pairs=freeze(scans);assert_sources(pairs,cancel)
     output=native_path(output,force=True).resolve()
     for scan in scans:
@@ -184,6 +184,7 @@ def write_project(scans,output,name,cancel=None,progress=None):
             if output.is_relative_to(native_path(source,force=True).resolve()):raise ValueError('Thư mục đầu ra không được nằm trong thư mục media gốc')
     output.mkdir(parents=True,exist_ok=True)
     name=safe_name(name);target=output/name;counter=2
+    if strict_target and target.exists():raise FileExistsError('Project đích đã tồn tại; không thay đổi kế hoạch đã chốt.')
     while target.exists():target=output/f'{name}_{counter}';counter+=1
     content,meta,structure,id_map,manifest=build_content(pairs,target.name,cancel)
     validate_content(content,manifest)
@@ -230,6 +231,8 @@ def write_project(scans,output,name,cancel=None,progress=None):
             for filename in ('template.tmp','template-2.tmp'):
                 write(base+filename,json.dumps(content,ensure_ascii=False,separators=(',',':')).encode('utf8'))
         write('transcomic_mapping.json',json.dumps({'template':'MAU','audio_gap_sec':0.0,'pairs':manifest,'animation_resources':effect_files},ensure_ascii=False,indent=2).encode('utf8'))
+        if ownership is not None:
+            write('transcomic-automation.json',json.dumps(ownership,ensure_ascii=False,sort_keys=True).encode('utf8'))
         from .cover import write_cover
         write_cover(stage,timeline,pairs[0].images[0].path,cancel)
         validate_content(json.loads((stage/'draft_content.json').read_text(encoding='utf8')),manifest)

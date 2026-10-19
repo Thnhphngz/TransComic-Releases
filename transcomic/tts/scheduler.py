@@ -26,6 +26,8 @@ class Scheduler:
     def busy(self):return bool(self.thread and self.thread.is_alive())
 
     def start(self,run,documents=None):
+        repo=getattr(self.store,'automation',None)
+        if repo and (repo.active() or repo.tts_owner(run)):raise ValueError('Tài nguyên/lượt TTS đang được Automation quản lý.')
         with self.lock:
             if self.busy:raise RuntimeError('Đang chạy một lượt TTS')
             if self.store.run(run)['state'] in ('draft','cancelled','completed'):raise ValueError('Lượt chưa sẵn sàng hoặc đã kết thúc; tạo lượt mới')

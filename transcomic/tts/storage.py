@@ -99,7 +99,10 @@ class TtsStore:
             for doc in self.docs(run):self._split(doc['id'],doc['text'],mode)
             self.db.execute('UPDATE documents SET mode=? WHERE run_id=?',(mode,run))
 
-    def edit(self,id,text):
+    def edit(self,id,text,*,automation_owner=None):
+        repo=getattr(self,'automation',None)
+        owner=repo.tts_owner(self.doc(self.segment(id)['document_id'])['run_id']) if repo else None
+        if owner and owner['workset_id']!=automation_owner:raise ValueError('Sửa bản dịch qua tab Dịch để đồng bộ Automation.')
         if not text.strip() or not any(c.isalnum() for c in text):raise ValueError('Đoạn cần có nội dung đọc được')
         with self.transaction():
             if self.run(self.doc(self.segment(id)['document_id'])['run_id'])['state']=='cancelled':raise ValueError('Lượt đã hủy; tạo lượt mới để sửa văn bản')
@@ -150,6 +153,8 @@ class TtsStore:
             self.execute('UPDATE runs SET state=?,error=?,ended=? WHERE id=?',(state,error,time.time() if state in (*TERMINAL,'partial','stopped') else None,run))
 
     def cancel_run(self,run):
+        repo=getattr(self,'automation',None)
+        if repo and repo.tts_owner(run):raise ValueError('Dùng Dừng an toàn trong Automation; không hủy riêng checkpoint TTS.')
         with self.transaction():
             if self.run(run)['state'] in TERMINAL:return
             self.execute("UPDATE runs SET state='cancelled',ended=?,error='' WHERE id=?",(time.time(),run))
@@ -162,6 +167,8 @@ class TtsStore:
         return self.rows("SELECT d.id,d.name,d.started,d.ended,COUNT(s.id) total,SUM(s.state='success') success,SUM(s.state='running') busy,SUM(s.state='pending') pending,SUM(s.state IN ('error','unknown')) errors FROM documents d LEFT JOIN segments s ON s.document_id=d.id AND s.skip=0 WHERE d.run_id=? GROUP BY d.id ORDER BY d.position",(run,))
 
     def delete_history(self,ids):
+        repo=getattr(self,'automation',None)
+        if repo and any(repo.tts_owner(id) for id in ids):raise ValueError('Lượt TTS thuộc Automation; quản lý metadata trong bộ công việc.')
         with self.transaction():
             for id in ids:
                 if self.run(id)['state'] in ('running','pausing','stopping'):raise ValueError('Dừng tác vụ trước khi xóa lịch sử')

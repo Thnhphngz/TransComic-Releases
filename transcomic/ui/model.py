@@ -135,6 +135,9 @@ class LineModel(QAbstractTableModel):
             return Qt.NoItemFlags
         if index.column() == CHECK_COLUMN:
             return Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
+        repo=getattr(self.store,'automation',None)
+        owner=repo.line_owner(self.rows[index.row()]['id']) if repo else None
+        if owner and owner['state'] in ('running','stopping'):return super().flags(index)
         return super().flags(index) | Qt.ItemIsEditable
 
     def setData(self, index, value, role=Qt.EditRole):

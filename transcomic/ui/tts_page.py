@@ -9,7 +9,7 @@ from datetime import datetime
 from uuid import uuid4
 from PySide6.QtCore import Qt,Signal,QTimer,QUrl,QEvent
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QLabel,QTableView,QHeaderView,QAbstractItemView,QFileDialog,QMessageBox,QInputDialog,QDialog,QDialogButtonBox,QPlainTextEdit,QProgressBar,QLineEdit,QTabWidget,QTabBar,QSplitter,QDoubleSpinBox,QSpinBox,QScrollArea,QSizePolicy)
+from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QLabel,QTableView,QHeaderView,QAbstractItemView,QFileDialog,QMessageBox,QInputDialog,QDialog,QDialogButtonBox,QPlainTextEdit,QProgressBar,QLineEdit,QTabWidget,QTabBar,QSplitter,QDoubleSpinBox,QSpinBox,QScrollArea,QSizePolicy,QFrame)
 from .controls import QComboBox
 from .glass import GlassButton as QPushButton
 from .tts_models import DocumentModel,SegmentModel,AudioModel,ActionDelegate,STATES,TtsTable,CenterCheckDelegate
@@ -30,8 +30,8 @@ class TtsPage(QWidget):
     task_done=Signal(object)
     download_progress=Signal(int,int,str)
 
-    def __init__(self,data_directory,parent=None):
-        super().__init__(parent);self.directory=Path(data_directory)/'TTS';self.store=TtsStore(self.directory/'tts.sqlite3')
+    def __init__(self,data_directory,parent=None,*,store=None):
+        super().__init__(parent);self.directory=Path(data_directory)/'TTS';self.owns_store=store is None;self.store=store or TtsStore(self.directory/'tts.sqlite3')
         self.log=logger(self.directory/'Logs');self.manager=ModelManager(self.directory/'Models');self.tasks=[];self.cancel=threading.Event()
         self.scheduler=Scheduler(self.store,self.manager,lambda k,v:self.event.emit(k,v),before_finalize=self.release_player)
         from ..tts.acceleration import AccelerationPacks,packaged_descriptor
@@ -57,9 +57,12 @@ class TtsPage(QWidget):
         self.tabs.tabBar().hide();self.tab_bar.setTabEnabled(2,False);self.tab_bar.currentChanged.connect(self.tabs.setCurrentIndex);self.tabs.currentChanged.connect(self.tab_changed)
         self.tab_grid.addWidget(self.tab_bar,0,0);self.tab_grid.addWidget(self.split_controls,0,1,Qt.AlignRight);self.tab_grid.setColumnStretch(1,1)
         self.content_grid=QGridLayout();self.content_grid.setContentsMargins(0,0,0,0);left.addLayout(self.content_grid,1);self.content_grid.addWidget(self.tabs,0,0)
+        self.automation_context=QFrame();self.automation_context.setObjectName('card');context=QVBoxLayout(self.automation_context);context.setContentsMargins(28,28,28,28);context.addStretch()
+        heading=QLabel('Kokoro đang được Automation quản lý');heading.setObjectName('section');heading.setWordWrap(True);context.addWidget(heading)
+        self.automation_context_text=QLabel();self.automation_context_text.setWordWrap(True);context.addWidget(self.automation_context_text);context.addStretch();self.content_grid.addWidget(self.automation_context,0,0);self.automation_context.hide()
         self.tabs.setTabEnabled(2,False);self.build_files();self.build_input();self.build_details();self.build_history();self.content_grid.addWidget(self.player,0,0,Qt.AlignBottom|Qt.AlignHCenter)
         self.splitter.addWidget(self.workspace);self.splitter.addWidget(self.history_panel);self.splitter.setChildrenCollapsible(False);self.splitter.setStretchFactor(0,1);self.splitter.setStretchFactor(1,0);self.splitter.splitterMoved.connect(self.save_history_width)
-        actions=QHBoxLayout();left.addLayout(actions);self.start_button=self.button(actions,'Bắt đầu',self.start);self.pause_button=self.button(actions,'Tạm dừng',self.pause);self.stop_button=self.button(actions,'Dừng',self.stop)
+        self.action_strip=QWidget();actions=QHBoxLayout(self.action_strip);actions.setContentsMargins(0,0,0,0);left.addWidget(self.action_strip);self.start_button=self.button(actions,'Bắt đầu',self.start);self.pause_button=self.button(actions,'Tạm dừng',self.pause);self.stop_button=self.button(actions,'Dừng',self.stop)
         self.progress_bar=QProgressBar();self.progress_bar.setMinimumWidth(60);actions.addWidget(self.progress_bar,1)
         self.notice=QLabel(self);self.notice.hide()  # compatibility text, no status strip
         from .tts_errors import ErrorDialog
@@ -73,7 +76,9 @@ class TtsPage(QWidget):
     def show_notice(self,text):
         self.notice.setText(str(text));self.runtime_label.setToolTip(str(text))
         if hasattr(self,'asset_status'):self.asset_status.setText(str(text))
-    def is_busy(self):return self.scheduler.busy or any(t.is_alive() for t in self.tasks)
+    def is_busy(self):
+        controller=getattr(getattr(self.store,'automation',None),'controller',None)
+        return self.scheduler.busy or any(t.is_alive() for t in self.tasks) or bool(controller and controller.busy)
     def background(self,work,done=lambda result:None):
         def task():
             try:value=(True,work())
@@ -106,7 +111,8 @@ class TtsPage(QWidget):
     def shutdown(self):
         if self.is_busy():raise RuntimeError('Đang dừng TTS an toàn')
         self._shutdown=True;self.input_timer.stop();self.history_panel.filter_timer.stop()
-        self.update_timer.stop();self.history_panel.presence_timer.stop();self.stop_playback();self.store.close()
+        self.update_timer.stop();self.history_panel.presence_timer.stop();self.stop_playback()
+        if self.owns_store:self.store.close()
         for handler in list(self.log.handlers):handler.close();self.log.removeHandler(handler)
 
     def build_controls(self):
@@ -156,6 +162,7 @@ class TtsPage(QWidget):
     def build_files(self):
         layout=QVBoxLayout(self.files_page);layout.setContentsMargins(6,6,6,6);row=QHBoxLayout();layout.addLayout(row)
         self.button(row,'Thêm file',self.pick_files);self.button(row,'Nhập thư mục',self.pick_folder);self.button(row,'Xóa file đã chọn',self.remove_files);self.button(row,'Xóa toàn bộ',self.clear_all);row.addStretch()
+        self.manual_context_note=QLabel('Bản nháp TTS thủ công đã lưu · Các job Automation nằm trong Lịch sử.');self.manual_context_note.setObjectName('muted');self.manual_context_note.setWordWrap(True);self.manual_context_note.hide();layout.addWidget(self.manual_context_note)
         self.file_totals=QLabel('Chưa có tài liệu · Thả TXT / DOCX trực tiếp vào bảng');self.file_totals.setWordWrap(True);layout.addWidget(self.file_totals)
         self.document_model=DocumentModel(self.store,self);self.file_table=self.table_view(self.document_model);layout.addWidget(self.file_table,1);self.file_table.horizontalHeader().setSectionResizeMode(1,QHeaderView.Stretch)
         self.file_table.setColumnWidth(0,36)
@@ -385,6 +392,8 @@ class TtsPage(QWidget):
         return (self.input_name.text().strip(),self.input_text.toPlainText(),(self.language.currentData(),self.voice.currentText(),self.speed.value(),self.variant.currentData(),self.format.currentText().lower(),int(self.bitrate.currentText()),self.split.currentData(),self.parallel_width.currentData()))
 
     def start(self,resume=False):
+        repo=getattr(self.store,'automation',None)
+        if repo and (repo.active() or repo.tts_owner(self.run_id)):raise ValueError('Kokoro/lượt này thuộc Automation; dùng Dừng an toàn hoặc Tiếp tục trong bộ công việc.')
         if self.is_busy():raise ValueError('Chờ tác vụ hiện tại hoàn tất hoặc dừng an toàn')
         if not self.runtime_ready:self.show_notice('Kokoro chưa sẵn sàng. Mở Cài đặt để kiểm tra runtime và model.');self.open_settings();return
         from ..tts.storage import RECOVERABLE
@@ -432,6 +441,8 @@ class TtsPage(QWidget):
         else:self.store.cancel_run(run)
         self.show_notice('Đã hủy lượt. Audio hoàn thành được giữ; tạo lượt mới để chạy lại.');self.refresh_files();self.load_history()
     def retry_ids(self,ids):
+        repo=getattr(self.store,'automation',None)
+        if repo and any(repo.tts_owner(self.store.doc(self.store.segment(id)['document_id'])['run_id']) for id in ids):raise ValueError('Dùng Tiếp tục trong Automation để giữ checkpoint/mapping.')
         if self.is_busy():raise ValueError('Dừng tác vụ trước khi tạo lại')
         if not ids:return
         if QMessageBox.question(self,'Tạo lại đoạn',f'Tạo lại {len(ids)} đoạn? Chỉ thay audio cũ sau khi bản mới được xác minh.')!=QMessageBox.Yes:return
@@ -522,6 +533,7 @@ class TtsPage(QWidget):
         self.refresh()
     def refresh(self):
         if not hasattr(self,'start_button'):return
+        self.sync_automation_context()
         if any(t.is_alive() for t in self.tasks):
             self.start_button.setEnabled(False)
             return
@@ -535,8 +547,27 @@ class TtsPage(QWidget):
         label='Đang hủy' if running and self.scheduler.stop_requested else 'Đang tạm dừng' if running and self.scheduler.pause_requested else 'Đang tạo audio' if running else ('Tiếp tục' if continue_input else 'Bắt đầu') if input_mode else 'Hoàn tất' if state=='completed' else 'Bắt đầu' if state in ('draft','cancelled') else 'Tiếp tục'
         self.start_button.setText(label);valid=bool(segments(self.input_text.toPlainText(),self.split.currentData()) and self.input_name.text().strip()) if input_mode else bool(total)
         self.start_button.setEnabled(valid and not busy and self.runtime_ready and (input_mode or state!='completed'));self.start_button.setToolTip('Kokoro chưa sẵn sàng — mở Cài đặt' if not self.runtime_ready else label)
+        repo=getattr(self.store,'automation',None)
+        if repo and (repo.active() or repo.tts_owner(self.run_id)):
+            self.start_button.setEnabled(False);self.start_button.setToolTip('Automation quản lý Kokoro/lượt này; dùng Dừng an toàn hoặc Tiếp tục trong bộ công việc.')
+            self.model.editable=False
         self.pause_button.setEnabled(running and not self.scheduler.stop_requested and not self.scheduler.pause_requested);self.stop_button.setEnabled((running and not self.scheduler.stop_requested) or (not running and state not in TERMINAL and bool(total)))
         self.progress_bar.setValue(round(100*success/max(1,total)));self.progress_bar.setAlignment(Qt.AlignCenter);self.progress_bar.setFormat(f'{success}/{total} · {len(self.scheduler.active)} đang chạy · %p%');self.progress_bar.setToolTip(f'{success}/{total} audio · Đang xử lý: {len(self.scheduler.active)} đoạn')
+    def sync_automation_context(self):
+        """Keep the saved manual draft, but never present it as Automation's batch."""
+        repo=getattr(self.store,'automation',None);active=repo.active() if repo else None
+        contextual=bool(active);previous=getattr(self,'automation_context_active',False);self.automation_context_active=contextual
+        has_automation=bool(repo and repo.rows('SELECT 1 FROM automation_worksets WHERE started=1 LIMIT 1'))
+        self.manual_context_note.setVisible(not contextual and has_automation and self.store.run(self.run_id)['state']=='draft' and bool(self.store.docs(self.run_id)))
+        self.automation_context.setVisible(contextual)
+        for widget in (self.controls,self.tab_strip,self.tabs,self.action_strip):widget.setVisible(not contextual)
+        self.settings_button.setEnabled(not contextual)
+        self.history_panel.clear_button.setEnabled(not contextual and not self.is_busy())
+        if contextual:
+            work=repo.workset(active);self.automation_context_text.setText(f'Bộ công việc: {work["name"]}\nKokoro: 1 luồng · 1 nhóm mỗi lượt\n\nCác job Automation hiển thị trong Lịch sử bên phải, có nhãn Automation. Xem câu và nghe audio tại đó.\n\nBản nháp thủ công được giữ riêng và sẽ hiển thị lại sau khi Automation dừng an toàn hoặc kết thúc. Điều khiển tác vụ tại tab Tự động hóa.')
+            self.runtime_label.setText('Kokoro · Automation · 1 luồng')
+        elif previous:
+            self.runtime_label.setText('Kokoro · bản nháp thủ công');self.runtime_label.setToolTip('Danh sách thủ công được giữ nguyên; các job Automation vẫn nằm trong Lịch sử.')
     def on_event(self,kind,value):
         if getattr(self,'_shutdown',False):
             if kind=='release_player':value.set()

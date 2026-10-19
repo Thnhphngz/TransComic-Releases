@@ -115,11 +115,13 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         self.navigation_group = QButtonGroup(self)
         self.navigation_group.setExclusive(True)
         self.navigation_scroll=QScrollArea();self.navigation_scroll.setWidgetResizable(True)
+        self.navigation_scroll.setObjectName('navigationScroll');self.navigation_scroll.viewport().setObjectName('navigationViewport')
         self.navigation_scroll.setFrameShape(QFrame.NoFrame)
         self.navigation_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.navigation_scroll.setToolTip('Cuộn để xem các chức năng khi cửa sổ thấp')
-        nav_body=QWidget();nav_items=QVBoxLayout(nav_body);nav_items.setContentsMargins(0,0,0,0);nav_items.setSpacing(9)
+        nav_body=QWidget();nav_body.setObjectName('navigationBody');nav_items=QVBoxLayout(nav_body);nav_items.setContentsMargins(0,0,0,0);nav_items.setSpacing(9)
         self.navigation_scroll.setWidget(nav_body);nav.addWidget(self.navigation_scroll,1)
+        for widget in (self.navigation_scroll,self.navigation_scroll.viewport(),nav_body):widget.setAutoFillBackground(False)
         for title, index in self.navigation_items():
             control = button(title)
             control.setCheckable(True); self.navigation_group.addButton(control,index)
@@ -183,6 +185,32 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         settings_scroll.setFrameShape(QScrollArea.NoFrame);settings_scroll.setWidget(settings_page)
         self.pages.insertWidget(3,settings_scroll)
         self.pages.setCurrentIndex(0)
+        from ..automation.repository import Repository
+        from ..automation.services import Services
+        from ..automation.controller import Controller
+        from .automation_page import AutomationPage
+        self.automation_repo=Repository(self.store)
+        self.automation_services=Services(self.automation_repo)
+        self.automation_controller=Controller(self.automation_repo,self.automation_services,
+            changed=lambda:self.automation_page.refresh_requested.emit(),
+            finished=lambda id,state:self.automation_page.completion.emit(id,state),
+            resource_check=self.automation_resource_check,editor_check=self.automation_editor_check)
+        self.automation_page=AutomationPage(self,self.automation_repo,self.automation_services,self.automation_controller)
+        self.automation_services.kokoro.before_finalize=self.automation_page.release_audio
+        self.pages.addWidget(self.automation_page)
+
+    def automation_resource_check(self):
+        if self.scheduler and self.scheduler._thread and self.scheduler._thread.is_alive():raise ValueError('Chờ tác vụ Dịch thủ công dừng an toàn.')
+        tts=getattr(self,'tts_page',None)
+        if tts and tts.is_busy():raise ValueError('Kokoro đang có tác vụ; chờ dừng an toàn.')
+        capcut=getattr(self,'capcut_page',None)
+        if capcut and capcut.is_busy():raise ValueError('CapCut đang có tác vụ; chờ hoàn tất.')
+
+    def automation_editor_check(self):
+        delegate=self.table.itemDelegate()
+        if getattr(delegate,'active_editor',None) is not None:raise ValueError('Lưu hoặc hủy nội dung đang sửa trong tab Dịch trước khi tiếp tục.')
+        if self.automation_page.preview.state()==QAbstractItemView.EditingState:raise ValueError('Lưu hoặc hủy tên part đang sửa trước khi tiếp tục.')
+        if any(t.is_alive() for t in getattr(self,'background_threads',[])):raise ValueError('Chờ tác vụ nhập/kiểm tra hiện tại hoàn tất.')
 
     def toggle_sidebar(self):
         compact = self.sidebar.width() > 100
@@ -1253,7 +1281,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
     def open_tts_page(self,index):
         if index==7 and not hasattr(self,'tts_page'):
             from .tts_page import TtsPage
-            self.tts_page=TtsPage(self.store.path.parent,self)
+            self.tts_page=TtsPage(self.store.path.parent,self,store=self.automation_services.tts_store if hasattr(self,'automation_services') else None)
             self.tts_layout.addWidget(self.tts_page)
 
     def open_capcut_page(self,index):
@@ -1283,7 +1311,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             event.accept()
             return
         tts=getattr(self,'tts_page',None)
-        running = bool(self.scheduler and self.scheduler._thread and self.scheduler._thread.is_alive()) or any(t.is_alive() for t in getattr(self, 'background_threads', [])) or bool(tts and tts.is_busy())
+        running = bool(self.scheduler and self.scheduler._thread and self.scheduler._thread.is_alive()) or any(t.is_alive() for t in getattr(self, 'background_threads', [])) or bool(tts and tts.is_busy()) or bool(getattr(self,'automation_controller',None) and self.automation_controller.busy)
         if self._exit_pending and not self._exit_authorized:
             event.ignore()
             return
@@ -1306,6 +1334,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
                     if timer: timer.stop()
                 self._exit_deadline = time.monotonic()+self.shutdown_grace_seconds
                 if self.scheduler: self.scheduler.stop()
+                if hasattr(self,'automation_controller') and self.automation_controller.busy:self.automation_controller.stop()
                 if tts:tts.request_stop()
                 if hasattr(self,'capcut_page'):self.capcut_page.request_stop()
                 self.notice.setText("Đang thoát an toàn: chờ request đang chạy lưu kết quả…")
@@ -1331,6 +1360,8 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         if hasattr(self,'kira_monitor_dialog'):self.kira_monitor_dialog.close()
         if tts:tts.shutdown()
         if hasattr(self,'capcut_page'):self.capcut_page.shutdown()
+        if hasattr(self,'automation_page'):self.automation_page.timer.stop()
+        if hasattr(self,'automation_services'):self.automation_services.close()
         self.store.close()
         self._closed = True
         if update_exit:
@@ -1372,6 +1403,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             self.exit_timer.stop()
 
     def _finish_safe_exit(self):
+        if getattr(self,'automation_controller',None) and self.automation_controller.busy:return
         tts=getattr(self,'tts_page',None)
         if tts and tts.is_busy():return
         # A zero-duration Windows yield may immediately return to Qt's event pump.
