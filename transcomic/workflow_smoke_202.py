@@ -3,7 +3,7 @@ from pathlib import Path
 import time
 from PySide6.QtCore import Qt,QMimeData,QUrl,QPoint,QPointF,QTimer
 from PySide6.QtGui import QDragEnterEvent,QDropEvent
-from PySide6.QtWidgets import QApplication,QComboBox,QInputDialog
+from PySide6.QtWidgets import QApplication,QComboBox,QInputDialog,QDialogButtonBox
 from PySide6.QtTest import QTest
 
 
@@ -39,27 +39,61 @@ def run(window,root):
         assert len(dialog.values())==10
         dialog.grab().save(str(root/f'capcut-pairs-202-{dark}.png'))
         dialog.accept();assert len(dialog.result_groups)==10;dialog.deleteLater()
+        popup_timings=[]
         for choice in range(3):
-            faults=[]
+            faults=[];deadline=[0.];input_methods=[]
+            def fail(exc):
+                modal=app.activeModalWidget()
+                faults.append(dict(exception=type(exc).__name__,message=str(exc),choice=choice))
+                if modal:modal.reject()
+            def choose_visible():
+                # Windows animates the native popup. Return to the modal event
+                # loop between polls instead of asserting after a fixed 40 ms.
+                modal=app.activeModalWidget()
+                try:
+                    assert isinstance(modal,ExportInputDialog)
+                    combo=modal.findChild(QComboBox);view=combo.view();popup=view.window()
+                    if not (popup.isVisible() and view.isVisible()):
+                        assert time.monotonic()<deadline[0],'Export popup did not become visible'
+                        QTimer.singleShot(20,choose_visible);return
+                    assert isinstance(combo.itemDelegate(),GlassComboDelegate)
+                    assert popup.screen().availableGeometry().contains(popup.frameGeometry())
+                    assert combo.count()==3 and [combo.itemText(i) for i in range(3)]==[s for s,_ in MODES]
+                    rect=view.visualRect(combo.model().index(choice,0))
+                    assert rect.height()>20 and view.viewport().rect().contains(rect.center())
+                    popup_timings.append(dict(choice=choice,visible_ms=round((time.monotonic()-deadline[0]+4)*1000)))
+                    popup.grab().save(str(root/f'export-202-{dark}-{choice}.png'))
+                    from .release_ui_probe import click
+                    input_methods.append(click(view.viewport(),rect.center()))
+                    QTimer.singleShot(40,confirm_selection)
+                except BaseException as exc:fail(exc)
+            def confirm_selection():
+                modal=app.activeModalWidget()
+                try:
+                    assert isinstance(modal,ExportInputDialog)
+                    combo=modal.findChild(QComboBox)
+                    if combo.view().window().isVisible() or combo.currentIndex()!=choice:
+                        assert time.monotonic()<deadline[0],'Native popup click did not select the requested mode'
+                        QTimer.singleShot(20,confirm_selection);return
+                    from .release_ui_probe import click
+                    input_methods.append(click(modal.findChild(QDialogButtonBox).button(QDialogButtonBox.Ok)))
+                    QTimer.singleShot(300,lambda:fail(AssertionError('Native OK click did not accept export dialog')) if app.activeModalWidget() is modal else None)
+                except BaseException as exc:fail(exc)
             def pick():
                 modal=app.activeModalWidget()
                 try:
-                    combo=modal.findChild(QComboBox);combo.showPopup();QTest.qWait(40)
-                    assert isinstance(combo.itemDelegate(),GlassComboDelegate)
-                    view=combo.view();popup=view.window();assert popup.isVisible()
-                    assert popup.screen().availableGeometry().contains(popup.frameGeometry())
-                    QTest.mouseMove(view.viewport(),view.visualRect(combo.model().index(choice,0)).center());QTest.qWait(20)
-                    popup.grab().save(str(root/f'export-202-{dark}-{choice}.png'))
-                    QTest.mouseClick(view.viewport(),Qt.LeftButton,pos=view.visualRect(combo.model().index(choice,0)).center())
-                    assert combo.currentIndex()==choice;modal.accept()
-                except BaseException as exc:
-                    faults.append(dict(exception=type(exc).__name__,message=str(exc),choice=choice,
-                                       popup_visible=popup.isVisible() if 'popup' in locals() else None))
-                    if modal:modal.reject()
-            QTimer.singleShot(80,pick)
+                    assert isinstance(modal,ExportInputDialog)
+                    combo=modal.findChild(QComboBox)
+                    from .release_ui_probe import click
+                    deadline[0]=time.monotonic()+4
+                    input_methods.append(click(combo,QPoint(combo.width()-14,combo.height()//2)))
+                    QTimer.singleShot(20,choose_visible)
+                except BaseException as exc:fail(exc)
+            QTimer.singleShot(200,pick)
             value,ok=ExportInputDialog.getItem(window,'Phương thức xuất','Chọn vị trí xuất:',[s for s,_ in MODES],1,False)
             assert not faults and ok and value==MODES[choice][0],faults
-        records.append(dict(dark=dark,manual_pairs=10,spare_excluded=True,popup_choices=3,focus_preserved=True))
+        records.append(dict(dark=dark,manual_pairs=10,spare_excluded=True,popup_choices=3,focus_preserved=True,
+                            input_method=sorted(set(input_methods)),popup_timings=popup_timings))
     window.pages.setCurrentIndex(9);app.processEvents()
     page=window.automation_page;repo=window.automation_repo
     original={w['id']:repo.workset(w['id'])['config'] for w in repo.workset_summaries()}

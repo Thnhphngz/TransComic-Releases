@@ -144,13 +144,25 @@ def run_automation(window,root,wait):
         assert all(digest(root/p)==h for p,h in originals.items())
         # Seed an interrupted trial checkpoint; the next EXE launch must recover,
         # preserve manifests and remain idle. Never reuse completed source group.
-        trial=repo.create('Interrupted trial fixture',cfg);trial_gid=repo.add(trial,[source])[0]
-        repo.update_group(trial_gid,images=[{'fixture':1}],slots=[line['id']],state='translated')
+        trial=repo.create('Interrupted trial fixture',cfg)
+        pending_source=fixtures/'Pending.txt';pending_source.write_text('Synthetic pending source',encoding='utf8')
+        translated_source=fixtures/'Translated.txt';translated_source.write_text('Synthetic translated source',encoding='utf8')
+        trial_gid,translated_gid=repo.add(trial,[pending_source,translated_source])
+        for target in (trial_gid,translated_gid):
+            owned=window.store.units(repo.group(target)['document_id'])
+            if target==translated_gid:
+                for r in owned:window.store.edit_line(r['id'],'translation','The synthetic translation is complete')
+            # Seed the checkpoint at the translation-finished boundary, after
+            # edits invalidate drafts. The pending group deliberately has an
+            # old translated label, so reconciliation must detect missing text.
+            repo.update_group(target,images=repo.group(gid)['data']['images'],slots=[r['id'] for r in owned],state='translated',error='')
         checkpoint={'fixture':'durable-trial-checkpoint','manual_order':True}
         repo.execute("UPDATE automation_worksets SET state='running',started=1,owner_pid=2147483647,owner_started=1,checkpoint=? WHERE id=?",(json.dumps(checkpoint),trial))
         preserved={str(p.relative_to(root)):digest(p) for p in fixtures.rglob('*') if p.is_file()}
         proof={'completed_id':id,'group_id':gid,'completed_checkpoint':repo.workset(id)['checkpoint'],
                'trial_id':trial,'trial_group_id':trial_gid,'trial_checkpoint':checkpoint,'trial_data':repo.group(trial_gid)['data'],
+               'translated_group_id':translated_gid,'translated_data':repo.group(translated_gid)['data'],
+               'trial_lines':{g:window.store.units(repo.group(g)['document_id']) for g in (trial_gid,translated_gid)},
                'files':preserved,'attempts':rows(window.store.db,'request_attempts')}
         (root/'reopen-expected.json').write_text(json.dumps(proof),encoding='utf8')
         window.grab().save(str(root/'automation-completed.png'))
@@ -170,14 +182,49 @@ def verify_reopen(window,root):
     assert repo.workset(expected['completed_id'])['checkpoint']==expected['completed_checkpoint']
     assert repo.workset(expected['trial_id'])['state']=='interrupted'
     assert repo.workset(expected['trial_id'])['checkpoint']==expected['trial_checkpoint']
-    actual=repo.group(expected['trial_group_id'])['data'];saved=dict(expected['trial_data'])
-    # Opening now reconciles the derived label, not the durable checkpoint,
-    # source mapping or artifact metadata. This trial has untranslated rows.
-    assert actual['state']=='waiting'
-    saved['state']='waiting';assert actual==saved
+    # Restart preserves committed metadata. Reconciliation is deliberately
+    # deferred until validation/start; no eager label change is promised.
+    groups=((expected['trial_group_id'],expected['trial_data'],'waiting'),
+            (expected['translated_group_id'],expected['translated_data'],'waiting_tts'))
+    from .documents import translatable
+    from .status import usable
+    for gid,saved,state in groups:
+        actual=repo.group(gid)
+        assert actual['data']==saved
+        current=window.store.units(actual['document_id'])
+        assert current==expected['trial_lines'][gid]
+        assert all(window.store.line(i)['document_id']==actual['document_id'] for i in saved['slots'])
+        assert any(not usable(r) for r in current if translatable(r['source']))==(state=='waiting')
+    window.automation_controller.reconcile_stages(expected['trial_id'])
+    for gid,saved,state in groups:
+        assert repo.group(gid)['data']==dict(saved,state=state),repr({'expected_state':state,'actual':repo.group(gid)['data']})
+        assert window.store.units(repo.group(gid)['document_id'])==expected['trial_lines'][gid]
+    assert repo.group(expected['group_id'])['data']['state']=='completed'
+    assert repo.workset(expected['trial_id'])['checkpoint']==expected['trial_checkpoint']
+    from PySide6.QtWidgets import QApplication
+    from .ui.automation_page import STATES
+    page=window.automation_page;window.pages.setCurrentIndex(9)
+    ui_themes=[]
+    for dark in (False,True):
+        if window.dark!=dark:window.toggle_theme()
+        page.load_worksets(expected['trial_id']);page.refresh()
+        assert page.snapshots.wait_for_idle()
+        QApplication.processEvents()
+        by_id={r['id']:n for n,r in enumerate(page.model.rows)}
+        for gid,saved,state in groups:
+            assert page.model.rows[by_id[gid]]['data']['state']==state
+            assert page.model.data(page.model.index(by_id[gid],5))==STATES[state]
+        assert window.grab().save(str(root/('reopen-dark.png' if dark else 'reopen-light.png')))
+        ui_themes.append('dark' if dark else 'light')
+    assert not window.automation_controller.busy and repo.active() is None
+    assert repo.workset(expected['trial_id'])['checkpoint']==expected['trial_checkpoint']
+    assert repo.workset(expected['completed_id'])['checkpoint']==expected['completed_checkpoint']
     assert rows(window.store.db,'request_attempts')==expected['attempts']
     assert all(digest(root/name)==value for name,value in expected['files'].items())
     proof={'passed':True,'frozen':bool(getattr(__import__('sys'),'frozen',False)),
            'completed_and_interrupted_trial_checkpoints_preserved':True,'source_wav_projects_reports_unchanged':True,
+           'committed_metadata_preserved_before_reconciliation':True,'pending_reconciled_to_waiting':True,
+           'translated_reconciled_to_waiting_tts':True,'completed_not_downgraded':True,
+           'ui_themes':ui_themes,'dpr':window.devicePixelRatioF(),'ui_labels_match_committed_states':True,
            'autostart':False,'new_translation_attempts':0}
     (root/'reopen-report.json').write_text(json.dumps(proof,indent=2),encoding='utf8')
