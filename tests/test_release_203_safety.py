@@ -62,9 +62,11 @@ def test_backup_rejects_foreign_key_damage(tmp_path):
     assert not (tmp_path/'copy.sqlite3').exists()
 
 
-def test_frozen_probe(gui,tmp_path):
+@pytest.mark.parametrize('empty_keys',[False,True])
+def test_frozen_probe(gui,tmp_path,empty_keys):
     from transcomic.release_smoke_203 import verify_admission
     app,window,page,wid=gui
+    if empty_keys:window.store.db.execute('DELETE FROM kira_keys')
     result=verify_admission(window,tmp_path,lambda condition,seconds=8:wait(app,condition,seconds))
     assert result['kira']['completion_opens_next']=='nine of ten'
     assert result['deepseek']['completion_opens_next']=='one file'

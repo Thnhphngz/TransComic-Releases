@@ -123,7 +123,7 @@ def run_automation(window,root,wait):
     images=fixtures/'Images';images.mkdir()
     image=QImage(60,80,QImage.Format_RGB32);image.fill(QColor('#cf8844'));assert image.save(str(images/'0001.png'))
     originals={str(p.relative_to(root)):digest(p) for p in (source,images/'0001.png')}
-    output=fixtures/'Projects';output.mkdir();cfg=defaults(window.store);cfg.update(model='mock',device='CPU',output=str(output))
+    output=fixtures/'Projects';output.mkdir();cfg=defaults(window.store);cfg.update(provider='kira',model='mock',device='CPU',output=str(output))
     id=repo.create('Frozen release smoke',cfg);gid=repo.add(id,[source])[0];repo.pair_images(gid,images)
     if not window.store.kira_keys():window.store.add_kira_keys('release-synthetic-key')
     window.automation_page.load_worksets(id);window.pages.setCurrentIndex(9)

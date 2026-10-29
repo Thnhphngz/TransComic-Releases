@@ -43,6 +43,7 @@ def verify_admission(window,root,wait):
     from .deepseek import DeepSeekProvider,MODEL
     from .kira_pool import KiraPoolProvider
     repo=window.automation_repo;services=window.automation_services;controller=window.automation_controller
+    if not any(k['enabled'] for k in window.store.kira_keys()):window.store.add_kira_keys('release-admission-synthetic-key')
     prior=(services.translation,services.kokoro,services.preflight);results={}
     for provider in ('kira','deepseek'):
         # Keep fixture/report paths short even under pytest's unique run roots.

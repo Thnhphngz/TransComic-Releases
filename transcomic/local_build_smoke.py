@@ -172,6 +172,7 @@ def main():
                 assert window.navigation_group.checkedId()==page
             from .release_smoke_203 import verify_admission
             admission_203=verify_admission(window,root,wait)
+            (root/'admission-203.json').write_text(json.dumps(admission_203,indent=2),encoding='utf8')
             automation=run_automation(window,root,wait)
             report={'passed':bool(workflow.get('passed')),'frozen':bool(getattr(sys,'frozen',False)),'version':VERSION,'platform':app.platformName(),'dpr':window.devicePixelRatioF(),
                     'tts':tts,'capcut':capcut,'automation':automation,'migration':migration,'gateway_recovery':recovery,'workflow_202':workflow,'admission_203':admission_203,
