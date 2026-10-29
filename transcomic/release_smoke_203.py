@@ -6,6 +6,33 @@ from pathlib import Path
 import threading
 
 
+def cpu_probe(root):
+    """One short CPU-only inference in the already isolated frozen test mode."""
+    import os,sys
+    import psutil
+    from .version import VERSION
+    from .tts.models import ModelManager
+    from .tts.managed_runtime import ManagedRuntimes
+    from .tts.managed_engine import ManagedEngine
+    from .tts.audio import encode
+    from .capcut.media import audio_duration
+    if psutil.virtual_memory().available<1.75*2**30:raise RuntimeError('Insufficient RAM; model was not initialized')
+    cache=Path(os.environ['TRANSCOMIC_SMOKE_CPU_CACHE']).resolve()
+    assert cache.name.startswith('TransComic-distribution-cpu-')
+    assert json.loads((cache/'isolated-distribution.json').read_text())['backend']=='cpu'
+    models=ModelManager(cache/'TransComic/TTS/Models');assert models.ready('standard')
+    runtime=ManagedRuntimes(cache/'TransComic/TTS/Runtimes').active();assert runtime['backend']=='CPUExecutionProvider'
+    engine=ManagedEngine(models,dict(variant='standard',language='en-us',voice='af_heart',speed=1),runtime,width=1)
+    try:
+        engine.probe();blocks=list(engine.synthesize('Hello.', 'af_heart',1,'en-us'))
+        wav=encode(Path(root)/'cpu-probe.wav',iter(blocks),'wav')
+        mp3=encode(Path(root)/'cpu-probe.mp3',iter(blocks),'mp3')
+        duration=audio_duration(Path(root)/'cpu-probe.mp3');assert duration>0
+        return dict(passed=True,frozen=bool(getattr(sys,'frozen',False)),version=VERSION,backend=runtime['backend'],
+                    width=1,text='Hello.',wav=wav,mp3=mp3,mp3_duration_us=duration,network_requests=0)
+    finally:engine.close()
+
+
 def verify_admission(window,root,wait):
     import httpx
     import numpy as np

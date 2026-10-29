@@ -53,6 +53,12 @@ def main():
         return await original_async(client,*args,**kwargs)
     httpx.AsyncClient.send=guard_async
     app=QApplication(sys.argv);app.setApplicationName('TransComic');app.setAttribute(Qt.AA_DontUseNativeDialogs,True)
+    if os.environ.get('TRANSCOMIC_SMOKE_CPU_ONLY')=='1':
+        from .release_smoke_203 import cpu_probe
+        try:proof=cpu_probe(root);code=0
+        except Exception:proof=dict(passed=False,status='NOT_VERIFIED',error=traceback.format_exc());code=1
+        (root/'cpu-probe.json').write_text(json.dumps(proof,indent=2),encoding='utf8')
+        return code
     # This opt-in test never discovers/downloads a runtime or probes a GPU.
     from .ui.tts_page import TtsPage
     TtsPage.check_runtime=lambda self:None
@@ -156,14 +162,18 @@ def main():
             from .capcut.package_probe import run as probe_capcut
             capcut=probe_capcut(root)
             from .workflow_smoke_202 import run as workflow_202
-            workflow=workflow_202(window,root)
+            try:workflow=workflow_202(window,root)
+            except Exception:
+                # Keep the failed UI case visible, then collect independent
+                # migration/admission/audio/export evidence. Never mark it PASS.
+                workflow=dict(passed=False,error=traceback.format_exc())
             for page in (0,7,8,9,1,2,3):
                 window.pages.setCurrentIndex(page);QApplication.processEvents()
                 assert window.navigation_group.checkedId()==page
             from .release_smoke_203 import verify_admission
             admission_203=verify_admission(window,root,wait)
             automation=run_automation(window,root,wait)
-            report={'passed':True,'frozen':bool(getattr(sys,'frozen',False)),'version':VERSION,'platform':app.platformName(),'dpr':window.devicePixelRatioF(),
+            report={'passed':bool(workflow.get('passed')),'frozen':bool(getattr(sys,'frozen',False)),'version':VERSION,'platform':app.platformName(),'dpr':window.devicePixelRatioF(),
                     'tts':tts,'capcut':capcut,'automation':automation,'migration':migration,'gateway_recovery':recovery,'workflow_202':workflow,'admission_203':admission_203,
                     'txt_docx_fixture':True,'docx_export_units':2,'source_files_unchanged':original_hashes=={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in (text,word)},
                     'themes':['light','dark'],'visible_pages':[0,7,8,9,1,2,3],'workspace_preserved':True,'queue_clear':True,'search_replace_undo':True,

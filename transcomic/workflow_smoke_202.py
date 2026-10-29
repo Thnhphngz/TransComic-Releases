@@ -53,7 +53,8 @@ def run(window,root):
                     QTest.mouseClick(view.viewport(),Qt.LeftButton,pos=view.visualRect(combo.model().index(choice,0)).center())
                     assert combo.currentIndex()==choice;modal.accept()
                 except BaseException as exc:
-                    faults.append(type(exc).__name__)
+                    faults.append(dict(exception=type(exc).__name__,message=str(exc),choice=choice,
+                                       popup_visible=popup.isVisible() if 'popup' in locals() else None))
                     if modal:modal.reject()
             QTimer.singleShot(80,pick)
             value,ok=ExportInputDialog.getItem(window,'Phương thức xuất','Chọn vị trí xuất:',[s for s,_ in MODES],1,False)
