@@ -8,10 +8,15 @@ from .translation import Scheduler
 
 def fresh_retry_config(store, original):
     """A user-confirmed cycle keeps provider policy, never execution checkpoints."""
+    if original['provider']=='deepseek':
+        from .deepseek import settings
+        old=json.loads(original.get('config') or '{}')
+        return settings(store, original['model'],old.get('deepseek_batch_size',3))
     if original['provider']=='kira':
         # Resolve current settings and live credentials; do not carry depleted
         # counters, derived token budgets, main_drained or recovery_phase.
-        return {'kira_multi_key':True,'kira_recovery_version':3}
+        from .completion import authorize
+        return authorize('kira')
     old=json.loads(original.get('config') or '{}')
     config={k:old[k] for k in ('rpm','tpm','rpd','auto_retries','rate_wait_budget',
         'rate_cooldown_limit','rate_backoff_max','request_interval','targets','language_order') if k in old}

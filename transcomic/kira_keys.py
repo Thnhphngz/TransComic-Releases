@@ -10,38 +10,33 @@ STATES = {'READY', 'COOLDOWN', 'TEMPORARY_ERROR', 'QUOTA_EXHAUSTED', 'INVALID', 
 
 class KiraKeysMixin:
     def recover_kira_transient_statuses(self, *, legacy=False):
-        """Expire temporary health only; never re-enable disabled/auth/quota keys.
-
-        Legacy UNKNOWN_ERROR is repaired only with the last durable attempt's
-        matching key identity and a recognized transient failure, not a guess.
-        This never queues HTTP or changes job/batch/line state.
-        """
+        """Finite service health; preserve credential evidence and ciphertext."""
         import json,time
-        if not legacy:
-            with self.lock:
-                if not self.db.execute("SELECT 1 FROM kira_keys WHERE status IN ('COOLDOWN','TEMPORARY_ERROR') AND cooldown_until>0 AND cooldown_until<=? LIMIT 1",(time.time(),)).fetchone():return
+        now=time.time()
+        with self.lock:
+            candidates=[dict(r) for r in self.db.execute("SELECT id,status,cooldown_until FROM kira_keys WHERE status='UNKNOWN_ERROR' OR (status IN ('COOLDOWN','TEMPORARY_ERROR') AND cooldown_until<=?)",(now,))]
+            if not candidates:return
+            evidence={}
+            unknown={r['id'] for r in candidates if r['status']=='UNKNOWN_ERROR'}
+            if legacy and unknown:
+                for row in self.db.execute('SELECT diagnostics FROM request_attempts WHERE diagnostics IS NOT NULL ORDER BY rowid DESC'):
+                    try:d=json.loads(row[0])
+                    except (TypeError,ValueError):continue
+                    if not isinstance(d,dict):continue
+                    key=d.get('key_alias') or (d.get('monitor') or {}).get('key_id')
+                    if key in unknown and key not in evidence:evidence[key]=d
+                    if len(evidence)==len(unknown):break
         with self.transaction():
-            self.db.execute("UPDATE kira_keys SET status='READY',cooldown_until=0 WHERE status IN ('COOLDOWN','TEMPORARY_ERROR') AND cooldown_until>0 AND cooldown_until<=?",(time.time(),))
-            if not legacy:return
-            pending={r['id'] for r in self.db.execute("SELECT id FROM kira_keys WHERE status='UNKNOWN_ERROR'")}
-            if not pending:return
-            for row in self.db.execute('SELECT diagnostics FROM request_attempts WHERE diagnostics IS NOT NULL ORDER BY rowid DESC').fetchall():
-                try:d=json.loads(row[0])
-                except (ValueError,TypeError):continue
-                if not isinstance(d,dict):continue
-                monitor=d.get('monitor') or {}
-                key=d.get('key_alias') or (monitor.get('key_id') if isinstance(monitor,dict) else None)
-                if key not in pending:continue
-                pending.remove(key)
-                if d.get('failure_kind') in ('http_504','http_server_error','client_timeout','network_error','connect_error','connect_not_sent','http_timeout'):
-                    self.db.execute("UPDATE kira_keys SET status='READY',cooldown_until=0 WHERE id=?",(key,))
-                elif d.get('http_status')==402 and d.get('provider_error_code') in ('vnd_balance_exhausted','insufficient_quota','quota_exhausted','billing_hard_limit_reached'):
-                    self.kira_key_status(key,'QUOTA_EXHAUSTED',reason='quota_exhausted',model=d.get('model'))
-                elif d.get('failure_kind')=='rate_limit' and d.get('http_status')==429:
-                    self.db.execute("UPDATE kira_keys SET status='READY',cooldown_until=0 WHERE id=?",(key,))
-                elif d.get('failure_kind') in ('permission','model_or_request') and d.get('model'):
-                    self.kira_key_status(key,'PERMISSION_DENIED' if d['failure_kind']=='permission' else 'MODEL_UNAVAILABLE',reason=d['failure_kind'],model=d['model'])
-                if not pending:break
+            for row in candidates:
+                key=row['id'];d=evidence.get(key,{})
+                if row['status']=='UNKNOWN_ERROR' and d.get('failure_kind')=='authentication' and d.get('http_status')==401:
+                    self.kira_key_status(key,'INVALID',reason='authentication');continue
+                if row['status']=='UNKNOWN_ERROR' and d.get('http_status')==402 and d.get('provider_error_code') in ('vnd_balance_exhausted','insufficient_quota','quota_exhausted','billing_hard_limit_reached'):
+                    self.kira_key_status(key,'QUOTA_EXHAUSTED',reason='quota_exhausted',model=d.get('model'));continue
+                if row['status']=='UNKNOWN_ERROR' or row['cooldown_until']<=0:
+                    self.db.execute("UPDATE kira_keys SET status='TEMPORARY_ERROR',cooldown_until=? WHERE id=? AND (status='UNKNOWN_ERROR' OR (status IN ('COOLDOWN','TEMPORARY_ERROR') AND cooldown_until<=0))",(now+5,key))
+                else:self.db.execute("UPDATE kira_keys SET status='READY',cooldown_until=0 WHERE id=? AND status IN ('COOLDOWN','TEMPORARY_ERROR') AND cooldown_until<=?",(key,now))
+
     def kira_account_scope(self, key_id):
         # Stored declaration is preserved for compatibility. Only confirmed
         # declarations affect effective ownership; unknown keys stay isolated.
@@ -79,6 +74,8 @@ class KiraKeysMixin:
             for row in rows:
                 item = dict(row); blob = item.pop('encrypted'); item.pop('fingerprint')
                 if not item['enabled']:item['status']='DISABLED'
+                item['credential_state']=('EXPLICITLY_DISABLED_BY_USER' if not item['enabled'] else 'AUTH_INVALID' if item['status']=='INVALID' else 'QUOTA_EXHAUSTED' if item['status']=='QUOTA_EXHAUSTED' else 'AVAILABLE')
+                item['service_state']={'READY':'HEALTHY','COOLDOWN':'RATE_LIMITED','TEMPORARY_ERROR':'CIRCUIT_OPEN'}.get(item['status'],'HEALTHY')
                 if decrypt and item['enabled']:
                     item['secret'] = unprotect_key(blob)
                     self.log.register_secret(item['secret'])
@@ -115,10 +112,12 @@ class KiraKeysMixin:
                 added += 1
             return added, duplicates
 
-    def change_kira_key(self, key_id, *, name=None, enabled=None, delete=False, restore=False):
+    def change_kira_key(self, key_id, *, name=None, enabled=None, delete=False):
         with self.transaction():
             if not self.db.execute('SELECT 1 FROM kira_keys WHERE id=?', (key_id,)).fetchone(): raise ValueError('Key không còn tồn tại')
             if delete:
+                from .api_credentials import ensure_idle
+                ensure_idle(self, 'kira')
                 self.db.execute('DELETE FROM kira_keys WHERE id=?', (key_id,))
                 if key_id=='legacy-kira':self.db.execute("DELETE FROM secrets WHERE key='kira'")
                 return
@@ -131,10 +130,6 @@ class KiraKeysMixin:
                 self.db.execute('UPDATE kira_keys SET name=? WHERE id=?', (name.strip(),key_id))
             if enabled is not None:
                 self.db.execute("UPDATE kira_keys SET enabled=?,status=CASE WHEN status='DISABLED' THEN 'READY' ELSE status END WHERE id=?", (int(enabled),key_id))
-            if restore:
-                self.db.execute("UPDATE kira_keys SET status=CASE WHEN enabled=1 THEN 'READY' ELSE 'DISABLED' END,cooldown_until=0 WHERE id=?", (key_id,))
-                self.db.execute('DELETE FROM settings WHERE key LIKE ?',('kira_model_status:'+key_id+':%',))
-                self.db.execute('DELETE FROM settings WHERE key LIKE ?',('kira_verified_quota:'+self.kira_effective_scope(key_id)+':%',))
 
     def kira_key_status(self, key_id, state, until=0, *, reason=None, model=None):
         if state not in STATES: raise ValueError('Invalid key state')

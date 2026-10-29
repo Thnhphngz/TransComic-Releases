@@ -37,7 +37,7 @@ class FakeEngine:
 @pytest.fixture
 def setup(tmp_path):
     store=Store(tmp_path/'state.sqlite3');repo=Repository(store);tts=TtsStore(tmp_path/'TTS/tts.sqlite3');repo.tts_store=tts;tts.automation=repo
-    output=tmp_path/'capcut';output.mkdir();cfg=defaults(store);cfg.update(model='mock',output=str(output),device='CPU')
+    output=tmp_path/'capcut';output.mkdir();cfg=defaults(store);cfg.update(model='mock',output=str(output),device='CPU',kira_completion_policy=0,kira_dispatch_policy=0,translation_completion_policy=0)
     id=repo.create('Synthetic story',cfg);store.add_kira_keys('automation-synthetic-key')
     FakeEngine.calls=[];FakeEngine.fail=None;FakeEngine.entered=None;FakeEngine.release=None;FakeEngine.live=0;FakeEngine.max_live=0
     def provider(store,job):return KiraPoolProvider(store,'mock',transport=httpx.MockTransport(response),rpm=100000,tpm=100000000)
@@ -181,6 +181,7 @@ def test_source_manual_conflict_blocks_only_group_on_resume(setup,tmp_path):
 def test_translation_original_batches_cap_at_five_requests_and_no_provider_switch(setup,tmp_path,failure):
     from transcomic.providers import KiraProvider
     repo,id,s,c=setup;gid,_,_=add_group(repo,id,tmp_path/'a',count=6);calls=[]
+    repo.configure(id,{**repo.workset(id)['config'],'kira_recovery_version':2})  # Legacy frozen outer-pass policy.
     def handler(req):
         calls.append((json.loads(req.content)['model'],[r['id'] for r in request_lines(req)],time.monotonic()))
         if failure=='timeout':raise httpx.ReadTimeout('Synthetic request timeout',request=req)
@@ -431,6 +432,7 @@ def test_quota_exhausted_stops_translation_but_ready_group_finishes(setup,tmp_pa
 def test_network_probes_do_not_consume_request_attempts(setup,tmp_path):
     from transcomic.providers import KiraProvider
     repo,id,s,c=setup;gid,_,_=add_group(repo,id,tmp_path/'a',count=1);calls=[];probes=[]
+    repo.configure(id,{**repo.workset(id)['config'],'kira_recovery_version':2})  # Legacy reachability adapter.
     def handler(req):
         calls.append(1)
         if len(calls)==1:raise httpx.ConnectError('Synthetic offline',request=req)

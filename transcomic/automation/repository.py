@@ -30,6 +30,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS automation_one_active ON automation_worksets((
 ACTIVE=('running','stopping')
 IMMUTABLE=('voice','variant','speed','tts_language','device')
 CONFIG_KEYS={'source_lang','target_lang','provider','model','workers','voice','speed','variant','tts_language','device','format','capcut_mode','part_count','project_name','part_names','output'}
+CONFIG_KEYS.add('deepseek_batch_size')
+CONFIG_KEYS.add('kira_recovery_version')
+CONFIG_KEYS.update(('kira_completion_policy','kira_dispatch_policy'))
+CONFIG_KEYS.add('translation_completion_policy')
 LARGE_FIELDS={'images','slots','batch_jobs','wave_attempts','wave_attempt_history'}
 
 
@@ -81,17 +85,25 @@ class Repository:
             json_extract(g.data,'$.tts_run') tts_run,json_extract(g.data,'$.image_folder') image_folder,
             COALESCE(json_extract(g.data,'$.image_count'),json_array_length(g.data,'$.images'),0) image_count,
             COALESCE(json_extract(g.data,'$.slot_count'),json_array_length(g.data,'$.slots'),0) slot_count,json_extract(g.data,'$.project') project,
-            json_extract(g.data,'$.audio_folder') audio_folder
+            json_extract(g.data,'$.audio_folder') audio_folder,
+            json_extract(g.data,'$.translation_recovery_state') translation_recovery_state,
+            json_extract(g.data,'$.translation_recovery_reason') translation_recovery_reason,
+            json_extract(g.data,'$.next_retry_at') next_retry_at
             FROM automation_groups g JOIN documents d ON d.id=g.document_id WHERE g.workset_id=? ORDER BY g.position,g.id''',(id,))
-        for row in rows:row['data']={key:row.pop(key) for key in ('state','error','tts_run','image_folder','image_count','slot_count','project','audio_folder')}
+        for row in rows:row['data']={key:row.pop(key) for key in ('state','error','tts_run','image_folder','image_count','slot_count','project','audio_folder','translation_recovery_state','translation_recovery_reason','next_retry_at')}
         return rows
     def workset(self,id):
         rows=self.rows('SELECT * FROM automation_worksets WHERE id=?',(id,))
         if not rows:raise KeyError(id)
-        row=rows[0];row['config']=json.loads(row['config']);row['checkpoint']=json.loads(row['checkpoint']);return row
+        row=rows[0];row['config']=json.loads(row['config']);row['config'].setdefault('deepseek_batch_size',3);row['checkpoint']=json.loads(row['checkpoint']);return row
     def groups(self,id):
         values=self.rows('SELECT * FROM automation_groups WHERE workset_id=? ORDER BY position,id',(id,))
-        for r in values:r['data']=self.enrich(r['id'],json.loads(r['data']))
+        fields={r['id']:{} for r in values}
+        for r in self.rows('SELECT f.group_id,f.field,f.value FROM automation_group_fields f JOIN automation_groups g ON g.id=f.group_id WHERE g.workset_id=?',(id,)):
+            fields[r['group_id']][r['field']]=json.loads(r['value'])
+        for r in values:
+            r['data']={**json.loads(r['data']),**fields[r['id']]}
+            for key in LARGE_FIELDS:r['data'].setdefault(key,[] if key in ('images','slots') else {})
         return values
     def group(self,id):
         row=self.rows('SELECT * FROM automation_groups WHERE id=?',(id,))[0];row['data']=self.enrich(id,json.loads(row['data']));return row
@@ -116,12 +128,24 @@ class Repository:
     def editable(self,id):
         if self.workset(id)['state'] in ACTIVE:raise ValueError('Cấu hình đã khóa. Dừng an toàn để chỉnh sửa.')
     def create(self,name,config):
+        config={'deepseek_batch_size':3,'kira_recovery_version':4,'kira_completion_policy':0,'kira_dispatch_policy':0,'translation_completion_policy':0,**config}
         if set(config)!=CONFIG_KEYS:raise ValueError('Cấu hình Automation chỉ chứa các trường được hỗ trợ; không lưu API key/token.')
-        id=str(uuid.uuid4());self.execute('INSERT INTO automation_worksets(id,name,config,created) VALUES (?,?,?,?)',(id,name.strip() or 'Bộ truyện',json.dumps(config),time.time()));return id
+        # Creation-only, provider-scoped metadata. A new workset may select DeepSeek
+        # later; old rows (including draft rows) are deliberately never backfilled.
+        from ..deepseek_rolling import ROLLING
+        checkpoint={'deepseek_admission_policy':dict(ROLLING)}
+        id=str(uuid.uuid4());self.execute('INSERT INTO automation_worksets(id,name,config,created,checkpoint) VALUES (?,?,?,?,?)',(id,name.strip() or 'Bộ truyện',json.dumps(config),time.time(),json.dumps(checkpoint)));return id
     def configure(self,id,config,name=None):
+        config={'deepseek_batch_size':3,'kira_recovery_version':self.workset(id)['config'].get('kira_recovery_version',2),'kira_completion_policy':0,'kira_dispatch_policy':0,'translation_completion_policy':0,**config}
         if set(config)!=CONFIG_KEYS:raise ValueError('Cấu hình Automation không hợp lệ; không lưu API key/token.')
         with self.store.transaction():
             self.editable(id);old=self.workset(id)
+            if old['started'] and config['kira_recovery_version']!=old['config'].get('kira_recovery_version',2):
+                raise ValueError('Giữ policy phục hồi đã chốt cho bộ công việc đã bắt đầu.')
+            if old['started'] and any(config.get(k,0)!=old['config'].get(k,0) for k in ('kira_completion_policy','kira_dispatch_policy','translation_completion_policy')):
+                raise ValueError('Giữ policy điều phối/phục hồi đã chốt; hãy tạo bộ mới.')
+            if old['started'] and config['provider']=='deepseek' and config['deepseek_batch_size']!=old['config'].get('deepseek_batch_size',3):
+                raise ValueError('Batch DeepSeek của bộ đã chạy được giữ nguyên; hãy tạo bộ mới.')
             if old['started'] and any(config.get(k)!=old['config'].get(k) for k in IMMUTABLE):raise ValueError('Voice/model/speed/runtime đã cố định; hãy tạo bộ mới.')
             if old['started'] and any(config.get(k)!=old['config'].get(k) for k in ('source_lang','target_lang','provider','model')):
                 raise ValueError('Ngôn ngữ và provider/model của bộ đã chạy được giữ nguyên; hãy tạo bộ mới.')
@@ -142,15 +166,20 @@ class Repository:
                 self.editable(id)
                 doc,_=self.store.import_document(path,data,cfg['source_lang'],cfg['target_lang'],'docx' if obj else 'txt',[u.locator for u in obj.units] if obj else None)
                 meta={'source_sha256':hashlib.sha256(data.raw).hexdigest(),'image_folder':'','image_sort':'name','images':[], 'state':'draft','error':'','batch_jobs':{},'tts_run':None,'slots':[]}
-                self.execute('INSERT INTO automation_groups VALUES (?,?,?,?,?,?)',(group,id,doc,len(self.groups(id)),key,json.dumps(meta)))
+                position=self.rows('SELECT COALESCE(MAX(position)+1,0) next FROM automation_groups WHERE workset_id=?',(id,))[0]['next']
+                self.execute('INSERT INTO automation_groups VALUES (?,?,?,?,?,?)',(group,id,doc,position,key,json.dumps(meta)))
             added.append(group)
         with self.store.transaction():
             self.editable(id)
             if not self.workset(id)['checkpoint'].get('manual_order'):
-                ordered=sorted(self.groups(id),key=lambda g:natural_key(Path(self.store.document(g['document_id'])['path']).name))
+                ordered=sorted(self.rows('SELECT g.id,d.path FROM automation_groups g JOIN documents d ON d.id=g.document_id WHERE g.workset_id=? ORDER BY g.position,g.id',(id,)),key=lambda g:natural_key(Path(g['path']).name))
                 for n,g in enumerate(ordered):self.execute('UPDATE automation_groups SET position=? WHERE id=?',(n,g['id']))
         return added
     def update_group(self,id,**changes):
+        if not (LARGE_FIELDS&changes.keys()):
+            with self.store.lock:
+                current=self.group_state(id)
+                if all(current.get(k)==v for k,v in changes.items()):return
         with self.store.transaction():
             data=self.group_state(id)
             for key in LARGE_FIELDS&changes.keys():
@@ -161,11 +190,14 @@ class Repository:
         self.progress(id)
     def progress(self,id):
         for callback in self.group_listeners:callback(id)
-    def pair_images(self,id,folder,sort='name'):
+    def pair_images(self,id,folder,sort='name',*,inspection=None):
         if sort not in ('name','created'):raise ValueError('Cách sắp ảnh không hợp lệ')
         with self.store.transaction():
             group=self.group(id);self.editable(group['workset_id'])
-            self.update_group(id,image_folder=str(Path(folder).resolve()),image_sort=sort,images=[],state='draft',error='')
+            changes=dict(image_folder=str(Path(folder).resolve()),image_sort=sort,images=[],input_validation={},image_inspection={},state='draft',error='')
+            if inspection:
+                changes.update(images=inspection['images'],image_count=len(inspection['images']),slots=inspection['slots'],image_inspection=dict(version=1,stamp=inspection['stamp']))
+            self.update_group(id,**changes)
     def move(self,id,delta):
         with self.store.transaction():
             group=self.group(id)

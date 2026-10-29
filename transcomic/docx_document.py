@@ -8,6 +8,9 @@ from __future__ import annotations
 import io
 import re
 import zipfile
+import hashlib
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,6 +40,9 @@ UNSUPPORTED = {q(W, local) for local in (
     "commentRangeEnd", "commentReference", "footnoteReference", "endnoteReference",
 )} | {q(M, "oMath"), q(M, "oMathPara"), q(MC, "AlternateContent")}
 STRUCTURAL_TAGS = {q(W, local) for local in ("p", "tbl", "tr", "tc", "br", "cr", "tab", "drawing", "pict", "object", "sym")}
+PART_TEXT_TAGS={TEXT,q(W,'instrText'),q(W,'delText'),q(A,'t')}
+_INSPECT_CACHE=OrderedDict()
+_CACHE_LOCK=threading.RLock()
 
 
 class UnsafeDocx(ValueError):
@@ -106,7 +112,7 @@ def _validate_parts(archive: zipfile.ZipFile, root: etree._Element) -> None:
         if not lower.startswith("word/") or not lower.endswith(".xml") or lower == "word/document.xml":
             continue
         part = _xml(archive.read(name))
-        if any(element.tag in {TEXT, q(W, "instrText"), q(W, "delText"), q(A, "t")} and (element.text or "").strip()
+        if any(element.tag in PART_TEXT_TAGS and (element.text or "").strip()
                for element in part.iter()):
             raise UnsafeDocx(f"DOCX chứa chữ ở phần chưa hỗ trợ: {name}")
 
@@ -128,6 +134,12 @@ def _read_root(raw: bytes) -> etree._Element:
 
 
 def inspect_docx(raw: bytes) -> ImportedDocx:
+    raw=bytes(raw)
+    key=hashlib.sha256(raw).digest()
+    with _CACHE_LOCK:
+        cached=_INSPECT_CACHE.get(key)
+        if cached is not None and cached.raw==raw:
+            _INSPECT_CACHE.move_to_end(key);return cached
     root = _read_root(raw)
     try:
         Document(io.BytesIO(raw))
@@ -137,7 +149,16 @@ def inspect_docx(raw: bytes) -> ImportedDocx:
     for paragraph_index, paragraph in enumerate(_paragraphs(root)):
         for segment_index, segment in enumerate(_segments(paragraph)):
             units.append(DocxUnit(f"{paragraph_index}:{segment_index}", segment.text))
-    return ImportedDocx(raw, tuple(units))
+    result=ImportedDocx(raw,tuple(units))
+    # Only immutable units, never mutable XML trees. Bound retained memory;
+    # large packages still receive the complete validation without caching.
+    size=len(raw)+sum(len(u.text.encode('utf8'))+len(u.locator) for u in units)
+    if size<=4*1024*1024 and len(units)<=10000:
+        with _CACHE_LOCK:
+            _INSPECT_CACHE[key]=result
+            while len(_INSPECT_CACHE)>8 or sum(len(v.raw)+sum(len(u.text.encode('utf8'))+len(u.locator) for u in v.units) for v in _INSPECT_CACHE.values())>8*1024*1024:
+                _INSPECT_CACHE.popitem(last=False)
+    return result
 
 
 def import_docx(path: str | Path) -> ImportedDocx:

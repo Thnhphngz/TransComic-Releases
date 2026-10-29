@@ -144,7 +144,7 @@ class KiraTelemetry:
     def set_state(self, state):
         with self.lock:
             self.state = state
-            self.ended_at = time.time() if state in ('finished','stopped','interrupted','needs_intervention','quota_exhausted','blocked','completed_with_errors') else None
+            self.ended_at = time.time() if state in ('finished','stopped','interrupted','needs_intervention','quota_exhausted','blocked','completed_with_errors','needs_reconciliation','blocked_auth','blocked_quota','blocked_budget') else None
             self.version += 1
 
     def snapshot(self, pool_metrics):

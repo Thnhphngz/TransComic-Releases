@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS kira_monitor_runs (
 CREATE INDEX IF NOT EXISTS kira_monitor_latest ON kira_monitor_runs(updated_at);
 CREATE TABLE IF NOT EXISTS request_attempts (
  id TEXT PRIMARY KEY, original_batch_id TEXT NOT NULL REFERENCES batches(id),
- attempt_number INTEGER NOT NULL CHECK(attempt_number BETWEEN 1 AND 6), state TEXT NOT NULL,
+ attempt_number INTEGER NOT NULL CHECK(attempt_number>=1), state TEXT NOT NULL,
  created_at TEXT NOT NULL, completed_at TEXT, diagnostics TEXT,
  UNIQUE(original_batch_id,attempt_number));
 CREATE TABLE IF NOT EXISTS translation_runs (
@@ -86,6 +86,8 @@ class Store(KiraKeysMixin):
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        from .update.backup import before_attempt_migration
+        self.migration_backup=before_attempt_migration(self.path)
         self.db = sqlite3.connect(str(self.path), check_same_thread=False, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.lock = threading.RLock()
@@ -101,17 +103,19 @@ class Store(KiraKeysMixin):
             self.db.execute('CREATE INDEX IF NOT EXISTS kira_budget_scope ON kira_reservations(account_scope,created_at)')
             self.db.execute('CREATE INDEX IF NOT EXISTS kira_budget_key ON kira_reservations(key_alias,created_at)')
             attempt_sql = self.db.execute("SELECT sql FROM sqlite_master WHERE name='request_attempts'").fetchone()[0]
-            if 'BETWEEN 1 AND 6' not in attempt_sql:
+            if 'attempt_number>=1' not in attempt_sql.replace(' ',''):
                 # Keep the original table name and foreign key targets while rebuilding.
                 self.db.execute('PRAGMA foreign_keys=OFF')
                 self.db.execute('BEGIN IMMEDIATE')
                 try:
-                    self.db.execute('CREATE TABLE attempts_v7 (id TEXT PRIMARY KEY, original_batch_id TEXT NOT NULL REFERENCES batches(id), attempt_number INTEGER NOT NULL CHECK(attempt_number BETWEEN 1 AND 6), state TEXT NOT NULL, created_at TEXT NOT NULL, completed_at TEXT, diagnostics TEXT, reserved_tokens INTEGER NOT NULL DEFAULT 0, UNIQUE(original_batch_id,attempt_number))')
+                    auxiliary=[r[0] for r in self.db.execute("SELECT sql FROM sqlite_master WHERE tbl_name='request_attempts' AND type IN ('index','trigger') AND sql IS NOT NULL")]
+                    self.db.execute('CREATE TABLE attempts_v7 (id TEXT PRIMARY KEY, original_batch_id TEXT NOT NULL REFERENCES batches(id), attempt_number INTEGER NOT NULL CHECK(attempt_number>=1), state TEXT NOT NULL, created_at TEXT NOT NULL, completed_at TEXT, diagnostics TEXT, reserved_tokens INTEGER NOT NULL DEFAULT 0, UNIQUE(original_batch_id,attempt_number))')
                     columns='id,original_batch_id,attempt_number,state,created_at,completed_at,diagnostics'
                     if 'reserved_tokens' in {r['name'] for r in self.db.execute('PRAGMA table_info(request_attempts)')}:columns+=',reserved_tokens'
                     self.db.execute(f'INSERT INTO attempts_v7 ({columns}) SELECT {columns} FROM request_attempts')
                     self.db.execute('DROP TABLE request_attempts')
                     self.db.execute('ALTER TABLE attempts_v7 RENAME TO request_attempts')
+                    for sql in auxiliary:self.db.execute(sql)
                     self.db.execute('COMMIT')
                 except BaseException:
                     self.db.execute('ROLLBACK'); raise
@@ -238,6 +242,17 @@ class Store(KiraKeysMixin):
                 raise KeyError(line_id)
             return dict(row)
 
+    def line_policies(self, doc_id):
+        with self.lock:
+            key=(doc_id,self.db.total_changes)
+            cached=getattr(self,'_line_policy_cache',{})
+            if cached.get('key')==key:return cached['values']
+            values={}
+            for row in self.db.execute('SELECT v.line_id,v.normalization FROM api_text_versions v JOIN lines l ON l.id=v.line_id JOIN request_attempts a ON a.id=v.attempt_id WHERE l.document_id=? AND v.accepted=1 ORDER BY a.rowid DESC',(doc_id,)):
+                values.setdefault(row[0],row[1])
+            self._line_policy_cache={'key':key,'values':values}
+            return values
+
     def edit_line(self, line_id: str, column: str, value: str):
         if column not in ("source", "translation") or "\n" in value or "\r" in value:
             raise ValueError("Only one logical line may be edited")
@@ -268,7 +283,7 @@ class Store(KiraKeysMixin):
         automation=getattr(self,'automation',None)
         if automation and automation.active() and (config or {}).get('automation_owner')!=automation.active():
             raise ValueError('Translation scheduler đang thuộc Automation; dừng an toàn trước khi dịch thủ công.')
-        if provider not in ('kira', 'gemini'): raise ValueError('Unsupported provider')
+        if provider not in ('kira', 'gemini', 'deepseek'): raise ValueError('Unsupported provider')
         from .languages import validate_pair
         source_entry,target_entry=validate_pair(source_lang,target_lang)
         source_lang,target_lang=source_entry.name,target_entry.name
@@ -280,7 +295,14 @@ class Store(KiraKeysMixin):
         if max_requests is not None and max_requests < 1:
             raise ValueError("Request budget must be positive")
         retry_504 = self.setting("retry_504", "1") == "1" if retry_504 is None else retry_504
-        if provider == 'gemini': retry_504 = False
+        if provider in ('gemini', 'deepseek'): retry_504 = False
+        if provider == 'deepseek':
+            from .deepseek import settings
+            from .deepseek_models import validate_model
+            validate_model(model)
+            config = {**settings(self, model), **(config or {}), 'auto_retries':0, 'kira_multi_key':False}
+            for key in list(config):
+                if key.startswith('kira_'): config.pop(key)
         with self.transaction():
             if automation and automation.active() and (config or {}).get('automation_owner')!=automation.active():
                 raise ValueError('Translation scheduler đang thuộc Automation; dừng an toàn trước khi dịch thủ công.')
@@ -289,8 +311,9 @@ class Store(KiraKeysMixin):
                 raise ValueError("A translation job already exists for this document")
             rows = self.lines(doc_id)
             from .status import usable
+            from .completion import pending as completion_pending
             wanted = set(line_ids) if line_ids is not None else None
-            eligible = [r for r in rows if translatable(r["source"]) and (wanted is None and r["state"] == "pending" and not usable(r) or wanted is not None and r["id"] in wanted)]
+            eligible = [r for r in rows if translatable(r["source"]) and (wanted is None and completion_pending(r,config or {}) or wanted is not None and r["id"] in wanted)]
             if not eligible:
                 raise ValueError("No lines need translation")
             if any(r['state']=='processing' for r in eligible):raise ValueError('Selected lines still have an in-flight request')
@@ -305,23 +328,31 @@ class Store(KiraKeysMixin):
                             (job_id, doc_id, provider, model, source_lang, target_lang, concurrency, "ready", timeout, "review-v2", "retranslation" if line_ids is not None else "translation", int(retry_504), max_requests))
             from .kira_recovery import frozen_policy
             policy=frozen_policy(self,config or {})
-            retries = policy.get('auto_retries',0) if policy.get('kira_multi_key') else int(self.setting('auto_retries', '5'))
-            if not 0 <= retries <= 5: raise ValueError('Invalid automatic retry setting')
+            retries = 0 if provider == 'deepseek' else policy.get('auto_retries',0) if policy.get('kira_multi_key') else int(self.setting('auto_retries', '5'))
+            if not 0 <= retries <= (20 if policy.get('kira_recovery_version',0)>=4 else 5): raise ValueError('Invalid automatic retry setting')
             from .prompts import PROMPT_VERSION,KIRA_RECOVERY_PROMPT_VERSION
-            prompt_version=KIRA_RECOVERY_PROMPT_VERSION if provider=='kira' and policy.get('kira_recovery_version',0)>=1 else PROMPT_VERSION
+            from .translation_policy import VERSION as SEMANTIC_VERSION, CANDIDATE_VERSION, V4_VERSION, facts
+            prompt_version=policy.get('prompt_version',SEMANTIC_VERSION) if provider=='deepseek' else KIRA_RECOVERY_PROMPT_VERSION if provider=='kira' and policy.get('kira_recovery_version',0)>=1 else PROMPT_VERSION
+            if provider=='deepseek' and (prompt_version in (CANDIDATE_VERSION,V4_VERSION) or policy.get('semantic_profile') is not None):
+                from .semantic_context import freeze_options
+                policy=freeze_options(policy,doc_id)
+            if prompt_version==SEMANTIC_VERSION:policy['semantic_facts']=facts(policy.get('semantic_facts'))
             frozen = {**policy, 'request_interval': float(self.setting('request_interval', '0')), 'auto_retries': retries, 'prompt_version': prompt_version,
                       'source_locale':source_entry.locale,'target_locale':target_entry.locale}
+            if policy.get('translation_completion_policy')==1:frozen['request_interval']=0;max_requests=None;self.db.execute('UPDATE jobs SET max_requests=NULL WHERE id=?',(job_id,))
             if frozen.get('kira_multi_key'):
                 self.db.execute('UPDATE jobs SET retry_504=0 WHERE id=?',(job_id,))
             for key, default in [('rate_wait_budget', 300), ('rate_cooldown_limit', 10), ('rate_backoff_max', 30)]:
                 frozen.setdefault(key, float(self.setting(key, str(default))))
             self.db.execute('UPDATE jobs SET run_id=?,config=?,auto_retries=?,prompt_version=? WHERE id=?', (run_id, json.dumps(frozen), retries, prompt_version, job_id))
-            chunks=[eligible[offset:offset+3] for offset in range(0,len(eligible),3)]
+            from .deepseek_batch import job_size
+            batch_size=job_size(provider,frozen)
+            chunks=[eligible[offset:offset+batch_size] for offset in range(0,len(eligible),batch_size)]
             boundaries=(config or {}).get('automation_boundaries')
             if boundaries is not None:
                 if not automation or automation.active()!=(config or {}).get('automation_owner'):raise ValueError('Explicit batch boundaries require active Automation ownership')
                 flat=[id for chunk in boundaries for id in chunk]
-                if not boundaries or any(not 1<=len(chunk)<=3 for chunk in boundaries) or len(flat)!=len(set(flat)) or set(flat)!={r['id'] for r in eligible}:
+                if not boundaries or any(not 1<=len(chunk)<=batch_size for chunk in boundaries) or len(flat)!=len(set(flat)) or set(flat)!={r['id'] for r in eligible}:
                     raise ValueError('Stable batch boundaries must cover eligible line IDs exactly once')
                 by_id={r['id']:r for r in eligible};chunks=[[by_id[id] for id in chunk] for chunk in boundaries]
             for chunk in chunks:
@@ -336,16 +367,20 @@ class Store(KiraKeysMixin):
                         context.append({"id": r["id"], "source": r["source"]})
                         budget -= len(r["source"])
                 payload[0]["context"] = context
+                if prompt_version==SEMANTIC_VERSION:payload[0]['semantic_facts']=frozen.get('semantic_facts',[])
+                if provider=='deepseek' and (prompt_version in (CANDIDATE_VERSION,V4_VERSION) or frozen.get('semantic_profile') is not None):
+                    from .semantic_context import batch_context
+                    payload[0]['context'],payload[0]['semantic_facts']=batch_context(rows,chunk,frozen,doc_id)
                 from datetime import datetime, timezone
                 created = datetime.now(timezone.utc).isoformat(timespec='microseconds')
                 self.db.execute("INSERT INTO batches(id,job_id,state,payload,diagnostics) VALUES (?,?,?,?,?)", (str(uuid.uuid4()), job_id, "pending", json.dumps(payload, ensure_ascii=False), json.dumps({'batch_created_at':created})))
             if frozen.get('kira_recovery_version',0)>=1 and max_requests is None:
                 count=(len(eligible)+2)//3
-                limit=frozen.get('kira_request_limit') or count+min(count*retries,frozen['kira_retry_budget'])
+                limit=frozen.get('kira_request_limit') or (None if frozen.get('kira_completion_policy') else count+min(count*retries,frozen['kira_retry_budget']))
                 self.db.execute('UPDATE jobs SET max_requests=? WHERE id=?',(limit,job_id))
             if frozen.get('kira_recovery_version',0)>=2:
                 limit=self.job(job_id)['max_requests'] or frozen.get('max_requests') or 1
-                frozen['kira_effective_token_limit']=frozen.get('kira_token_limit') or limit*int(self.setting('kira_tpm','1000000'))
+                frozen['kira_effective_token_limit']=frozen.get('kira_token_limit') or (None if frozen.get('kira_completion_policy') else limit*int(self.setting('kira_tpm','1000000')))
                 self.db.execute('UPDATE jobs SET config=? WHERE id=?',(json.dumps(frozen),job_id))
         for batch in self.batches(job_id):
             self.log.emit("queued", provider=provider, model=model, document_id=doc_id, job_id=job_id, run_id=run_id, target_lang=target_lang, batch_id=batch["id"], line_ids=[r["id"] for r in batch["payload"]], line_count=len(batch["payload"]), state="pending")
@@ -437,9 +472,11 @@ class Store(KiraKeysMixin):
                 for item in payload:
                     if item['id'] not in results: continue
                     raw = results[item['id']]
-                    preserve=job['provider']=='kira' and json.loads(job['config']).get('kira_recovery_version',0)>=1
+                    from .translation_policy import SEMANTIC_VERSIONS
+                    semantic=job['provider']=='deepseek' and job['prompt_version'] in SEMANTIC_VERSIONS
+                    preserve=semantic or job['provider']=='kira' and json.loads(job['config']).get('kira_recovery_version',0)>=1
                     processed, notes = normalize(item['source'], raw,preserve_punctuation=preserve)
-                    text_version=VERSION+'+punctuation-preserved-v1' if preserve else VERSION
+                    text_version=job['prompt_version'] if semantic else VERSION+'+punctuation-preserved-v1' if preserve else VERSION
                     self.db.execute('INSERT OR REPLACE INTO api_text_versions VALUES (?,?,?,?,?,?,0)', (expected_attempt_id, item['id'], raw, processed, text_version, json.dumps(notes)))
                     if processed.strip(): processed_results[item['id']] = processed
                     else:
@@ -508,9 +545,10 @@ class Store(KiraKeysMixin):
                 import copy
                 return copy.deepcopy(cache[doc_id][1])
             self.validate_document_language(doc_id)
-            rows = collect([{**r,'source_lang':doc['source_lang'],'target_lang':doc['target_lang']} for r in self.lines(doc_id)])
+            policies=self.line_policies(doc_id)
+            rows = collect([{**r,'source_lang':doc['source_lang'],'target_lang':doc['target_lang'],'translation_policy':policies.get(r['id'])} for r in self.lines(doc_id)])
             for row in self.lines(doc_id):
-                if row['attempt_kind'] == 'manual': continue
+                if row['attempt_kind'] == 'manual' or not row.get('translation'): continue
                 trace = self.db.execute('SELECT v.* FROM api_text_versions v JOIN request_attempts a ON a.id=v.attempt_id WHERE v.line_id=? AND v.accepted=1 ORDER BY a.created_at DESC LIMIT 1', (row['id'],)).fetchone()
                 if trace and trace['processed_text'] == row['translation']:
                     notes = json.loads(trace['warnings'])
@@ -578,12 +616,15 @@ class Store(KiraKeysMixin):
             job = dict(self.db.execute("SELECT j.* FROM jobs j JOIN batches b ON b.job_id=j.id WHERE b.id=?", (batch_id,)).fetchone())
             policy=json.loads(job['config'])
             if not isinstance(reserved_tokens,int) or reserved_tokens<0:raise ValueError('Invalid token reservation')
+            if policy.get('kira_recovery_version',0)>=4:
+                from .kira_recovery import budget_reason
+                if budget_reason(self,job,retry=number>1,cost=reserved_tokens):return None
             if policy.get('kira_recovery_version',0)>=2:
                 token_limit=policy['kira_effective_token_limit']
                 scope_sql='j.run_id=?' if job['run_id'] else 'j.id=?'
                 consumed=self.db.execute('SELECT COALESCE(SUM(a.reserved_tokens),0) FROM request_attempts a JOIN batches b ON b.id=a.original_batch_id JOIN jobs j ON j.id=b.job_id WHERE '+scope_sql,(job['run_id'] or job['id'],)).fetchone()[0]
-                if consumed+reserved_tokens>token_limit:return None
-            if number>1 and policy.get('kira_recovery_version',0)>=1:
+                if token_limit is not None and consumed+reserved_tokens>token_limit:return None
+            if number>1 and policy.get('kira_recovery_version',0)>=1 and not policy.get('kira_completion_policy'):
                 from .kira_recovery import retry_usage
                 if retry_usage(self,job)>=policy['kira_retry_budget']:return None
             budget = json.loads(job['config']).get('max_requests')
@@ -601,7 +642,7 @@ class Store(KiraKeysMixin):
                 if batch['state']=='inflight':return None
                 prior = self.attempts(batch_id)
                 from .retry import allowed_retry
-                if not 2 <= number <= 6 or job['state'] not in ('running', 'waiting_rate_limit', 'retry_scheduled','network_waiting','provider_recovering') or len(prior) != number-1 or prior[-1]['state'] != 'finished' or not allowed_retry(job, prior[-1]['diagnostics'] or {}, number):
+                if not (number>=2 and (policy.get('translation_completion_policy') or policy.get('kira_completion_policy') or number <= (21 if policy.get('kira_recovery_version')==4 else 6))) or job['state'] not in ('running', 'waiting_rate_limit', 'retry_scheduled','network_waiting','provider_recovering') or len(prior) != number-1 or prior[-1]['state'] != 'finished' or not allowed_retry(job, prior[-1]['diagnostics'] or {}, number):
                     return None
                 valid = []
                 for r in json.loads(batch['original_payload'] or batch["payload"]):
@@ -750,6 +791,8 @@ class Store(KiraKeysMixin):
 
     def change_gemini_key(self, key_id, *, delete=False, direction=0):
         with self.transaction():
+            from .api_credentials import ensure_idle
+            ensure_idle(self, 'gemini')
             if self.db.execute("SELECT 1 FROM jobs WHERE provider='gemini' AND state IN ('running','pausing','stopping','user_paused','waiting_rate_limit','retry_scheduled')").fetchone():
                 raise ValueError('Gemini run is active; stop safely before changing key priority/deleting')
             rows = self.gemini_keys()
@@ -775,6 +818,11 @@ class Store(KiraKeysMixin):
             return new_id
 
     def create_run(self, document_ids, targets, *, provider, model, source_lang, concurrency, timeout=90, config=None):
+        if provider == 'deepseek':
+            from .deepseek import settings
+            config = {**settings(self, model), **(config or {}), 'auto_retries':0, 'retry_504':False}
+            for key in list(config):
+                if key.startswith('kira_'): config.pop(key)
         from .status import usable
         from .languages import language,validate_pair
         source_lang=language(source_lang).name
@@ -787,8 +835,8 @@ class Store(KiraKeysMixin):
         snapshot = {**(config or {}), 'provider': provider, 'model': model, 'source_lang': source_lang,
                     'targets': targets, 'target_locales':[language(t).locale for t in targets], 'source_locale':language(source_lang).locale,
                     'language_order': [language(t).locale for t in targets], 'current_locale':None, 'language_states':{},
-                    'concurrency': concurrency, 'timeout': timeout, 'prompt_version': PROMPT_VERSION,
-                    'auto_retries': int(self.setting('auto_retries', '5')), 'request_interval': float(self.setting('request_interval', '0')),
+                    'concurrency': concurrency, 'timeout': timeout, 'prompt_version': (config or {}).get('prompt_version') if provider=='deepseek' else PROMPT_VERSION,
+                    'auto_retries': 0 if provider == 'deepseek' else int(self.setting('auto_retries', '5')), 'request_interval': float(self.setting('request_interval', '0')),
                     'retry_504': provider == 'kira' and self.setting('retry_504', '1') == '1'}
         if snapshot.get('kira_multi_key'):
             from .kira_recovery import frozen_policy
@@ -807,15 +855,16 @@ class Store(KiraKeysMixin):
                     self.db.execute('UPDATE documents SET target_lang=?,source_lang=? WHERE id=?', (targets[0], source_lang, doc_id))
                 for target in targets:
                     workspace = self.workspace_for_target(doc_id, target)
-                    eligible = any(r['state'] == 'pending' and translatable(r['source']) and not usable(r) for r in self.lines(workspace))
+                    from .completion import pending as completion_pending
+                    eligible = any(translatable(r['source']) and completion_pending(r,snapshot) for r in self.lines(workspace))
                     if eligible:
                         jobs.append(self.create_job(workspace, model, source_lang, target, concurrency, timeout=timeout, provider=provider, run_id=run_id, config=snapshot))
             if not jobs: raise ValueError('No lines need translation')
             if snapshot.get('kira_recovery_version',0)>=1:
                 count=sum(len(self.batches(j)) for j in jobs)
-                if snapshot.get('max_requests') is None:snapshot['max_requests']=snapshot.get('kira_request_limit') or count+min(count*snapshot['auto_retries'],snapshot['kira_retry_budget'])
+                if snapshot.get('max_requests') is None:snapshot['max_requests']=snapshot.get('kira_request_limit') or (None if snapshot.get('kira_completion_policy') else count+min(count*snapshot['auto_retries'],snapshot['kira_retry_budget']))
                 if snapshot.get('kira_recovery_version',0)>=2:
-                    snapshot['kira_effective_token_limit']=snapshot.get('kira_token_limit') or snapshot['max_requests']*int(self.setting('kira_tpm','1000000'))
+                    snapshot['kira_effective_token_limit']=snapshot.get('kira_token_limit') or (None if snapshot.get('kira_completion_policy') else snapshot['max_requests']*int(self.setting('kira_tpm','1000000')))
                 self.db.execute('UPDATE translation_runs SET config=? WHERE id=?',(json.dumps(snapshot,ensure_ascii=False),run_id))
                 for jid in jobs:
                     frozen=json.loads(self.job(jid)['config']);frozen['max_requests']=snapshot['max_requests']

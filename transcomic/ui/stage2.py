@@ -16,9 +16,10 @@ from ..translation import Scheduler
 from .controls import QComboBox, QSpinBox
 from .glass import GlassButton as QPushButton
 from .kira_api import KiraApiMixin
+from .deepseek_api import DeepSeekApiMixin
 
 
-class Stage2Mixin(KiraApiMixin):
+class Stage2Mixin(KiraApiMixin, DeepSeekApiMixin):
     def setup_stage2(self):
         self.workspace_ids = []
         self.workspace_positions = {}
@@ -37,6 +38,13 @@ class Stage2Mixin(KiraApiMixin):
         self.background_threads = []
         self.provider_selector = QComboBox()
         self.provider_selector.addItem('Kira', 'kira'); self.provider_selector.addItem('Gemini', 'gemini')
+        self.provider_selector.addItem('DeepSeek', 'deepseek')
+        from ..deepseek_batch import BATCH_SIZES
+        self.deepseek_batch = QComboBox()
+        self.deepseek_batch.setToolTip('Áp dụng cho lượt mới; job đang chạy/Resume giữ batch đã chốt. Dịch lại dòng lỗi giữ batch của job gốc.')
+        for size in BATCH_SIZES:self.deepseek_batch.addItem(f'{size} dòng',size)
+        self.deepseek_batch.setCurrentIndex(max(0,self.deepseek_batch.findData(int(self.store.setting('deepseek_batch_size','3')))))
+        self.deepseek_batch.currentIndexChanged.connect(lambda *_:self.store.set_setting('deepseek_batch_size',str(self.deepseek_batch.currentData())))
         column = QVBoxLayout(); column.setSpacing(4)
         column.addWidget(QLabel('Provider')); column.addWidget(self.provider_selector)
         self.controls_widget.layout().insertLayout(0, column)
@@ -49,6 +57,8 @@ class Stage2Mixin(KiraApiMixin):
         self.export_many_button.clicked.connect(self.export_many)
         self.setAcceptDrops(True)
         self.build_gemini_api()
+        self.build_deepseek_api()
+        self.build_api_accordion()
         api = self.pages.widget(2); self.pages.removeWidget(api)
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(api); scroll.setFrameShape(QScrollArea.NoFrame)
         self.pages.insertWidget(2, scroll)
@@ -66,7 +76,7 @@ class Stage2Mixin(KiraApiMixin):
         if not hasattr(self, 'provider_selector'): return
         if hasattr(self, 'gemini_verified'): self.gemini_verified.setChecked(False)
         provider = self.provider_id()
-        self.model_caption.setText('Mô hình Kira' if provider == 'kira' else 'Mô hình Gemini')
+        self.model_caption.setText('Mô hình '+{'kira':'Kira','gemini':'Gemini','deepseek':'DeepSeek'}[provider])
         self.store.set_setting('provider', provider)
         self.concurrency.blockSignals(True)
         self.model_name.blockSignals(True); self.model_name.clear()
@@ -76,6 +86,14 @@ class Stage2Mixin(KiraApiMixin):
             self.concurrency.setMaximum(30)
             self.concurrency.setToolTip('Số request đồng thời tối đa MỖI key Kira (1–30); các key cùng nhóm tài khoản chia sẻ trần tài khoản/RPM/TPM.')
             self.concurrency.setValue(int(self.store.setting('concurrency', '30')))
+        elif provider == 'deepseek':
+            from ..deepseek_models import MODELS, MODEL_NAMES, MODEL
+            for model,name in MODELS:self.model_name.addItem(name, model)
+            saved = self.store.setting('deepseek_model', MODEL)
+            if saved not in MODEL_NAMES:saved = MODEL
+            self.concurrency.setMaximum(30)
+            self.concurrency.setValue(int(self.store.setting('deepseek_concurrency', '3')))
+            self.concurrency.setToolTip('DeepSeek: tối đa 30 request đồng thời; lượt mới tự thử lại các phần chưa dịch thành công.')
         else:
             self.concurrency.setToolTip('Concurrency theo quota Gemini đã xác minh; không nhân theo số key.')
             cache = json.loads(self.store.setting('gemini_models', '{"models":[]}'))
@@ -88,11 +106,17 @@ class Stage2Mixin(KiraApiMixin):
         if saved: self.set_model_id(saved)
         self.model_name.blockSignals(False)
         self.retry_504_check.setEnabled(False)
-        self.retry_504_check.setToolTip('Kira Multi-Key không tự gửi lại batch 504/timeout/lỗi. Cấu hình cũ chỉ dành cho lịch sử trước nâng cấp.')
-        if hasattr(self,'auto_retry_combo'):self.auto_retry_combo.setEnabled(provider!='kira')
+        self.retry_504_check.setToolTip('Cấu hình lịch sử. Lượt Kira mới tự phục hồi 504/timeout và giữ các dòng đã lưu thành công.')
+        if hasattr(self,'auto_retry_combo'):self.auto_retry_combo.setEnabled(provider=='gemini')
         if hasattr(self, 'gemini_offline'):
-            self.gemini_offline.setText('Danh sách cache/offline; chưa gọi kiểm tra kết nối. '+str(self.model_name.count())+' model khi chọn Gemini.')
+            cached = json.loads(self.store.setting('gemini_models', '{"models":[]}'))
+            count = len(cached.get('models', [])) if isinstance(cached, dict) else len(cached)
+            self.gemini_offline.setText('Danh sách cache/offline; chưa gọi kiểm tra kết nối. '+str(count)+' model Gemini đã lưu.')
         if hasattr(self,'kira_manage_button'):self.kira_manage_button.setVisible(provider=='kira')
+        self.refresh_deepseek_display()
+        if hasattr(self,'deepseek_batch_column'):
+            self.deepseek_batch_column.setVisible(provider=='deepseek')
+            self._v2_layout_mode=None;self.adapt_v2_toolbar()
 
     def choose_targets(self):
         dialog = QDialog(self); dialog.setWindowTitle('Ngôn ngữ đích của lượt dịch mới')
@@ -137,14 +161,23 @@ class Stage2Mixin(KiraApiMixin):
         paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
         if paths: self.import_paths(paths); event.acceptProposedAction()
 
-    def import_paths(self, paths):
-        if self.import_busy: return
+    def import_paths(self, paths, _languages=None):
+        if not paths:return
+        source,target=_languages or (self.source_lang.currentText(),self.target_lang.currentText())
+        if self.import_busy:
+            self._pending_imports=getattr(self,'_pending_imports',[])+[(tuple(paths),(source,target))]
+            self.statusBar().showMessage('Đã xếp hàng đợt nhập tiếp theo; đang kiểm tra trong nền…');return
         self.import_busy = True
-        source, target = self.source_lang.currentText(), self.target_lang.currentText()
+        if _languages is None:self._import_errors_accum=[];self._import_counts=[0,0]
+        if hasattr(self,'line_check'):self.line_check.schedule()
         self.notice.setText('Đang nhập tài liệu; chưa gửi API…')
+        self.statusBar().showMessage('Đang nhập tài liệu trong nền; chưa gửi API…')
         existing_ids = list(self.workspace_ids)
         def run():
-            try: result = import_many(self.store, paths, source, target, existing_ids=existing_ids)
+            done=[]
+            def progress(doc):
+                done.append(doc);self.bridge.stage2.emit({'kind':'import_progress','result':{'count':len(done)}})
+            try: result = import_many(self.store, paths, source, target, existing_ids=existing_ids,on_import=progress)
             except Exception as exc: result = {'document_ids': [], 'supported_files': 0, 'errors': [{'error': type(exc).__name__}]}
             self.bridge.stage2.emit({'kind': 'import', 'result': result})
         worker = threading.Thread(target=run, daemon=True); self.background_threads.append(worker); worker.start()
@@ -152,19 +185,41 @@ class Stage2Mixin(KiraApiMixin):
     def stage2_result(self, payload):
         if self._closed: return
         kind, result = payload['kind'], payload['result']
+        if kind=='import_progress':
+            self.statusBar().showMessage(f"Đang nhập trong nền · đã đọc {result['count']} tài liệu");return
         if kind == 'import':
             self.import_busy = False
             self.workspace_ids.extend(result['document_ids'])
             self.workspace_ids = list(dict.fromkeys(self.workspace_ids))
-            if result['document_ids']: self.open_document(result['document_ids'][0])
-            elif result.get('duplicate_ids'): self.open_document(result['duplicate_ids'][0])
+            if not self.doc_id and result['document_ids']: self.open_document(result['document_ids'][0])
+            elif not self.doc_id and result.get('duplicate_ids'): self.open_document(result['duplicate_ids'][0])
             self.refresh_workspace_choices()
-            self.notice.setText(f"Nhập {len(result['document_ids'])}/{result['supported_files']} file hợp lệ · {len(result['errors'])} file lỗi/không hỗ trợ · không gửi API")
-            self.import_errors = result['errors']
+            self._import_errors_accum=getattr(self,'_import_errors_accum',[])+result['errors'];self.import_errors=self._import_errors_accum
+            counts=getattr(self,'_import_counts',[0,0]);counts[0]+=len(result['document_ids']);counts[1]+=result['supported_files'];self._import_counts=counts
+            self.notice.setText(f"Nhập {counts[0]}/{counts[1]} file hợp lệ · {len(self.import_errors)} file lỗi/không hỗ trợ · không gửi API")
+            self.statusBar().showMessage(self.notice.text(),8000)
             if result.get('duplicate_ids'):
                 self.notice.setText('File đã có trong danh sách' + (' · Nguồn trên ổ đĩa đã thay đổi; giữ nguyên bản đang biên tập' if result.get('changed_source_ids') else ''))
+                if self.import_errors:self.notice.setText(self.notice.text()+f' · {len(self.import_errors)} file lỗi/không hỗ trợ')
                 self.statusBar().showMessage(self.notice.text(), 8000)
             if hasattr(self, 'import_details'): self.import_details.setVisible(bool(self.import_errors))
+            pending=getattr(self,'_pending_imports',[])
+            if pending:
+                paths,languages=pending.pop(0);self.import_paths(paths,_languages=languages)
+            elif hasattr(self,'line_check'):self.line_check.schedule()
+        elif kind == 'translation_prepared':
+            self.translation_preparing=False
+            if result.get('error'):
+                self.notice.setText(result['error']);self.start_button.setEnabled(bool(self.doc_id));self.stop_button.setEnabled(False);return
+            if self._translation_prepare_cancel.is_set():
+                with self.store.transaction():
+                    for job in result['jobs']:self.store.job_state(job,'stopped')
+                    self.store.run_state(result['run_id'],'stopped')
+                self.notice.setText('Đã dừng chuẩn bị; chưa gửi API.');self.start_button.setEnabled(bool(self.doc_id));self.stop_button.setEnabled(False);return
+            self.scheduler=result['scheduler'];self.current_job_ids=result['line_ids']
+            self.workspace_ids=list(dict.fromkeys(self.workspace_ids+result['documents']))
+            self.scheduler.start_many(result['jobs'],result['run_id'])
+            self.refresh_workspace_choices();self.refresh()
         elif kind == 'models':
             self.metadata_busy = False; self.refresh_models_button.setEnabled(True)
             if 'error' in result:
@@ -214,7 +269,7 @@ class Stage2Mixin(KiraApiMixin):
 
     def build_gemini_api(self):
         panel = QWidget(); layout = QVBoxLayout(panel)
-        title = QLabel('GOOGLE GEMINI · API chính thức · nhiều key theo thứ tự ưu tiên'); title.setWordWrap(True); layout.addWidget(title)
+        self.gemini_credential_status = QLabel();self.gemini_credential_status.setWordWrap(True);layout.addWidget(self.gemini_credential_status)
         self.gemini_keys_list = QListWidget(); self.gemini_keys_list.setMaximumHeight(110); layout.addWidget(self.gemini_keys_list)
         form = QFormLayout()
         self.gemini_key_input = QLineEdit(); self.gemini_key_input.setEchoMode(QLineEdit.Password)
@@ -237,12 +292,14 @@ class Stage2Mixin(KiraApiMixin):
         self.gemini_verified = QCheckBox('Tôi đã đối chiếu các giới hạn còn lại cho model/dự án này trong AI Studio')
         self.gemini_verified.setChecked(False); layout.addWidget(self.gemini_verified)
         self.model_name.currentIndexChanged.connect(lambda *_: self.gemini_verified.setChecked(False))
+        self.model_name.currentIndexChanged.connect(lambda *_: self.refresh_deepseek_display())
         for key, control in self.gemini_limit_controls.items():
             control.valueChanged.connect(lambda *_: self.gemini_verified.setChecked(False))
         self.gemini_limit_controls['concurrency'].valueChanged.connect(self.update_gemini_concurrency)
         note = QLabel('Không tăng tốc qua nhiều key. HTTP 429 tạm thời/auth/quyền: tạm dừng. Chỉ đổi sang dự án quota độc lập đã khai báo khi có bằng chứng daily quota; batch bị từ chối không tự gửi lại.')
         note.setWordWrap(True); layout.addWidget(note)
         self.pages.widget(2).layout().insertWidget(2, panel)
+        self.gemini_api_panel = panel
         self.refresh_gemini_keys()
 
     def update_gemini_concurrency(self, value):
@@ -257,6 +314,7 @@ class Stage2Mixin(KiraApiMixin):
             self.gemini_keys_list.addItem(f"{i+1}. Key …{key['id'][-6:]} · {key['status']} · project {key['project'] or 'chưa xác minh'}")
             self.gemini_keys_list.item(i).setData(Qt.UserRole, key['id'])
             if key['id'] == selected_id: self.gemini_keys_list.setCurrentRow(i)
+        self.refresh_api_headers()
 
     def add_gemini_keys(self):
         if getattr(self, '_editing_gemini_keys', False): return
@@ -278,9 +336,15 @@ class Stage2Mixin(KiraApiMixin):
         if not key_id: return
         self._editing_gemini_keys = True
         try:
+            self.credential_idle('gemini')
+            from ..api_credentials import saved_state
+            rows=self.store.db.execute('SELECT id,encrypted FROM gemini_keys WHERE id=?',(key_id,)).fetchall()
+            old=[bytes(r['encrypted']) for r in rows]
             if options.get('delete') and QMessageBox.question(self, 'Xóa Gemini key', 'Xóa key đã chọn khỏi TransComic?', QMessageBox.Yes|QMessageBox.No, QMessageBox.No) != QMessageBox.Yes: return
             if self._closed: return
+            self.credential_idle('gemini')
             self.store.change_gemini_key(key_id, **options)
+            if options.get('delete'):self.clear_credential_caches('gemini',key_id,old)
             self.gemini_verified.setChecked(False)
         except ValueError as exc: QMessageBox.information(self, 'Không thay đổi được key', str(exc))
         finally:
@@ -307,6 +371,9 @@ class Stage2Mixin(KiraApiMixin):
         worker = threading.Thread(target=run, daemon=True); self.background_threads.append(worker); worker.start()
 
     def make_provider(self, job, kira_key=None):
+        if job['provider'] == 'deepseek':
+            from ..deepseek import provider_for
+            return provider_for(self.store, job)
         if job['provider'] == 'kira':
             from ..kira_recovery import adopt_authorized_recovery
             adopt_authorized_recovery(self.store,job)
@@ -329,6 +396,7 @@ class Stage2Mixin(KiraApiMixin):
         return GeminiProvider(keys, job['model'], limiter=limiter, on_status=status, timeout=job['timeout'], prompt_version=job['prompt_version'])
 
     def start_stage2(self):
+        if getattr(self,'translation_preparing',False):return
         if self.import_busy: QMessageBox.information(self, 'Đang nhập', 'Chờ nhập tài liệu xong trước khi bắt đầu.'); return
         targets = self.target_languages()
         from ..languages import validate_pair
@@ -340,7 +408,16 @@ class Stage2Mixin(KiraApiMixin):
         if provider == 'kira':
             key = self._key()
             if not key: return
-            config={'kira_multi_key':True,'retry_504':False}
+            from ..completion import authorize
+            config=authorize('kira',{'kira_multi_key':True,'retry_504':False})
+        elif provider == 'deepseek':
+            from ..deepseek import read_key, settings
+            try:
+                if not read_key(self.store): raise ValueError('Chưa có key DeepSeek; mở trang API để cấu hình')
+                config = settings(self.store, model, self.deepseek_batch.currentData())
+            except ValueError as exc:
+                QMessageBox.information(self, 'DeepSeek', str(exc)); return
+            self.store.set_setting('deepseek_concurrency', str(self.concurrency.value()))
         else:
             if not self.gemini_verified.isChecked(): QMessageBox.information(self, 'Giới hạn Gemini', 'Đối chiếu và xác nhận quota/model trong Quản lý API trước khi chạy.'); return
             keys = self.store.gemini_keys()
@@ -349,16 +426,22 @@ class Stage2Mixin(KiraApiMixin):
             if self.concurrency.value() > config['concurrency']:
                 QMessageBox.information(self, 'Gemini quota', 'Concurrency exceeds the verified limit.'); return
             config['key_ids'] = [k['id'] for k in keys]; config['key_projects'] = {k['id']: k['project'] for k in keys}
-        try:
-            run_id, jobs = self.store.create_run(self.workspace_ids or [self.doc_id], targets, provider=provider, model=model,
-                source_lang=self.source_lang.currentText(), concurrency=self.concurrency.value(), timeout=self.timeout_spin.value(), config=config)
-            first = self.store.job(jobs[0]); adapter = self.make_provider(first, key)
-            self.scheduler = Scheduler(self.store, adapter, self.bridge.changed.emit)
-            self.scheduler.job_ids, self.scheduler.run_id = jobs, run_id
-            self.current_job_ids = {r['id'] for j in jobs for b in self.store.batches(j) for r in b['payload']}
-            self.workspace_ids = list(dict.fromkeys(self.workspace_ids+[self.store.job(j)['document_id'] for j in jobs]))
-            self.refresh_workspace_choices(); self.scheduler.start(jobs[0]); self.refresh()
-        except Exception as exc: QMessageBox.information(self, 'Không bắt đầu được lượt dịch', str(exc) if isinstance(exc, ValueError) else type(exc).__name__)
+        documents=tuple(self.workspace_ids or [self.doc_id]);source=self.source_lang.currentText();workers=self.concurrency.value();timeout=self.timeout_spin.value()
+        self.translation_preparing=True;self._translation_prepare_cancel=threading.Event()
+        self.start_button.setEnabled(False);self.stop_button.setEnabled(True);self.notice.setText('Đang chuẩn bị lượt dịch trong nền…')
+        def prepare():
+            try:
+                with self.store.transaction():
+                    run_id,jobs=self.store.create_run(documents,targets,provider=provider,model=model,source_lang=source,concurrency=workers,timeout=timeout,config=config)
+                    first=self.store.job(jobs[0]);adapter=self.make_provider(first,key)
+                    scheduler=Scheduler(self.store,adapter,self.bridge.changed.emit)
+                    ids={r['id'] for j in jobs for b in self.store.batches(j) for r in b['payload']}
+                    docs=[self.store.job(j)['document_id'] for j in jobs]
+                    if self._translation_prepare_cancel.is_set():raise ValueError('Đã dừng chuẩn bị; chưa gửi API.')
+                result=dict(run_id=run_id,jobs=jobs,scheduler=scheduler,line_ids=ids,documents=docs)
+            except Exception as exc:result={'error':self.store.log.clean(str(exc) if isinstance(exc,ValueError) else type(exc).__name__)}
+            if not self._closed:self.bridge.stage2.emit({'kind':'translation_prepared','result':result})
+        worker=threading.Thread(target=prepare,daemon=True,name='TranslationPrepare');self.background_threads.append(worker);worker.start()
 
     def build_live_queue(self):
         panel = QWidget(); layout = QVBoxLayout(panel); layout.setContentsMargins(0, 0, 0, 0)
@@ -385,9 +468,21 @@ class Stage2Mixin(KiraApiMixin):
 
     def refresh_stage2(self):
         if self._closed: return
+        if getattr(self,'translation_preparing',False):return
+        updates=getattr(self,'translation_updates',None)
+        if updates and updates.context()['kind']=='automation' and self.pages.currentIndex() not in (0,2,5):return
+        if updates and updates.context()['kind']=='automation' and self.pages.currentIndex()==2:
+            self.refresh_gemini_keys();self.refresh_kira_keys();self.refresh_deepseek_display();self.refresh_api_headers();return
+        if updates and updates.handles_scheduler() and self.pages.currentIndex()==0 and (updates.active() or updates.last):
+            terminal=updates.recently_active and not updates.active()
+            updates.request(full=terminal)
+            if terminal:updates.recently_active=False
+            return
         self.background_threads = [t for t in self.background_threads if t.is_alive()]
         if self.pages.currentIndex() == 2: self.refresh_gemini_keys()
         self.refresh_kira_keys()
+        self.refresh_deepseek_display()
+        self.refresh_api_headers()
         if self.scheduler:
             jobs = [self.store.job(j) for j in self.scheduler.job_ids or [self.scheduler.job_id] if j]
             docs = list(dict.fromkeys(j['document_id'] for j in jobs if j))
@@ -410,7 +505,7 @@ class Stage2Mixin(KiraApiMixin):
             elapsed = time.monotonic()-(self.scheduler.started_at or time.monotonic()) if self.scheduler else 0
             speed = f"{totals['done']*60/elapsed:.1f} dòng/phút" if elapsed >= 5 else 'đang đo tốc độ'
             self.run_summary.setText(f"{files} file · {len(docs)} file/ngôn ngữ · {totals['done']}/{totals['total']} thành công · {totals['errors']} lỗi · {totals['unknown']} không rõ · {totals['missing']} chưa dịch · {active} request · {elapsed:.0f}s · {speed}")
-        if self.scheduler and len(jobs)>1:
+        if self.scheduler and len(jobs)>1 and not (updates and updates.context()['kind']=='automation'):
             ids = {r['id'] for j in jobs for b in self.store.batches(j['id']) for r in b['payload']}
             rows = [r for d in docs for r in self.store.lines(d) if r['id'] in ids]
             self.total_progress.setValue(int(sum(r['state']=='done' for r in rows)*100/len(rows)) if rows else 0)

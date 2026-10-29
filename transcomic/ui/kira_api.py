@@ -3,7 +3,7 @@ import json
 import time
 from PySide6.QtCore import Qt, QSignalBlocker
 from PySide6.QtWidgets import (QLineEdit, QListWidget, QHBoxLayout, QLabel,
-    QInputDialog, QMessageBox, QFormLayout)
+    QInputDialog, QMessageBox, QFormLayout, QCheckBox)
 from .controls import QSpinBox
 from .glass import GlassButton
 
@@ -16,10 +16,10 @@ class KiraApiMixin:
         self.kira_keys_list.itemChanged.connect(self.toggle_kira_item)
         layout.addWidget(self.kira_keys_list)
         row=QHBoxLayout()
-        for title,fn in [('Đổi tên',self.rename_kira_key),('Nhóm tài khoản',self.group_kira_account),('Xóa key',self.delete_kira_key),('Khôi phục offline',self.restore_kira_key)]:
+        for title,fn in [('Đổi tên',self.rename_kira_key),('Nhóm tài khoản',self.group_kira_account),('Xóa key',self.delete_kira_key)]:
             b=GlassButton(title);b.clicked.connect(fn);row.addWidget(b)
         layout.addLayout(row)
-        note=QLabel('Luồng 1–30 cho MỖI key. Chỉ ghép nhóm khi đã xác nhận cùng tài khoản; chưa xác định sẽ xử lý riêng từng key. Các trần bên dưới áp dụng cho mỗi nhóm đã xác nhận hoặc từng key riêng. Đổi nhóm có hiệu lực ở lượt dịch mới. Khôi phục offline không gọi HTTP hoặc gửi lại batch lỗi.')
+        note=QLabel('Luồng 1–30 cho MỖI key. Chỉ ghép nhóm khi đã xác nhận cùng tài khoản. Lỗi dịch vụ chỉ tạm chờ và tự phục hồi khi hết cooldown; không cần khôi phục key bằng tay. Auth/quota có bằng chứng được chặn riêng.')
         note.setWordWrap(True);layout.addWidget(note)
         form=QFormLayout();self.kira_limits={}
         for key,title,default,maximum in [('kira_account_limit','Trần đồng thời tài khoản',30,100000),('kira_rpm','RPM tài khoản (trần cục bộ)',60,1000000),('kira_tpm','TPM tài khoản (trần cục bộ)',1000000,1000000000)]:
@@ -28,18 +28,41 @@ class KiraApiMixin:
             form.addRow(title,box);self.kira_limits[key]=box
         layout.addLayout(form)
         recovery=QFormLayout();self.kira_recovery_controls={}
-        for key,title,default,maximum in [('kira_retry_limit','Kira: thử lại mỗi batch, gồm rescue cuối (0 = tắt)',4,4),
-            ('kira_retry_budget','Kira: tổng request thử lại mỗi lượt',30,10000),
-            ('kira_request_limit','Kira: trần tổng request/lượt (0 = tự tính hữu hạn)',0,1000000),
-            ('kira_token_limit','Kira: trần token dự phòng/lượt (0 = tự tính hữu hạn)',0,1000000000)]:
+        for key,title,default,maximum in [('kira_retry_limit','Kira: số lần thử/batch (policy hữu hạn)',4,20),
+            ('kira_retry_budget','Kira: tổng retry (policy hữu hạn)',30,10000),
+            ('kira_request_limit','Kira: trần request/lượt (0 = không đặt trần)',0,1000000),
+            ('kira_token_limit','Kira: trần token/lượt (0 = không đặt trần)',0,1000000000),
+            ('kira_recovery_seconds','Kira: giây phục hồi (policy hữu hạn)',600,86400),
+            ('rate_wait_budget','Kira: giây chờ (policy hữu hạn)',300,3600),
+            ('kira_retry_concurrency','Kira: tối đa request retry đồng thời',4,30),
+            ('kira_retry_backoff','Kira: cooldown cơ sở (giây)',1,30)]:
             box=QSpinBox();box.setRange(0,maximum);box.setValue(int(self.store.setting(key,str(default))))
+            if key in ('kira_recovery_seconds','kira_retry_concurrency'):box.setMinimum(1)
             box.valueChanged.connect(lambda value,k=key:self.store.set_setting(k,str(value)))
             recovery.addRow(title,box);self.kira_recovery_controls[key]=box
         layout.addLayout(recovery)
-        policy=QLabel('Lượt mới giữ provider/model và ngân sách cố định; có thể dùng key Kira khác còn hợp lệ. Mỗi batch tối đa request đầu + 3 retry + 1 rescue cuối, có backoff; timeout/504 có thể đã tốn token. Dịch lại chủ động tạo chu kỳ mới và đọc pool key hiện tại. Tiếp tục job cũ giữ trần/bộ đếm đã lưu; lượt đã tắt retry vẫn giữ nguyên. Giảm tải hiệu dụng khi gateway lỗi, không sửa số luồng đã lưu.')
+        self.kira_unknown_consent=QCheckBox('Policy hữu hạn cũ: cho phép gửi lại timeout/504/unknown trong ngân sách đã đặt')
+        self.kira_unknown_consent.setChecked(self.store.setting('kira_allow_unknown_resend','0')=='1')
+        self.kira_unknown_consent.setToolTip('Tùy chọn của policy hữu hạn. Lệnh mới dùng chính sách dịch đến khi đủ và được phép gửi lại theo yêu cầu; có thể phát sinh thêm phí. Không sửa quyền trong snapshot job cũ.')
+        self.kira_unknown_consent.toggled.connect(lambda value:self.store.set_setting('kira_allow_unknown_resend','1' if value else '0'))
+        layout.addWidget(self.kira_unknown_consent)
+        cost_button=GlassButton('Trần chi phí phục hồi…');cost_button.clicked.connect(self.edit_kira_recovery_cost);layout.addWidget(cost_button)
+        policy=QLabel('Lệnh Kira mới tự phục hồi đến khi dịch đủ, kể cả 504/timeout/unknown; việc gửi lại có thể phát sinh thêm phí. Không áp dụng các trần retry/request/token/chi phí cục bộ của policy hữu hạn. Giữ quota dịch vụ, giới hạn đồng thời và Pause/Stop. Hết số dư/quota thực, key sai hoặc đầu vào không hợp lệ cần xử lý đúng nguyên nhân. Job cũ giữ snapshot đã lưu.')
         policy.setWordWrap(True);layout.addWidget(policy)
         self.kira_metrics=QLabel();self.kira_metrics.setWordWrap(True);layout.addWidget(self.kira_metrics)
         self.refresh_kira_keys()
+
+    def edit_kira_recovery_cost(self):
+        raw=self.store.setting('kira_recovery_cost_policy','{"kira_additional_cost_limit": null, "kira_token_cost_upper_bound": null, "kira_cost_source": ""}')
+        text,ok=QInputDialog.getMultiLineText(self,'Trần chi phí phục hồi USD','Trần request/token áp dụng khi được đặt lớn hơn 0. Tùy chọn: trần chi phí request thêm, giá trần USD/token và nguồn giá đã xác minh. Thiếu giá/nguồn sẽ chặn retry khi đặt trần tiền; không coi đây là hóa đơn.',raw)
+        if not ok:return
+        try:
+            value=json.loads(text)
+            if not isinstance(value,dict) or set(value)-{'kira_additional_cost_limit','kira_token_cost_upper_bound','kira_cost_source'}:raise ValueError('Trường cấu hình không hợp lệ')
+            from ..kira_recovery import frozen_policy
+            frozen_policy(self.store,{'kira_multi_key':True,'kira_recovery_version':4,**value})
+            self.store.set_setting('kira_recovery_cost_policy',json.dumps(value))
+        except (ValueError,TypeError):QMessageBox.warning(self,'Trần chi phí','Giá/trần phải hữu hạn và không âm; source phải là nguồn giá được kiểm tra. Không lưu API key trong trường này.')
 
     def refresh_kira_keys(self):
         if not hasattr(self,'kira_keys_list'):return
@@ -53,7 +76,7 @@ class KiraApiMixin:
             # persisted global status. This is a detached display copy only.
             for row in rows:
                 current=metrics['per_key'].get(row['id'])
-                if current and row['enabled']:row['status']=current['status']
+                if current and row['enabled']:row.update(status=current['status'],service_state=current['service_state'])
         signature=repr((rows,scopes))
         available=sum(k['enabled'] and (k['status']=='READY' or k['status']=='COOLDOWN' and 0<k['cooldown_until']<=time.time()) for k in rows)
         if metrics:available=metrics['keys']
@@ -77,10 +100,11 @@ class KiraApiMixin:
             current=self.kira_keys_list.currentItem();key_id=current.data(Qt.UserRole) if current else None
             blocker=QSignalBlocker(self.kira_keys_list);self.kira_keys_list.clear()
             for k in rows:
-                labels={'READY':'Sẵn sàng','COOLDOWN':'Giới hạn tốc độ · tự chờ','TEMPORARY_ERROR':'Lỗi tạm thời · tự phục hồi',
+                labels={'READY':'Sẵn sàng cục bộ','COOLDOWN':'Giới hạn tốc độ · tự chờ','TEMPORARY_ERROR':'Lỗi tạm thời · tự phục hồi',
                     'INVALID':'Xác thực không hợp lệ','PERMISSION_DENIED':'Không có quyền dùng model','MODEL_UNAVAILABLE':'Model/request không khả dụng',
                     'QUOTA_EXHAUSTED':'Quota model · chờ reset/xác minh','CREDENTIAL_ERROR':'Không giải mã được key','UNKNOWN_ERROR':'Cần chẩn đoán','DISABLED':'Đã tắt'}
-                self.kira_keys_list.addItem(f"{k['name']} · •••••••• · {labels.get(k['status'],k['status'])}")
+                text='Đang thử kết nối lại' if k.get('service_state')=='PROBING' else labels.get(k['status'],k['status'])
+                self.kira_keys_list.addItem(f"{k['name']} · •••••••• · {text}")
                 item=self.kira_keys_list.item(self.kira_keys_list.count()-1)
                 item.setData(Qt.UserRole,k['id']);item.setCheckState(Qt.Checked if k['enabled'] else Qt.Unchecked)
                 scope=scopes[k['id']]
@@ -91,6 +115,7 @@ class KiraApiMixin:
         if hasattr(self,'kira_manage_button'):
             self.kira_manage_button.setText(f'Kira: {sum(bool(k["enabled"]) for k in rows)} key')
             self.kira_manage_button.setToolTip('Mở Kira Live Monitor: theo dõi từng key đang dịch file nào, request, dòng đã lưu và lý do chờ. Không gọi API hoặc tốn token khi mở.')
+        self.refresh_api_headers()
 
     def group_kira_account(self):
         key_id=self.selected_kira_key()
@@ -127,12 +152,15 @@ class KiraApiMixin:
 
     def delete_kira_key(self):
         key_id=self.selected_kira_key()
-        if key_id and QMessageBox.question(self,'Xóa Kira key','Chỉ xóa key đã chọn; request đang gửi sẽ hoàn tất. Không xóa bản dịch.',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)==QMessageBox.Yes:
-            self.store.change_kira_key(key_id,delete=True)
-        self.refresh_kira_keys()
-
-    def restore_kira_key(self):
-        key_id=self.selected_kira_key()
-        if key_id and QMessageBox.question(self,'Khôi phục key offline','Bạn đã kiểm tra quota/quyền truy cập? Cho key nhận batch mới, không gửi lại request lỗi; không gọi API để kiểm tra.',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)==QMessageBox.Yes:
-            self.store.change_kira_key(key_id,restore=True)
+        try:
+            if not key_id:return
+            self.credential_idle('kira')
+            row=self.store.db.execute('SELECT encrypted FROM kira_keys WHERE id=?',(key_id,)).fetchone()
+            if not row:return
+            old=[bytes(row[0])]
+            if QMessageBox.question(self,'Xóa Kira key','Xóa Kira key đã chọn (ID …'+key_id[-6:]+') khỏi kho bảo mật? Không xóa bản dịch.',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)!=QMessageBox.Yes:return
+            if self._closed:return
+            self.credential_idle('kira');self.store.change_kira_key(key_id,delete=True)
+            self.clear_credential_caches('kira',key_id,old)
+        except ValueError as exc:QMessageBox.information(self,'Không xóa được key',str(exc))
         self.refresh_kira_keys()

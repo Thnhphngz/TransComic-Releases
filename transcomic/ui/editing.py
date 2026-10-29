@@ -285,8 +285,10 @@ class SearchBar(QWidget):
     def sync_files(self):
         if not hasattr(self.window,'workspace_ids'):return
         groups={}
+        snapshot=self.translation_snapshot()
         for doc_id in self.window.workspace_ids:
-            doc=self.window.store.document(doc_id);groups.setdefault(doc['source_instance'],doc)
+            doc=snapshot['documents'].get(doc_id) if snapshot else self.window.store.document(doc_id)
+            if doc:groups.setdefault(doc['source_instance'],doc)
         existing={self.file_checks.item(i).data(Qt.UserRole) for i in range(self.file_checks.count())}
         if existing==set(groups):return
         blocker=QSignalBlocker(self.file_checks)
@@ -313,7 +315,23 @@ class SearchBar(QWidget):
     def change_document_scope(self,*_):
         self.advanced_panel.setVisible(self.document_scope.currentIndex()!=0);self.rebuild()
 
+    def translation_snapshot(self):
+        updates=getattr(self.window,'translation_updates',None)
+        if updates and updates.last and (updates.active() or getattr(self.window,'_applying_translation_snapshot',False)):
+            return updates.last
+        return None
+
     def scoped_rows(self):
+        snapshot=self.translation_snapshot()
+        if snapshot:
+            language=self.language_scope.currentData();mode=self.document_scope.currentIndex();documents=snapshot['documents']
+            current=documents.get(self.window.doc_id,{}).get('source_instance');selected=[]
+            for doc_id in self.window.workspace_ids:
+                doc=documents.get(doc_id)
+                if not doc or language and doc['target_lang']!=language:continue
+                if mode==0 and doc['source_instance']!=current or mode==2 and doc['source_instance'] not in self.selected_instances:continue
+                selected.extend(self.window.model.all_rows if doc_id==self.window.doc_id else snapshot['rows_by_document'].get(doc_id,()))
+            return selected
         if self.document_scope.currentIndex()==0:
             if not self.window.doc_id:return []
             current=self.window.store.document(self.window.doc_id);language=self.language_scope.currentData()
@@ -330,8 +348,9 @@ class SearchBar(QWidget):
 
     def unique_sources(self,rows):
         seen=set();unique=[];instances={}
+        snapshot=self.translation_snapshot()
         for row in rows:
-            if row['document_id'] not in instances:instances[row['document_id']]=self.window.store.document(row['document_id'])['source_instance']
+            if row['document_id'] not in instances:instances[row['document_id']]=(snapshot['documents'][row['document_id']] if snapshot else self.window.store.document(row['document_id']))['source_instance']
             key=(instances[row['document_id']],row['ordinal'])
             if key not in seen:seen.add(key);unique.append(row)
         return unique

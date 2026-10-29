@@ -23,7 +23,10 @@ class Retranslation:
                 raise ValueError('Tài liệu không thuộc bộ Automation đang chạy; dừng an toàn trước khi dịch thủ công.')
             if any(groups[r['document_id']]['data'].get('validation') for r in rows):
                 raise ValueError('Nhóm chưa hợp lệ; dừng an toàn và kiểm tra nguồn/mapping trước khi dịch lại.')
-            if cfg['provider'] == 'kira':
+            if cfg['provider'] == 'deepseek':
+                from ..deepseek import read_key
+                keys = [True] if read_key(self.repo.store) else []
+            elif cfg['provider'] == 'kira':
                 keys = [k for k in self.repo.store.kira_keys() if k['enabled'] and k['status'] in ('READY', 'COOLDOWN', 'TEMPORARY_ERROR')]
             else:
                 keys = [k for k in self.repo.store.gemini_keys() if k['status'] not in ('invalid', 'disabled', 'exhausted', 'authentication', 'permission', 'quota_exhausted', 'model_not_found')]

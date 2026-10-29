@@ -355,5 +355,6 @@ def test_disable_enable_cannot_clear_confirmed_quota(tmp_path):
     key=s.kira_keys()[0]['id'];s.kira_key_status(key,'QUOTA_EXHAUSTED')
     s.change_kira_key(key,enabled=False);assert s.kira_keys()[0]['status']=='DISABLED'
     s.change_kira_key(key,enabled=True);assert s.kira_keys()[0]['status']=='QUOTA_EXHAUSTED'
-    s.change_kira_key(key,restore=True);assert s.kira_keys()[0]['status']=='READY'
+    with pytest.raises(TypeError):s.change_kira_key(key,restore=True)
+    assert s.kira_keys()[0]['status']=='QUOTA_EXHAUSTED'
     s.close()

@@ -31,7 +31,7 @@ class ConsolePage(QWidget):
         self.level.addItems(["Mọi mức độ", "DEBUG", "INFO", "WARNING", "ERROR"])
         filters.addWidget(self.level)
         self.provider = QComboBox()
-        self.provider.addItems(["Mọi provider", "kira", "gemini"])
+        self.provider.addItems(["Mọi provider", "kira", "gemini", "deepseek"])
         filters.addWidget(self.provider)
         self.model = QComboBox()
         self.model.addItem("Mọi model", "")

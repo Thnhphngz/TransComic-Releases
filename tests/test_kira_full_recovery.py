@@ -130,7 +130,7 @@ def test_multilingual_main_pass_drains_before_global_review(tmp_path):
     from transcomic.documents import decode_txt
     store=Store(tmp_path/'multi.db');store.add_kira_keys('synthetic-multi-key')
     docs=[store.import_document(tmp_path/f'{i}.txt',decode_txt('Nguồn truyện tổng hợp'.encode()),'vi','en')[0] for i in range(2)]
-    run,jobs=store.create_run(docs,['en','de'],provider='kira',model='mock',source_lang='vi',concurrency=1,config={'kira_multi_key':True,'kira_retry_backoff':0})
+    run,jobs=store.create_run(docs,['en','de'],provider='kira',model='mock',source_lang='vi',concurrency=1,config={'kira_multi_key':True,'kira_retry_backoff':0,'kira_recovery_version':3})
     from transcomic.languages import language
     targets={r['id']:language(store.job(j)['target_lang']).code.lower() for j in jobs for r in store.lines(store.job(j)['document_id'])}
     bad=store.lines(store.job(jobs[0])['document_id'])[0]['id'];seen=Counter();calls=[]
@@ -195,7 +195,7 @@ def test_same_inflight_outage_cohort_does_not_amplify_cooldown_30_times(tmp_path
     finally:store.close()
 
 
-def test_explicit_resume_adopts_uncertain_policy_without_resetting_old_budget(tmp_path):
+def test_explicit_resume_never_grants_unknown_permission_or_changes_snapshot(tmp_path):
     from transcomic.kira_recovery import adopt_authorized_recovery
     store,docs,run,jobs=fixture(tmp_path,kira_wait_used=7)
     batch=store.batches(jobs[0])[0];store.claim_batch(batch['id']);attempt=store.prepare_attempt(batch['id'],1)
@@ -205,13 +205,13 @@ def test_explicit_resume_adopts_uncertain_policy_without_resetting_old_budget(tm
     before=json.loads(store.job(jobs[0])['config'])
     adopt_authorized_recovery(store,store.job(jobs[0]))
     after=json.loads(store.job(jobs[0])['config'])
-    assert after['kira_recovery_version']==2
+    assert after==before and after['kira_recovery_version']==1
     assert all(before[k]==after[k] for k in ('max_requests','kira_retry_budget','kira_wait_used','auto_retries'))
     assert len(store.attempts(batch['id']))==1
     scheduler,pool=start(store,run,jobs,response)
     try:
         scheduler.join(6)
-        assert store.run(run)['state']=='finished' and len(store.attempts(batch['id']))==2
+        assert store.run(run)['state']!='finished' and len(store.attempts(batch['id']))==1
     finally:cleanup(store,scheduler)
 
 
@@ -328,7 +328,7 @@ def test_five_docx_30_workers_mixed_recovery_and_export(tmp_path):
         for n in range(121):word.add_paragraph(f'Nguồn chương {i} dòng {n}')
         path=tmp_path/f'chapter-{i}.docx';word.save(path);paths.append(path)
     docs=import_many(store,paths,'vi','en')['document_ids']
-    run,jobs=store.create_run(docs,['en'],provider='kira',model='mock',source_lang='vi',concurrency=30,config={'kira_multi_key':True,'kira_retry_backoff':0})
+    run,jobs=store.create_run(docs,['en'],provider='kira',model='mock',source_lang='vi',concurrency=30,config={'kira_multi_key':True,'kira_retry_backoff':0,'kira_recovery_version':3})
     errors={store.lines(docs[d])[n]['id']:kind for d,n,kind in [(0,0,429),(0,3,500),(1,6,502),(1,9,503),(2,12,'timeout'),(2,15,504),(3,120,'json'),(4,117,'duplicate'),(4,114,'missing')]}
     seen=Counter();active_ids=set();active=peak=entered=0
     async def handler(req):

@@ -21,6 +21,8 @@ from test_kira_auto_recovery import response,request_lines
 @pytest.mark.parametrize('switch',[False,True])
 def test_requested_retry_uses_live_keys_and_obeys_retry_after(setup,tmp_path,status,switch):
     repo,id,s,c=setup;gid,_,_=add_group(repo,id,tmp_path/'g',count=1);other,_,_=add_group(repo,id,tmp_path/'other',count=1)
+    # Explicit permission belongs only to this synthetic HTTP fixture.
+    if status==504:repo.store.set_setting('kira_allow_unknown_resend','1')
     target=repo.store.lines(repo.group(gid)['document_id'])[0]['id'];repo.store.edit_line(target,'translation','The translated story continues')
     release=threading.Event();block_other(s,other,release);calls=[]
     def http(req):
@@ -87,7 +89,7 @@ def test_new_connections_recover_pending_request_and_preserve_newer_manual_resul
 
 
 @pytest.mark.parametrize('failure',[504,'schema'])
-def test_explicit_retry_cycle_remains_bounded_at_five_actual_requests(setup,tmp_path,failure):
+def test_explicit_retry_cycle_is_bounded_and_does_not_grant_unknown_consent(setup,tmp_path,failure):
     from transcomic.providers import KiraProvider
     repo,id,s,c=setup;gid,_,_=add_group(repo,id,tmp_path/'g',count=1);other,_,_=add_group(repo,id,tmp_path/'other',count=1)
     line=repo.store.lines(repo.group(gid)['document_id'])[0]['id'];repo.store.edit_line(line,'translation','The translated story continues')
@@ -103,12 +105,13 @@ def test_explicit_retry_cycle_remains_bounded_at_five_actual_requests(setup,tmp_
         until(lambda:s.translation.scheduler and s.translation.scheduler._thread and not s.translation.scheduler._thread.is_alive())
         assert c.enqueue_retry([line])==1
         until(lambda:c.retry_requests(id)[0]['state']=='done');release.set();c.join(10)
-        assert not c.busy and len(calls)==5
+        expected=1 if failure==504 else 5
+        assert not c.busy and len(calls)==expected
         assert repo.workset(id)['state']=='needs_attention'
         assert repo.store.line(line)['translation']=='The translated story continues'
         mapping=repo.field(gid,'batch_jobs',{})
         assert len(mapping)==1 and next(iter(mapping)).startswith('retry:')
-        assert sum(len(repo.store.attempts(b)) for b in repo.batch_ids(next(iter(mapping.values()))))==5
+        assert sum(len(repo.store.attempts(b)) for b in repo.batch_ids(next(iter(mapping.values()))))==expected
     finally:release.set()
 
 

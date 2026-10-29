@@ -384,12 +384,12 @@ def test_legacy_unknown_key_requires_last_matching_transient_evidence(tmp_path):
     store=Store(tmp_path/'synthetic.db')
     try:
         pool=KiraPoolProvider(store,'mock')
-        assert store.kira_keys()[0]['status']=='READY'
+        assert store.kira_keys()[0]['status']=='TEMPORARY_ERROR' and store.kira_keys()[0]['cooldown_until']>time.time()
         assert all(r['state']=='unknown' for r in store.lines(docs[0]))
         assert len(store.attempts(batch['id']))==1
         store.add_kira_keys('unverified-fixture-key');other=store.kira_keys()[1]['id']
         store.kira_key_status(other,'UNKNOWN_ERROR');KiraPoolProvider(store,'mock')
-        assert next(k for k in store.kira_keys() if k['id']==other)['status']=='UNKNOWN_ERROR'
+        assert next(k for k in store.kira_keys() if k['id']==other)['status']=='TEMPORARY_ERROR'
     finally:store.close()
 
 
@@ -445,7 +445,7 @@ def test_api_failure_does_not_become_success_from_old_usable_translation(tmp_pat
     scheduler,pool=start(store,None,[job],lambda req:httpx.Response(401))
     try:
         scheduler.join(2)
-        assert store.job(job)['state']=='blocked'
+        assert store.job(job)['state']=='blocked_auth'
         assert store.line(row['id'])['translation']=='Old valid translation'
         assert store.batch(store.batches(job)[0]['id'])['state']=='error'
         assert workspace_status(store.lines(doc),'needs_intervention')['state']!='Hoàn thành đầy đủ'
@@ -482,8 +482,8 @@ def test_quota_is_scoped_to_account_model_without_key_rotation_bypass(tmp_path):
         independent=KiraPoolProvider(store,'mock',rpm=1000,tpm=10000)
         second=independent.reserve(1,1);assert second and second[0]==ids[1]
         independent.release(second[0])
-        store.change_kira_key(key,restore=True)
-        pool.refresh();assert pool.availability(1)[0]
+        with pytest.raises(TypeError):store.change_kira_key(key,restore=True)
+        pool.refresh();assert not pool.availability(1)[0]  # Verified account quota cannot be cleared by a restore action.
     finally:store.close()
 
 

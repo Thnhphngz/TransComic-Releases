@@ -60,7 +60,8 @@ def verify_gateway_recovery(window,root,wait):
         assert any(j['id'] not in old_jobs for j in store.jobs())
         source=root/'gateway-cycle.txt';source.write_text('Synthetic gateway failure source',encoding='utf8')
         doc,_=store.import_document(source,import_txt(source),'vi','en')
-        job=store.create_job(doc,'longcat-2.5-preview-free','vi','en',1,config={'kira_multi_key':True,'kira_recovery_version':3,'kira_retry_backoff':0})
+        job=store.create_job(doc,'longcat-2.5-preview-free','vi','en',1,config={'kira_multi_key':True,'kira_recovery_version':3,'kira_retry_backoff':0,
+            'translation_completion_policy':0,'kira_completion_policy':0,'kira_dispatch_policy':0})
         window.workspace_ids=[doc];window.open_document(doc);mode['fail']=True
         window.scheduler=Scheduler(store,provider(store.job(job)),window.bridge.changed.emit)
         window.scheduler.start(job);wait(lambda:not window.scheduler._thread.is_alive(),100)

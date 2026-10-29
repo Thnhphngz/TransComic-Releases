@@ -23,8 +23,8 @@ class BatchResult:
     diagnostics: dict | None = None
 
 
-def validate_request_lines(lines):
-    if not 1 <= len(lines) <= 3: raise ValueError('Each request must contain 1–3 lines')
+def validate_request_lines(lines, *, max_lines=3):
+    if not 1 <= len(lines) <= max_lines: raise ValueError(f'Each request must contain 1–{max_lines} lines')
     ids = [r.get('id') for r in lines]
     if any(not isinstance(i,str) or not i for i in ids) or len(set(ids)) != len(ids):
         raise ValueError('Request line IDs must be unique and nonempty')

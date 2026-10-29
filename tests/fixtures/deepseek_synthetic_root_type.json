@@ -1,0 +1,15 @@
+{
+  "type": "json_object",
+  "lines": [
+    {"id": "line-161", "text": "The child called, \"Papa.\""},
+    {"id": "line-162", "text": "A traveler arrived at the village."},
+    {"id": "line-163", "text": "The shopkeeper opened the door."},
+    {"id": "line-164", "text": "They placed a basket on the table."},
+    {"id": "line-165", "text": "A bell rang outside the window."},
+    {"id": "line-166", "text": "The teacher read the message aloud."},
+    {"id": "line-167", "text": "The students waited in the courtyard."},
+    {"id": "line-168", "text": "A gardener watered the flowers."},
+    {"id": "line-169", "text": "Everyone returned before sunset."},
+    {"id": "line-170", "text": "The next morning was peaceful."}
+  ]
+}

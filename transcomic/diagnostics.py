@@ -18,7 +18,17 @@ FIELDS.update({'gate_wait_seconds', 'accepted_line_count'})
 FIELDS.update({'source_locale','target_locale','check','conclusion','confidence'})
 FIELDS.update({'validator_seconds','connect_seconds','headers_seconds','body_seconds','http_started_at','connection_pool_limit','http_version','stack_trace'})
 FIELDS.update({'batch_created_at','sqlite_commit_seconds'})
+FIELDS.update({'batch_size','configured_max_tokens'})
+FIELDS.update({'parser_version','raw_response_sha256','root_metadata','extra_root_keys','metadata_decision','recovery_event_id'})
 EVENTS = {
+    'dispatch_blocked': ('WARNING','SCHEDULER','Batch retained with an explicit dispatch refusal'),
+    'source_admitted': ('INFO','SCHEDULER','Source admitted within the versioned file window'),
+    'source_parked': ('INFO','SCHEDULER','Waiting source safely yielded its file slot'),
+    'source_restored': ('INFO','SCHEDULER','Older ready source restored before newer work'),
+    'source_completed': ('INFO','SCHEDULER','Committed translation and mapping certified complete'),
+    'cohort_unlocked': ('INFO','SCHEDULER','Ninety percent of a cohort certified complete'),
+    'schema_metadata': ('INFO','PARSER','DeepSeek root metadata evaluated under an explicit compatibility rule'),
+    'deepseek_response_recovered': ('INFO','DATABASE','Saved DeepSeek response adopted offline; original request history preserved'),
     'recovery_phase': ('INFO','SCHEDULER','Durable global translation/error review phase'),
     'gateway_backoff': ('WARNING','SCHEDULER','Observed HTTP 504; bounded shared pacing, not provider quota'),
     'shutdown_error': ('ERROR','UI','Safe exit failed; committed results retained, inspect redacted stack frames'),
@@ -103,6 +113,15 @@ class DiagnosticLog:
             with self.lock:
                 self.secrets.add(value)
 
+    def retire_secret(self, value):
+        """Keep a redaction fingerprint without retaining a deleted credential."""
+        if value:
+            import hashlib
+            with self.lock:
+                if not hasattr(self,'retired_secrets'):self.retired_secrets=set()
+                self.retired_secrets.add((len(value),hashlib.sha256(value.encode()).digest()))
+                self.secrets.discard(value)
+
     def clean(self, value):
         if isinstance(value, dict):
             return {k: self.clean(v) for k, v in value.items() if k in FIELDS or k in {"connect", "read", "write", "pool", "prompt_tokens", "completion_tokens", "total_tokens"} or k.lower().startswith(('x-ratelimit-', 'ratelimit-'))}
@@ -111,6 +130,13 @@ class DiagnosticLog:
         if isinstance(value, str):
             for secret in self.secrets:
                 value = value.replace(secret, "[redacted]")
+            for length,digest in getattr(self,'retired_secrets',()):
+                import hashlib
+                start=0
+                while start+length<=len(value):
+                    if hashlib.sha256(value[start:start+length].encode()).digest()==digest:
+                        value=value[:start]+'[redacted]'+value[start+length:];start+=len('[redacted]')
+                    else:start+=1
             value = re.sub(r"(?i)bearer\s+\S+|sk-[A-Za-z0-9_-]+", "[redacted]", value)
             return value[:512]
         return value if isinstance(value, (int, float, bool)) or value is None else type(value).__name__

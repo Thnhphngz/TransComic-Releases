@@ -8,7 +8,7 @@ import pytest
 from PySide6.QtCore import Qt,QMimeData,QUrl,QPointF
 from PySide6.QtGui import QDragEnterEvent,QDropEvent,QFontDatabase
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication,QMessageBox,QStyleOptionViewItem,QStyle,QSplitter
+from PySide6.QtWidgets import QApplication,QMessageBox,QStyleOptionViewItem,QStyle,QSplitter,QSystemTrayIcon
 from transcomic.storage import Store
 from transcomic.ui.main import MainWindow
 from transcomic.ui.tts_page import TtsPage
@@ -28,7 +28,9 @@ def wait(app,predicate,seconds=8):
 
 @pytest.fixture
 def gui(tmp_path,monkeypatch):
-    monkeypatch.setenv('QT_QPA_PLATFORM','offscreen');app=QApplication.instance() or QApplication([])
+    if os.environ.get('TRANSCOMIC_NATIVE_UI')!='1':monkeypatch.setenv('QT_QPA_PLATFORM','offscreen')
+    app=QApplication.instance() or QApplication([])
+    monkeypatch.setattr(QSystemTrayIcon,'isSystemTrayAvailable',lambda:False)
     # Windows offscreen QPA does not discover system fonts as the native QPA does.
     for name in ('segoeui.ttf','seguisym.ttf'):
         font=Path(os.environ.get('WINDIR','C:/Windows'))/'Fonts'/name
@@ -41,7 +43,7 @@ def gui(tmp_path,monkeypatch):
     services.translation=Translation(repo,lambda store,job:KiraPoolProvider(store,'mock',transport=httpx.MockTransport(response),rpm=100000,tpm=100000000),network_probe=lambda provider:True)
     FakeEngine.calls=[];FakeEngine.fail=None;FakeEngine.entered=None;FakeEngine.release=None
     services.kokoro=Kokoro(repo,services.tts_store,None,engine_factory=FakeEngine)
-    output=tmp_path/'projects';output.mkdir();cfg=defaults(store);cfg.update(model='mock',device='CPU',output=str(output))
+    output=tmp_path/'projects';output.mkdir();cfg=defaults(store);cfg.update(model='mock',device='CPU',output=str(output),kira_completion_policy=0,kira_dispatch_policy=0,translation_completion_policy=0)
     id=repo.create('Bộ truyện thử',cfg);store.add_kira_keys('automation-ui-fixture');p.load_worksets(id)
     yield app,window,p,id
     window.automation_controller.stop_event.set();services.translation.stop()
@@ -59,11 +61,13 @@ def test_layout_shared_sidebar_validation_and_real_start_lock(gui,tmp_path,monke
     assert p.proof['passed'] and p.start.isEnabled()
     monkeypatch.setattr(QMessageBox,'question',lambda *args:QMessageBox.Yes)
     QTest.mouseClick(p.start,Qt.LeftButton);app.processEvents()
+    wait(app,lambda:not p.config_frame.isEnabled())
     assert not p.config_frame.isEnabled() and p.config_opacity.opacity()<1
     assert 'Cấu hình đã khóa' in p.lock_note.text()
-    assert not p.start.isEnabled()
+    assert p.start.isEnabled() and p.start.text()=='Tạm dừng'
     wait(app,lambda:not w.automation_controller.busy)
-    p.flush();assert p.repo.workset(id)['state']=='completed'
+    p.flush();assert p.snapshots.wait_for_idle()
+    assert p.repo.workset(id)['state']=='completed'
     assert p.config_frame.isEnabled() and not p.fields['voice'].isEnabled() and not p.fields['speed'].isEnabled()
     assert p.repo.group(gid)['document_id'] in w.workspace_ids
     w.pages.setCurrentIndex(7);app.processEvents();assert w.tts_page.store is w.automation_services.tts_store
@@ -85,7 +89,8 @@ def test_drop_folder_requires_target_row_and_actions_use_stable_id(gui,tmp_path,
     app,w,p,id=gui;gid,path,folder=add_group(p.repo,id,tmp_path/'a');other,path2,folder2=add_group(p.repo,id,tmp_path/'b','3-4');p.refresh()
     p.drop_paths([str(tmp_path/'a')],None);assert len(p.repo.groups(id))==2
     p.drop_paths([str(folder2)],gid);wait(app,lambda:p.repo.group(gid)['data']['image_folder']==str(folder2.resolve()))
-    p.search.setText(str(path2));p.flush();assert p.model.rowCount()==1 and p.model.rows[0]['id']==other
+    p.search.setText(str(path2));p.flush();assert p.snapshots.wait_for_idle()
+    assert p.model.rowCount()==1 and p.model.rows[0]['id']==other
     p.row_action(other,'editor');assert w.doc_id==p.repo.group(other)['document_id'] and w.pages.currentIndex()==0
     assert FakeEngine.calls==[] and p.repo.store.jobs()==[]
 

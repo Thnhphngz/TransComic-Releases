@@ -15,6 +15,9 @@ class NeedsRescue(ValueError):pass
 
 
 def provider_for(store,job):
+    if job['provider']=='deepseek':
+        from ..deepseek import provider_for as deepseek_provider
+        return deepseek_provider(store, job)
     if job['provider']=='kira':
         from ..kira_pool import KiraPoolProvider
         return KiraPoolProvider(store,job['model'],timeout=job['timeout'],prompt_version=job['prompt_version'])
@@ -27,11 +30,11 @@ def provider_for(store,job):
 
 
 class Translation:
-    """One shared scheduler per pass: initial + three retries + final rescue.
+    """Kira v4 uses one durable scheduler; legacy passes keep frozen behavior.
 
-    The scheduler's own retry count is zero for this scope. Original chunks are
-    stable; a partial reply never merges lines from different original batches.
-    Durable request_attempts remain the authority for requests actually sent.
+    Original chunks and request_attempts retain their identity across recovery.
+    Historical DeepSeek jobs retain single-pass behavior; newly authorized
+    completion jobs recover on the same durable scheduler.
     """
     def __init__(self,repo,provider_factory=provider_for,scheduler_factory=None,network_probe=None):
         from ..translation import Scheduler
@@ -46,12 +49,21 @@ class Translation:
             if self.scheduler:self.scheduler.stop()
     def run(self,id,groups,config,stop,changed,*,line_ids=None,scope=None,exclude_ids=()):
         cycle=self.repo.workset(id)['cycle'];boundaries={};line_groups={}
-        for group in groups:
-            from ..documents import translatable
+        from ..documents import translatable
+        from ..deepseek_batch import job_size
+        batch_size=job_size(config['provider'],config)
+        for group in (() if config['provider']=='kira' and config.get('kira_dispatch_policy')==1 else groups):
             rows=[r for r in self.store.lines(group['document_id']) if translatable(r['source'])]
-            boundaries[group['id']]=[rows[i:i+3] for i in range(0,len(rows),3)]
+            boundaries[group['id']]=[rows[i:i+batch_size] for i in range(0,len(rows),batch_size)]
             line_groups.update({r['id']:group for r in rows})
+        if config['provider']=='kira' and config.get('kira_dispatch_policy')==1:
+            by_doc={g['document_id']:g for g in groups}
+            for row in self.repo.rows('SELECT l.id,l.document_id FROM lines l JOIN automation_groups g ON g.document_id=l.document_id WHERE g.workset_id=?',(id,)):
+                if row['document_id'] in by_doc:line_groups[row['id']]=by_doc[row['document_id']]
         def notify(ids):
+            controller=getattr(self.repo,'controller',None);scheduler=self.scheduler
+            if controller and controller.preparing.is_set() and scheduler and scheduler._thread and scheduler._thread.is_alive() and getattr(scheduler,'waiting',0):
+                controller.preparing.clear();controller.checkpoint(id,preparing=False)
             candidates={line_groups[i]['id']:line_groups[i] for i in ids if i in line_groups}
             for gid,group in candidates.items():
                 self.repo.progress(gid)
@@ -63,7 +75,12 @@ class Translation:
                     if all(usable(r) for r in rows if translatable(r['source'])) and not validate_snapshot(self.store.document(group['document_id']),rows).structural:
                         self.repo.update_group(gid,translation_ready_cycle=cycle,translation_ready_at=time.monotonic_ns())
             changed()
-        for phase in range(5):
+        deepseek = config['provider']=='deepseek'
+        if deepseek and config.get('translation_completion_policy')==1:
+            return self.continuous(id,groups,config,stop,notify,line_ids=line_ids,scope=scope,exclude_ids=exclude_ids)
+        if config['provider']=='kira' and config.get('kira_recovery_version',2)>=4:
+            return self.always_on(id,groups,config,stop,notify,line_ids=line_ids,scope=scope,exclude_ids=exclude_ids)
+        for phase in range(1 if deepseek else 5):
             if stop.is_set():return
             jobs=[]
             with self.dispatch_lock:
@@ -79,12 +96,18 @@ class Translation:
                         if not wanted:continue
                         key=f'{scope or cycle}:{index}';prior=mapping.get(key,[])
                         attempts=[a for batch_id in self.repo.batch_ids(prior) for a in self.store.attempts(batch_id)]
-                        if len(attempts)>=5:continue
+                        if len(attempts)>=(1 if deepseek else 5):continue
                         if attempts and not retryable(attempts[-1].get('diagnostics') or {}):continue
                         selected.append((key,wanted,prior,index))
                     if not selected:continue
                     cfg={'automation_owner':id,'automation_cycle':cycle,'automation_boundaries':[ids for key,ids,prior,index in selected],
                          'auto_retries':0,'kira_multi_key':config['provider']=='kira','kira_retry_limit':0,'kira_retry_budget':0,'kira_recovery_version':2,'uncertain_retry_authorized':True}
+                    if deepseek:
+                        from ..deepseek import settings
+                        cfg.update(settings(self.store, config['model'],batch_size))
+                        cfg['translation_completion_policy']=config.get('translation_completion_policy',0)
+                        for name in list(cfg):
+                            if name.startswith('kira_') or name=='uncertain_retry_authorized':cfg.pop(name)
                     if config['provider']=='gemini':
                         keys=[k for k in self.store.gemini_keys() if k['status'] not in ('invalid','disabled','exhausted','authentication','permission','quota_exhausted','model_not_found')]
                         cfg.update(key_ids=[k['id'] for k in keys],key_projects={k['id']:k['project'] for k in keys},
@@ -113,6 +136,7 @@ class Translation:
                 if stop.is_set():self.scheduler.stop()
                 time.sleep(.05)
             self.scheduler.join();changed()
+            if deepseek:return  # No outer retry, network wait, or implicit replay.
             reason=self.scheduler.intervention_reason
             if self.scheduler.quota_paused or reason and ('key' in reason or 'quota' in reason or 'token_budget' in reason):
                 self.repo.event(id,None,'translation','Cần bổ sung/kiểm tra API key: '+str(reason));return
@@ -126,6 +150,168 @@ class Translation:
                 if delay>300:
                     self.repo.event(id,None,'translation','Retry-After vượt thời gian chờ; giữ checkpoint, không gửi sớm.');return
                 stop.wait(delay)
+
+
+    def always_on(self,id,groups,config,stop,notify,*,line_ids=None,scope=None,exclude_ids=()):
+        """One durable scheduler, no outer replay jobs or UI-driven Continue."""
+        if config.get('kira_dispatch_policy')==1:
+            return self.admitted(id,groups,config,stop,notify,line_ids=line_ids,scope=scope,exclude_ids=exclude_ids)
+        cycle=self.repo.workset(id)['cycle'];jobs=[];group_jobs={}
+        with self.dispatch_lock:
+            if stop.is_set() or self.stopping:return
+            with self.store.transaction():
+                checkpoint=self.repo.workset(id)['checkpoint']
+                anchor=checkpoint.setdefault('kira_recovery_cycle',cycle)
+                self.store.db.execute('UPDATE automation_worksets SET checkpoint=? WHERE id=?',(json.dumps(checkpoint),id))
+            for group in groups:
+                signature=fingerprint([(r['id'],r['source_revision']) for r in self.store.lines(group['document_id'])])
+                mapping=self.repo.field(group['id'],'batch_jobs',{});key=f'{scope or anchor}:always4:{signature}'
+                rows=[r for r in self.store.lines(group['document_id']) if not usable(r) and r['id'] not in exclude_ids and
+                      (line_ids is not None and r['id'] in line_ids or line_ids is None and r['attempt_kind']!='manual')]
+                if not rows:continue
+                existing=mapping.get(key,[])
+                if existing:
+                    jobs.extend(existing);group_jobs[group['id']]=existing[0];continue
+                # Do not invent a fresh lineage for legacy attempts/unknowns.
+                legacy=[entry for k,entries in mapping.items() if k.startswith(f'{scope or anchor}:') and ':always4' not in k for entry in entries]
+                if legacy and any(self.store.attempts(b) for b in self.repo.batch_ids(legacy)):
+                    self.repo.update_group(group['id'],translation_recovery_state='needs_reconciliation',translation_recovery_reason='legacy_checkpoint_requires_review')
+                    self.repo.event(id,group['id'],'translation','Giữ checkpoint cũ; không tạo request mới để vượt quyền/budget.');continue
+                cfg={k:v for k,v in config.items() if k.startswith('kira_') or k in ('uncertain_retry_authorized','translation_completion_policy')}
+                cfg.update(automation_owner=id,automation_cycle=anchor,kira_multi_key=True,kira_recovery_version=4)
+                with self.store.transaction():
+                    job=self.store.create_job(group['document_id'],config['model'],config['source_lang'],config['target_lang'],config['workers'],
+                        [r['id'] for r in rows],provider='kira',config=cfg,allow_shared_document=True)
+                    self.repo.update_group(group['id'],batch_jobs={**mapping,key:[job]},state='translating')
+                jobs.append(job)
+                group_jobs[group['id']]=job
+            if not jobs:return
+            provider=self.provider_factory(self.store,self.store.job(jobs[0]))
+            self.scheduler=self.factory(self.store,provider,notify)
+        while True:
+            with self.dispatch_lock:
+                if stop.is_set() or self.stopping:return
+                paused=getattr(getattr(self.repo,'controller',None),'paused',None)
+                if paused is None or not paused.is_set():
+                    self.scheduler.start_many(list(dict.fromkeys(jobs)));break
+            stop.wait(.1)
+        while self.scheduler._thread.is_alive():
+            for group in groups:
+                if group['id'] not in group_jobs:continue
+                state=self.store.job(group_jobs[group['id']])['state']
+                detail=getattr(self.scheduler,'recovery_details',{}).get(group_jobs[group['id']],{}) if state in ('provider_recovering','retry_scheduled','network_waiting','waiting_rate_limit','blocked_budget','blocked','needs_reconciliation') else {}
+                self.repo.update_group(group['id'],translation_recovery_state=state,
+                    translation_recovery_reason=detail.get('reason') or self.scheduler.intervention_reason or state,
+                    next_retry_at=detail.get('next_retry_at'))
+            notify([])
+            if stop.wait(.25):self.scheduler.stop()
+        self.scheduler.join()
+        for gid,job in group_jobs.items():
+            state=self.store.job(job)['state']
+            reason='' if state=='finished' else getattr(self.scheduler,'job_block_reasons',{}).get(job) or self.scheduler.intervention_reason or ''
+            self.repo.update_group(gid,translation_recovery_state=state,translation_recovery_reason=reason,next_retry_at=None)
+        notify([])
+
+    def admitted(self,id,groups,config,stop,notify,*,line_ids=None,scope=None,exclude_ids=()):
+        """Prepare admitted files only; keep one scheduler and durable job IDs."""
+        from .validation import validate,check_current
+        from ..documents import translatable
+        from ..line_structure import validate_snapshot
+        deepseek=config['provider']=='deepseek';cycle_key='deepseek_completion_cycle' if deepseek else 'kira_recovery_cycle'
+        cycle=self.repo.workset(id)['cycle'];cp=self.repo.workset(id)['checkpoint'];anchor=cp.get(cycle_key,cycle)
+        if deepseek:
+            from ..deepseek_rolling import admission_policy
+            deepseek_policy=admission_policy(cp.get('deepseek_admission_policy'))
+        if cycle_key not in cp:
+            cp[cycle_key]=anchor
+            with self.store.transaction():self.store.db.execute('UPDATE automation_worksets SET checkpoint=? WHERE id=?',(json.dumps(cp),id))
+        docs={r['id']:r for r in self.repo.rows('SELECT id,source_instance FROM documents WHERE id IN (SELECT document_id FROM automation_groups WHERE workset_id=?)',(id,))}
+        by_source={docs[g['document_id']]['source_instance']:g for g in groups};source_order=list(by_source)
+        complete=set();group_jobs={};job_groups={};dispatched=set()
+        for source,g in by_source.items():
+            rows=self.store.lines(g['document_id'])
+            if all(usable(r) and r['state']=='done' for r in rows if translatable(r['source'])):
+                report=validate_snapshot(self.store.document(g['document_id']),self.store.units(g['document_id']))
+                if not report.structural and not report.missing and not report.errors:complete.add(source)
+        def load(source):
+            check_current(lambda:stop.is_set() or self.stopping)
+            g=self.repo.group(by_source[source]['id'])
+            proof=validate(self.repo,id,groups=[g],inputs_only=True,cancelled=lambda:stop.is_set() or self.stopping)
+            if not proof['passed']:raise ValueError(' · '.join(proof['errors']+[', '.join(v['errors']) for v in proof['groups'] if v['errors']]))
+            rows=self.store.lines(g['document_id']);signature=fingerprint([(r['id'],r['source_revision']) for r in rows]);policy='completion1' if config.get('translation_completion_policy')==1 else 'always4';key=f'{scope or anchor}:{policy}:{signature}'
+            mapping=self.repo.field(g['id'],'batch_jobs',{});existing=mapping.get(key,[])
+            selected=[r['id'] for r in rows if not usable(r) and r['id'] not in exclude_ids and
+                      (line_ids is not None and r['id'] in line_ids or line_ids is None and r['attempt_kind']!='manual')]
+            if not selected:complete.add(source);return None
+            with self.dispatch_lock:
+                check_current(lambda:stop.is_set() or self.stopping)
+                if existing:
+                    job=existing[0]
+                    if deepseek and admission_policy(json.loads(self.store.job(job)['config']).get('deepseek_admission_policy'))!=deepseek_policy:
+                        raise ValueError('DeepSeek job admission policy differs from its workset; preserve checkpoint')
+                    from ..completion import reconcile_unknown
+                    reconcile_unknown(self.store,[job])
+                else:
+                    if deepseek:
+                        from ..deepseek import settings
+                        cfg=settings(self.store,config['model'],config.get('deepseek_batch_size',3))
+                        cfg.update(automation_owner=id,automation_cycle=anchor,deepseek_admission_policy=deepseek_policy)
+                    else:
+                        cfg={k:v for k,v in config.items() if k.startswith('kira_') or k in ('uncertain_retry_authorized','translation_completion_policy')}
+                        cfg.update(automation_owner=id,automation_cycle=anchor,kira_multi_key=True,kira_recovery_version=4,
+                                   kira_dispatch_order=source_order,kira_initial_completed=list(complete),kira_admission_key=str(scope or anchor))
+                    with self.store.transaction():
+                        job=self.store.create_job(g['document_id'],config['model'],config['source_lang'],config['target_lang'],config['workers'],selected,provider=config['provider'],config=cfg,allow_shared_document=True)
+                        self.repo.update_group(g['id'],batch_jobs={**mapping,key:[job]},state='preparing')
+                group_jobs[g['id']]=job;job_groups[job]=g['id']
+                return job
+        jobs=[]
+        for source in source_order:
+            if source in complete:continue
+            job=load(source)
+            if job:jobs.append(job)
+            if len(jobs)>=(1 if config.get('translation_completion_policy')==1 else 10):break
+        if not jobs:
+            controller=getattr(self.repo,'controller',None)
+            if controller:controller.preparing.clear();controller.checkpoint(id,preparing=False)
+            return
+        with self.dispatch_lock:
+            if stop.is_set() or self.stopping:return
+            self.scheduler=self.factory(self.store,self.provider_factory(self.store,self.store.job(jobs[0])),notify)
+            self.scheduler.job_loader=load;self.scheduler.loader_complete=complete
+            if deepseek:self.scheduler.source_order=source_order;self.scheduler.admission_key=str(scope or anchor)
+            self.scheduler.network_probe=lambda:self.network_probe(config['provider'])
+            def dispatch(job):
+                if job not in dispatched:
+                    dispatched.add(job);self.repo.update_group(job_groups[job],state='translating')
+                controller=getattr(self.repo,'controller',None)
+                if controller and controller.preparing.is_set():
+                    controller.preparing.clear();controller.checkpoint(id,preparing=False)
+                    notify([])
+            self.scheduler.on_dispatch=dispatch
+        while not stop.is_set() and not self.stopping:
+            paused=getattr(getattr(self.repo,'controller',None),'paused',None)
+            if paused is None or not paused.is_set():break
+            stop.wait(.05)
+        if stop.is_set() or self.stopping:return
+        self.scheduler.start_many(jobs)
+        while self.scheduler._thread.is_alive():
+            for gid,job in list(group_jobs.items()):
+                state=self.store.job(job)['state'];detail=getattr(self.scheduler,'recovery_details',{}).get(job,{})
+                self.repo.update_group(gid,translation_recovery_state=state,translation_recovery_reason=detail.get('reason') or state,
+                                       next_retry_at=detail.get('next_retry_at'))
+            notify([])
+            if stop.wait(.25):self.scheduler.stop()
+        self.scheduler.join()
+        for gid,job in list(group_jobs.items()):
+            state=self.store.job(job)['state'];reason='' if state=='finished' else self.scheduler.job_block_reasons.get(job) or self.scheduler.intervention_reason or ''
+            self.repo.update_group(gid,translation_recovery_state=state,translation_recovery_reason=reason,next_retry_at=None)
+        notify([])
+
+
+    def continuous(self,id,groups,config,stop,notify,*,line_ids=None,scope=None,exclude_ids=()):
+        """DeepSeek keeps durable lineage and its creation-time admission policy."""
+        return self.admitted(id,groups,config,stop,notify,line_ids=line_ids,scope=scope,exclude_ids=exclude_ids)
 
 
 def network_ready(provider):

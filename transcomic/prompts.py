@@ -14,6 +14,19 @@ KIRA_RECOVERY_PROMPT_VERSION = 'review-v5-kira-recovery'
 
 
 def messages(lines, source, target, version=PROMPT_VERSION):
+    from .translation_policy import SEMANTIC_VERSIONS, instructions, facts
+    if version in SEMANTIC_VERSIONS:
+        from .languages import validate_pair
+        a,b=validate_pair(source,target)
+        targets={r['id'] for r in lines};context={}
+        for line in lines:
+            for item in line.get('context',[]):
+                if item['id'] not in targets:context[item['id']]={'id':item['id'],'text':item['source']}
+        payload={'lines':[{'id':r['id'],'text':r['source']} for r in lines], 'reference_only':list(context.values())}
+        profile=facts(lines[0].get('semantic_facts'))
+        if profile:payload['verified_story_facts']=[r['fact'] for r in profile]
+        instruction=instructions(a.prompt,b.prompt,version)+f'Target locale: {b.locale}; return exactly {len(lines)} objects for IDs '+json.dumps([r['id'] for r in lines])+'. Copy IDs verbatim; never substitute ordinals or reference IDs.'
+        return [{'role':'system','content':instruction},{'role':'user','content':json.dumps(payload,ensure_ascii=False)}]
     if version in (PROMPT_VERSION,KIRA_RECOVERY_PROMPT_VERSION):
         from .languages import validate_pair
         a,b=validate_pair(source,target)

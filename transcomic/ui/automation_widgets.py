@@ -62,6 +62,7 @@ class CompletionRing(QWidget):
         super().__init__(parent);self.done=0;self.total=0;self.setFixedSize(88,94)
         self.setAccessibleName('Số nhóm hoàn tất')
     def set_counts(self,done,total):
+        if (done,total)==(self.done,self.total):return
         self.done=done;self.total=total;self.setAccessibleDescription(f'{done}/{total} nhóm hoàn tất');self.update()
     def paintEvent(self,event):
         c=colors(self);p=QPainter(self);p.setRenderHint(QPainter.Antialiasing)

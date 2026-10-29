@@ -15,7 +15,7 @@ def test_new_worksets_blank_names_saved_names_reopen_and_focus(gui,monkeypatch):
         cfg=repo.workset(id)['config'];assert cfg['project_name']=='' and cfg['part_names']=={} and cfg['speed']==1.2
         assert p.fields['project_name'].text()==''
         p.start_clicked();app.processEvents();assert not p.controller.busy
-        assert p.fields['project_name'].hasFocus() and 'Tên project' in p.notice.text()
+        assert p.fields['project_name'].hasFocus() and 'Tên project' in p.project_warning.text()
         p.fields['project_name'].setText('   ');p.start_clicked();assert not p.controller.busy
         p.fields['project_name'].setText(name);p.config_changed()
     for id,name in zip(ids,('First distinct project','Second distinct project')):

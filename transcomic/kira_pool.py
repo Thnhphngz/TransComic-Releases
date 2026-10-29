@@ -58,10 +58,13 @@ class KiraPoolProvider(KiraProvider):
             if row['status'] in ('COOLDOWN','TEMPORARY_ERROR') and 0<row['cooldown_until']<=time.time():
                 self.store.kira_key_status(key_id,'READY');row.update(status='READY',cooldown_until=0)
             blocked=settings.get('kira_model_status:'+key_id+':'+self.model,'')
+            row['quota_probe_pending']=settings.get('kira_quota_probe:'+key_id+':'+self.model)=='1'
             if blocked=='QUOTA_EXHAUSTED':
                 reset=quota_deadline(settings.get('kira_quota_reset:'+key_id+':'+self.model,'0'))
                 if reset>0 and reset<=time.time():
                     self.store.set_setting('kira_model_status:'+key_id+':'+self.model,'')
+                    self.store.set_setting('kira_quota_probe:'+key_id+':'+self.model,'1')
+                    row['quota_probe_pending']=True
                     self.store.kira_key_status(key_id,'READY'); row.update(status='READY',cooldown_until=0);blocked=''
             if blocked:row['status']=blocked
             elif row['status'] in ('PERMISSION_DENIED','MODEL_UNAVAILABLE') or (row['status']=='QUOTA_EXHAUSTED' and settings.get('kira_key_status_model:'+key_id,'') not in ('',self.model)):
@@ -103,6 +106,7 @@ class KiraPoolProvider(KiraProvider):
             scope=self.scopes[key_id]
             group_reset=quota_deadline(settings.get('kira_verified_quota_reset:'+scope+':'+self.model,'0'))
             self.quota_scopes[scope]=settings.get('kira_verified_quota:'+scope+':'+self.model,'')=='1' and (group_reset<=0 or group_reset>time.time())
+            if settings.get('kira_verified_quota:'+scope+':'+self.model,'')=='1' and group_reset>0 and group_reset<=time.time():row['quota_probe_pending']=True
         for key_id in set(self.keys)-existing: del self.keys[key_id]
         self._order = deque(k for k in self._order if k in existing)
 
@@ -223,6 +227,9 @@ class KiraPoolProvider(KiraProvider):
         with self.monitor.lock:self.busy[key_id]-=1
         if result is None: return
         d=result.diagnostics or {}; kind=d.get('failure_kind'); state=None; until=0
+        if d.get('http_status')==200:
+            self.store.set_setting('kira_quota_probe:'+key_id+':'+self.model,'')
+            self.store.set_setting('kira_verified_quota:'+self.scopes[key_id]+':'+self.model,'')
         scope=self.scopes[key_id];health=self.health[scope];now=time.time()
         self.gateway_feedback(result,now)
         if kind=='authentication': state='INVALID'
@@ -255,25 +262,25 @@ class KiraPoolProvider(KiraProvider):
             if scope=='shared': self.account_cooldown=self.cooldowns[scope]
         elif kind=='permission':state='PERMISSION_DENIED'
         elif kind=='model_or_request':state='MODEL_UNAVAILABLE'
-        elif result.unknown or kind=='connect_not_sent':
+        elif result.unknown or kind in ('connect_not_sent','http_server_error','http_error'):
             state='TEMPORARY_ERROR'
             # Responses from the same already-inflight cohort are one outage,
             # not 30 consecutive failed recovery attempts. Never shorten a
             # provider Retry-After already attached to this account.
             if self.cooldowns.get(scope,0)<=now:
                 health['strikes']+=1
-                until=now+min(30,2**min(health['strikes'],5))
+                until=now+(min(3,.25*2**min(health['strikes']-1,5)) if getattr(self,'completion_policy',False) else min(30,2**min(health['strikes'],5)))
                 if d.get('http_status') in (502,503,504):health['limit']=max(1,health['limit']//2)
             else:until=self.cooldowns[scope]
             hint=d.get('retry_after_seconds')
             if isinstance(hint,(int,float)) and math.isfinite(hint):until=max(until,now+max(0,hint))
             health.update(last_error=now,successes=0)
             self.cooldowns[scope]=max(self.cooldowns.get(scope,0),until)
-        elif kind=='http_error':state='UNKNOWN_ERROR'
         elif not result.error:
             health['successes']+=1
-            if health['successes']>=5 and now-health['last_error']>=10:
-                health['limit']=min(self.account_limit,health['limit']+1)
+            completing=getattr(self,'completion_policy',False)
+            if health['successes']>=(2 if completing else 5) and now-health['last_error']>=(1 if completing else 10):
+                health['limit']=min(self.account_limit,health['limit']+(max(1,self.account_limit//5) if completing else 1))
                 health['strikes']=max(0,health['strikes']-1)
                 health['spacing']*=.8;health['successes']=0
                 if health['limit']==self.account_limit and health['spacing']<.02:health['spacing']=0
@@ -304,8 +311,9 @@ class KiraPoolProvider(KiraProvider):
             self.gateway_until=max(self.gateway_until,now+max(.02,delay))
         elif not result.error and not result.unknown and now>=self.gateway_until:
             self.gateway_successes+=1
-            if self.gateway_successes>=5:
-                self.gateway_limit=min(self.gateway_maximum,self.gateway_limit+1);self.gateway_successes=0
+            completing=getattr(self,'completion_policy',False)
+            if self.gateway_successes>=(2 if completing else 5):
+                self.gateway_limit=min(self.gateway_maximum,self.gateway_limit+(max(1,self.gateway_maximum//5) if completing else 1));self.gateway_successes=0
         if before!=self.gateway_limit:
             record={'reason':'gateway_timeout' if d.get('http_status') in (502,503,504) else 'stable_success',
                     'previous':before,'effective':self.gateway_limit,'maximum':self.gateway_maximum}
@@ -328,6 +336,8 @@ class KiraPoolProvider(KiraProvider):
                     'busy':self.busy[k],'account_scope':self.scopes[k],
                     'name':self.keys[k]['name'] if k in self.keys else self.monitor.key_names.get(k,'Removed key'),
                     'status':self.keys[k]['status'] if k in self.keys else 'REMOVED',
+                    'credential_state':('EXPLICITLY_DISABLED_BY_USER' if k not in self.keys or not self.keys[k]['enabled'] else 'AUTH_INVALID' if self.keys[k]['status']=='INVALID' else 'QUOTA_EXHAUSTED' if self.keys[k]['status']=='QUOTA_EXHAUSTED' or self.keys[k].get('quota_probe_pending') else 'AVAILABLE'),
+                    'service_state':('HEALTHY' if k not in self.keys else 'PROBING' if self.keys[k].get('quota_probe_pending') or self.busy[k] and self.health[self.scopes[k]]['strikes'] else 'CIRCUIT_OPEN' if self.keys[k]['status']=='TEMPORARY_ERROR' else 'RATE_LIMITED' if self.keys[k]['status']=='COOLDOWN' else 'HEALTHY'),
                     'enabled':bool(self.keys[k]['enabled']) if k in self.keys else False,
                     'slot_limit':min(per_key,self.account_limit),
                     'wait_reason':self._reason(k,per_key,time.time()) or ('no_pending_work' if self.pending_batches==0 else 'ready'),

@@ -50,6 +50,9 @@ class PeriodWarning(GlassButton):
 
     def schedule(self, *_):
         if self.owner._closed or self.owner._exit_pending: return
+        updates=getattr(self.owner,'translation_updates',None)
+        if getattr(self.owner,'_applying_translation_snapshot',False):return
+        if updates and updates.active():updates.request();return
         with self.owner.store.lock:
             signature = (self.owner.store.db.total_changes, tuple(sorted(set(self.owner.workspace_ids))))
         if signature != self._signature and not self.timer.isActive(): self.timer.start()
@@ -57,6 +60,8 @@ class PeriodWarning(GlassButton):
     def recount(self):
         owner = self.owner
         if owner._closed or owner._exit_pending: return
+        updates=getattr(owner,'translation_updates',None)
+        if updates and updates.active():updates.request();return
         ids = tuple(dict.fromkeys(owner.workspace_ids)); rows = []
         with owner.store.lock:
             signature = (owner.store.db.total_changes, tuple(sorted(ids)))
@@ -67,11 +72,20 @@ class PeriodWarning(GlassButton):
                     'SELECT l.id,l.document_id,l.ordinal,l.translation,d.path,d.target_lang '
                     'FROM lines l JOIN documents d ON d.id=l.document_id WHERE l.document_id IN ('+
                     ','.join('?' for _ in chunk)+") AND instr(l.translation, '.') > 0 ORDER BY l.ordinal", chunk):
+                    from ..translation_policy import SEMANTIC_VERSIONS
+                    if owner.store.line_policies(row['document_id']).get(row['id']) in SEMANTIC_VERSIONS:continue
                     rows.append({'id': row['id'], 'document_id': row['document_id'], 'ordinal': row['ordinal'],
                                  'preview': preview(row['translation']), 'document': Path(row['path']).name,
                                  'language': row['target_lang']})
         order = {doc: i for i, doc in enumerate(ids)}
         rows.sort(key=lambda r: (order[r['document_id']], r['ordinal'], r['id']))
+        self.apply_rows(rows,signature)
+
+    def apply_rows(self,rows,signature):
+        owner=self.owner;ids=tuple(owner.workspace_ids)
+        same_scope=getattr(self,'_rows_workspace',None)==ids;self._rows_workspace=ids
+        if same_scope and self.rows==tuple(rows):self._signature=signature;return
+        own_before=tuple(r for r in self.rows if r['document_id']==owner.doc_id);focus_before=self.focus_key
         self._signature = signature; self.rows = tuple(rows); self.count = len(rows)
         self.setText(f'⚠\ufe0e {self.count} dòng dịch có dấu chấm'); self.setAccessibleName(self.text())
         self.setVisible(self.count > 0)
@@ -82,7 +96,7 @@ class PeriodWarning(GlassButton):
                 editor._period_keep = False
                 if editor is not owner.table.itemDelegate().active_editor: editor.deleteLater()
         if self.dialog is not None: self.dialog.update_rows(self.rows)
-        self.update_highlight()
+        if own_before!=tuple(r for r in self.rows if r['document_id']==owner.doc_id) or focus_before!=self.focus_key:self.update_highlight()
 
     def open_list(self):
         from .period_dialog import PeriodDialog

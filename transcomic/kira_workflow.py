@@ -58,7 +58,7 @@ def run(s):
     for jid in s.job_ids:groups.setdefault(language(store.job(jid)['target_lang']).locale,[]).append(jid)
     order=list(dict.fromkeys((frozen.get('language_order') or [])+list(groups)))
     start_phase=int(frozen.get('kira_recovery_phase',0)) if frozen.get('kira_main_drained') else 0
-    for phase in range(start_phase,5 if frozen.get('kira_recovery_version',0)>=3 else 3):
+    for phase in range(start_phase,1 if frozen.get('kira_recovery_version',0)>=4 else 5 if frozen.get('kira_recovery_version',0)>=3 else 3):
         if phase and not list(_remaining(store,s.job_ids)):break
         if s._stopped.is_set():break
         s.recovery_phase=phase;s.provider.monitor.recovery_phase=phase
@@ -86,6 +86,13 @@ def run(s):
         complete=not report.structural and not report.missing and not report.errors and not pending and not unsettled
         state='finished' if complete else 'stopped' if s._stopped.is_set() else 'completed_with_errors'
         if not complete and not s._stopped.is_set():
+            if frozen.get('kira_recovery_version',0)>=4:
+                reason=getattr(s,'job_block_reasons',{}).get(jid) or s.intervention_reason
+                state=('needs_reconciliation' if any((a['diagnostics'] or {}).get('unknown_outcome') or (a['diagnostics'] or {}).get('failure_kind')=='restart_unknown' for b in store.batches(jid) if b['state']!='done' for a in store.attempts(b['id'])) else
+                       'blocked_budget' if reason and any(x in reason for x in ('budget','exhausted','cost_unverified')) else
+                       'blocked_auth' if any(k['status']=='INVALID' for k in s.provider.keys.values()) else
+                       'blocked_quota' if any(k['status']=='QUOTA_EXHAUSTED' for k in s.provider.keys.values()) else 'blocked')
+                store.job_state(jid,state);states.append(state);continue
             kinds={(b.get('diagnostics') or {}).get('failure_kind') for b in store.batches(jid) if b['state']!='done'}
             if kinds & {'authentication','permission','quota_exhausted','model_or_request'} or pending:state='blocked'
         store.job_state(jid,state);states.append(state)
@@ -93,7 +100,10 @@ def run(s):
         if s.run_id:jobs=[j['id'] for j in store.run_jobs(s.run_id) if language(j['target_lang']).locale==locale]
         st=[store.job(j)['state'] for j in jobs]
         store.run_language_state(s.run_id,locale,'completed' if all(x=='finished' for x in st) else 'stopped' if s._stopped.is_set() else 'completed_with_errors')
-    final='stopped' if s._stopped.is_set() else 'finished' if all(x=='finished' for x in states) else 'blocked' if 'blocked' in states else 'completed_with_errors'
+    final='stopped' if s._stopped.is_set() else 'finished' if all(x=='finished' for x in states) else next((x for x in states if x.startswith('blocked') or x=='needs_reconciliation'),'completed_with_errors')
+    admission=getattr(s,'admission',None)
+    if final=='finished' and admission and len(admission.complete)<len(admission.order):
+        final='needs_intervention';s.intervention_reason=s.intervention_reason or 'kira_sources_incomplete'
     if final=='finished' and s.run_id and any(j['state']!='finished' for j in store.run_jobs(s.run_id)):
         final='completed_with_errors'  # A resumed subset cannot complete the parent run.
     if final=='finished':s.intervention_reason=None

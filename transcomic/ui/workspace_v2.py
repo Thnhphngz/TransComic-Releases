@@ -12,6 +12,29 @@ from .glass import GlassButton as QPushButton, IconGlassButton
 from ..languages import language
 
 
+def render_document_snapshot(owner,payload):
+    """Render cached metadata and per-document committed state, with no SQL."""
+    documents=payload['documents'];groups={}
+    for doc_id in owner.workspace_ids:
+        if doc_id in documents:
+            doc=documents[doc_id];groups.setdefault(doc['source_instance'],[]).append(doc)
+    query=owner.document_panel.search.text().casefold();items=[]
+    for instance,docs in groups.items():
+        first=docs[0];name=Path(first['path']).name
+        if query not in name.casefold():continue
+        viewed=next((d for d in docs if d['id']==owner.doc_id),next((d for d in docs if d['target_lang']==owner.view_target),first))
+        status=payload['statuses'][viewed['id']]
+        details=' · '.join(f"{LANG_CODES.get(language(d['target_lang']).name,d['target_lang'])} {payload['statuses'][d['id']]['done']}/{payload['statuses'][d['id']]['total']} !{payload['statuses'][d['id']]['errors']+payload['statuses'][d['id']]['unknown']}" for d in docs)
+        items.append(dict(instance=instance,ids=[d['id'] for d in docs],name=name,path=first['path'],format=first['format'].upper(),details=details,
+                          progress=status['progress'],status=status['state'],summary=f"{LANG_CODES.get(language(viewed['target_lang']).name,'')} {status['progress']}% · {status['state']}"))
+    panel=owner.document_panel;panel.model.update_items(items);panel.title.setText(f'TÀI LIỆU · {len(groups)}')
+    old=getattr(owner,'_navigator_active_doc',None)
+    if old!=owner.doc_id:
+        for index,item in enumerate(items):
+            if old in item['ids'] or owner.doc_id in item['ids']:panel.view.viewport().update(panel.view.visualRect(panel.model.index(index)))
+        owner._navigator_active_doc=owner.doc_id
+
+
 class WorkspaceV2Mixin:
     def retry_workspace_errors(self):
         from ..workspace_retry import retry_plan, WorkspaceRetryScheduler, fresh_retry_config
@@ -29,10 +52,12 @@ class WorkspaceV2Mixin:
         language_counts = {}; instances = set(); summaries = []
         for group in plan:
             j = group['original']; n = len(group['line_ids'])
+            from ..deepseek_batch import job_size
+            size=job_size(j['provider'],json.loads(j['config']))
             language_counts[j['target_lang']] = language_counts.get(j['target_lang'], 0)+n
             instances.add(self.store.document(j['document_id'])['source_instance'])
-            summaries.append(f"{j['provider']}/{j['model']} · {j['concurrency']} luồng · {(n+2)//3} batch")
-        batches = sum((len(g['line_ids'])+2)//3 for g in plan)
+            summaries.append(f"{j['provider']}/{j['model']} · {j['concurrency']} luồng · {(n+size-1)//size} batch")
+        batches = sum((len(g['line_ids'])+job_size(g['original']['provider'],json.loads(g['original']['config']))-1)//job_size(g['original']['provider'],json.loads(g['original']['config'])) for g in plan)
         message = f"{len(instances)} file · {sum(language_counts.values())} dòng lỗi · tổng {batches} batch dự kiến\n"+'\n'.join(f'{lang}: {n} dòng' for lang, n in language_counts.items())+'\n'+'\n'.join(summaries)+'\nRequest mới và retry có thể phát sinh token/chi phí. Giữ bản cũ khi lỗi; chỉnh sửa mới được ưu tiên. Không đổi provider/model. Xác nhận?'
         if QMessageBox.question(self, 'Dịch lại tất cả lỗi', message, QMessageBox.Yes|QMessageBox.No, QMessageBox.No) != QMessageBox.Yes: return
         kira_key = self._key() if any(g['original']['provider']=='kira' for g in plan) else None
@@ -62,6 +87,8 @@ class WorkspaceV2Mixin:
     def save_concurrency(self, value):
         if not hasattr(self, 'provider_selector') or self.provider_id() == 'kira':
             self.store.set_setting('concurrency', str(value))
+        elif self.provider_id() == 'deepseek':
+            self.store.set_setting('deepseek_concurrency', str(value))
 
     @staticmethod
     def navigation_items():
@@ -139,7 +166,7 @@ class WorkspaceV2Mixin:
         form.addRow(self.retry_504_check)
         self.auto_retry_combo = QComboBox(); self.auto_retry_combo.addItems(['Tắt', '1 lần', '2 lần', '3 lần', '4 lần', '5 lần'])
         self.auto_retry_combo.setCurrentIndex(int(self.store.setting('auto_retries', '5')))
-        self.auto_retry_combo.setEnabled(self.provider_id()!='kira')
+        self.auto_retry_combo.setEnabled(self.provider_id()=='gemini')
         self.auto_retry_combo.currentIndexChanged.connect(lambda n: self.store.set_setting('auto_retries', str(n)))
         form.addRow('Tự động dịch lại lỗi (lượt mới)', self.auto_retry_combo)
         retry_notice = QLabel('Tối đa 5 lần thử lại sau lần đầu (6 request/batch). Retry, đặc biệt HTTP 504, có thể tiêu thụ thêm token và tiền. Không gửi lại timeout hoặc attempt mất trạng thái sau crash.')
@@ -162,11 +189,13 @@ class WorkspaceV2Mixin:
         self.v2_controls_grid.setContentsMargins(0, 0, 0, 0)
         self.control_columns = []
         for label, control in [('Nguồn', self.source_lang), ('Provider', self.provider_selector),
-                               ('Mô hình', self.model_name), ('Luồng', self.concurrency)]:
+                               ('Mô hình', self.model_name), ('Luồng', self.concurrency),('Số dòng mỗi batch',self.deepseek_batch)]:
             column = QWidget(); column.setObjectName('toolbarControls'); v = QVBoxLayout(column); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(3)
             caption = QLabel(label); caption.setObjectName('muted'); v.addWidget(caption); v.addWidget(control)
             control.setMinimumWidth(0); control.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
             self.control_columns.append(column)
+            if control is self.deepseek_batch:
+                self.deepseek_batch_column=column;column.setVisible(self.provider_id()=='deepseek');control.setMaximumHeight(36)
         self.setup_grid.addWidget(self.v2_controls, 0, 0, 1, 2)
         self.target_lang.hide()
         self.provider_selector.setMinimumWidth(100)
@@ -267,8 +296,10 @@ class WorkspaceV2Mixin:
         panel_width = self.document_splitter.sizes()[0] if not self.document_panel.isHidden() else 0
         available = self.width()-self.sidebar.width()-panel_width-5
         self.validation_badges.setMaximumWidth(min(540, max(100, int(self.editor_page.width()*.55))))
-        cols = 4 if available >= 520 else 2
-        mode = (cols, available >= 640, available >= 780, available >= 460)
+        self.validation_badges.layout().activate()
+        is_deepseek=self.provider_id()=='deepseek'
+        cols = 5 if is_deepseek and available>=800 else 4 if available >= 520 else 2
+        mode = (cols, available >= 640, available >= 780, available >= 460,is_deepseek)
         if getattr(self, '_v2_layout_mode', None) == mode:
             self.resize_visible_rows(); return
         self._v2_layout_mode = mode
@@ -277,9 +308,11 @@ class WorkspaceV2Mixin:
         for i, control in enumerate(self.heading_controls):
             self.heading_grid.removeWidget(control)
             self.heading_grid.addWidget(control, 0 if available >= 460 or i < 2 else 1, i if available >= 460 else i%2)
-        for i, column in enumerate(self.control_columns):
+        columns=self.control_columns if is_deepseek else self.control_columns[:4]
+        for column in self.control_columns:self.v2_controls_grid.removeWidget(column)
+        for i, column in enumerate(columns):
             self.v2_controls_grid.addWidget(column, i//cols, i%cols)
-        for i, stretch in enumerate([2, 1, 3, 1] if cols == 4 else [1, 1, 0, 0]):
+        for i, stretch in enumerate([2,1,3,1,1] if cols==5 else [2,1,3,1,0] if cols == 4 else [1,1,0,0,0]):
             self.v2_controls_grid.setColumnStretch(i, stretch)
         if hasattr(self, 'selection_grid'):
             for i, control in enumerate(self.selection_controls):
@@ -418,29 +451,35 @@ class WorkspaceV2Mixin:
 
     def refresh_document_panel(self, *_):
         if not hasattr(self, 'document_panel') or self._closed: return
+        updates=getattr(self,'translation_updates',None)
+        if updates and updates.context()['kind']=='automation' and self.pages.currentIndex()!=0:return
+        if updates and updates.active():
+            if updates.last and updates.last['ids']==tuple(dict.fromkeys(self.workspace_ids)):render_document_snapshot(self,updates.last)
+            else:updates.request(full=True)
+            return
+        from .translation_updates import document_status
         documents = {d['id']: d for d in self.store.documents()}
         self.workspace_ids = [d for d in self.workspace_ids if d in documents]
         if hasattr(self, 'period_warning'): self.period_warning.schedule()
         if hasattr(self, 'line_check'): self.line_check.schedule()
         groups = {}
         states = {}
-        if self.scheduler:
-            for j in self.scheduler.job_ids or [self.scheduler.job_id]:
-                if j:
-                    job = self.store.job(j)
-                    if job: states[job['document_id']] = job['state']
+        with self.store.lock:
+            for row in self.store.db.execute('SELECT j.document_id,j.state FROM jobs j WHERE j.rowid=(SELECT MAX(k.rowid) FROM jobs k WHERE k.document_id=j.document_id)'):states[row['document_id']]=row['state']
+            pending={r[0] for r in self.store.db.execute("SELECT DISTINCT j.document_id FROM jobs j JOIN batches b ON b.job_id=j.id WHERE j.state IN ('ready','running','waiting_rate_limit','provider_recovering','retry_scheduled','network_waiting','user_paused','paused','pausing','stopping','interrupted') AND b.state IN ('pending','inflight')")}
         for d in self.workspace_ids:
             doc = documents[d]; groups.setdefault(doc['source_instance'], []).append(doc)
         items = []; query = self.document_panel.search.text().casefold()
         for instance, docs in groups.items():
             first = docs[0]; name = Path(first['path']).name
             if query not in name.casefold(): continue
-            statuses = [(d, workspace_status(self.store.lines(d['id']), states.get(d['id']))) for d in docs]
+            statuses = [(d, document_status(self.store.lines(d['id']), states.get(d['id']),pending_work=d['id'] in pending)) for d in docs]
             viewed, status = next(((d, s) for d, s in statuses if d['id'] == self.doc_id),
                                  next(((d, s) for d, s in statuses if d['target_lang'] == self.view_target), statuses[0]))
             details = ' · '.join(f"{LANG_CODES.get(language(d['target_lang']).name, d['target_lang'])} {s['done']}/{s['total']} !{s['errors']+s['unknown']}" for d, s in statuses)
             items.append({'instance': instance, 'ids': [d['id'] for d in docs], 'name': name,
                           'path': first['path'], 'format': first['format'].upper(), 'details': details,
+                          'status':status['state'],
                           'progress': status['progress'], 'summary': f"{LANG_CODES.get(language(viewed['target_lang']).name, '')} {status['progress']}% · {status['state']}"})
         self.document_panel.model.update_items(items)
         self.document_panel.title.setText(f'TÀI LIỆU · {len(groups)}')

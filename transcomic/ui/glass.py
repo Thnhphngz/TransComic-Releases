@@ -1,5 +1,5 @@
 """Native glass surfaces and a finite day/night animation (no browser)."""
-from PySide6.QtCore import Qt, Property, QPropertyAnimation, QEasingCurve, QRectF, QEvent, QObject, QPointF, QRect
+from PySide6.QtCore import Qt, Property, QPropertyAnimation, QEasingCurve, QRectF, QEvent, QObject, QPointF, QRect, QSize
 from PySide6.QtGui import QColor, QPainter, QLinearGradient, QPen, QPalette, QIcon, QPixmap, QBitmap, QRegion
 from PySide6.QtWidgets import QPushButton, QStyle, QStyleOptionButton, QApplication, QComboBox as QtComboBox, QDialogButtonBox, QSizePolicy
 from .theme import colors, DARK, LIGHT
@@ -147,6 +147,8 @@ class CompactStatusButton(GlassButton):
     def setToolTip(self, text):
         self._status_hint = text
         super().setToolTip(self.text()+'\n'+text)
+
+    def minimumSizeHint(self):return QSize(0,24)
 
     def setText(self, text):
         super().setText(text)

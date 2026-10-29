@@ -1,5 +1,5 @@
 """Virtual document navigator: one painted row per imported source instance."""
-from PySide6.QtCore import Qt, QSize, QRect, QAbstractListModel, QObject, QEvent
+from PySide6.QtCore import Qt, QSize, QRect, QAbstractListModel, QObject, QEvent,QModelIndex
 from PySide6.QtGui import QColor, QPen, QLinearGradient
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QListView, QStyledItemDelegate, QStyle)
@@ -44,11 +44,21 @@ class DocumentListModel(QAbstractListModel):
         if role == Qt.CheckStateRole: return Qt.Checked if item['instance'] in self.checked else Qt.Unchecked
 
     def update_items(self, items):
-        if [i['instance'] for i in items] != [i['instance'] for i in self.items]:
-            self.beginResetModel(); self.items = items; self.endResetModel()
-        elif self.items != items:
-            self.items = items
-            if items: self.dataChanged.emit(self.index(0), self.index(len(items)-1))
+        old={v['instance']:v for v in self.items};wanted={v['instance'] for v in items}
+        for i in range(len(self.items)-1,-1,-1):
+            if self.items[i]['instance'] not in wanted:
+                self.beginRemoveRows(QModelIndex(),i,i);self.items.pop(i);self.endRemoveRows()
+        existing={v['instance'] for v in self.items}
+        for i,v in enumerate(items):
+            if v['instance'] not in existing:
+                self.beginInsertRows(QModelIndex(),i,i);self.items.insert(i,v);self.endInsertRows();existing.add(v['instance'])
+        if [v['instance'] for v in self.items]!=[v['instance'] for v in items]:
+            self.layoutAboutToBeChanged.emit();indexes=self.persistentIndexList();ids=[self.items[i.row()]['instance'] for i in indexes]
+            self.items=items;positions={v['instance']:i for i,v in enumerate(items)}
+            self.changePersistentIndexList(indexes,[self.index(positions[key]) for key in ids]);self.layoutChanged.emit()
+        else:self.items=items
+        for row,v in enumerate(items):
+            if old.get(v['instance'])!=v:self.dataChanged.emit(self.index(row),self.index(row))
 
 
 class DocumentDelegate(QStyledItemDelegate):

@@ -78,6 +78,7 @@ class LineModel(QAbstractTableModel):
     def refresh(self, changed_ids=None):
         if not self.doc_id or getattr(self.parent(), "_closed", False):
             return
+        if changed_ids is not None and not set(changed_ids).intersection(r['id'] for r in self.all_rows):return
         old = {r["id"]: r for r in self.rows}
         if changed_ids is None:
             self.all_rows = self.store.lines(self.doc_id)
@@ -94,6 +95,24 @@ class LineModel(QAbstractTableModel):
             if previous != row:
                 self.dataChanged.emit(self.index(row_index, 0), self.index(row_index, 1))
                 self.headerDataChanged.emit(Qt.Vertical, row_index, row_index)
+
+    def apply_committed_rows(self,rows):
+        """Detached, revision-fenced UI data; never touch an active QTextDocument."""
+        if not self.doc_id:return
+        incoming={r['id']:{k:v for k,v in r.items() if k!='locator'} for r in rows if r['document_id']==self.doc_id}
+        previous={r['id']:r for r in self.all_rows};changed={}
+        for key,row in incoming.items():
+            old=previous.get(key)
+            if old and (row['source_revision']<old['source_revision'] or row['translation_revision']<old['translation_revision']):continue
+            if old!=row:changed[key]=row
+        if not changed:return
+        self.all_rows=[changed.get(r['id'],r) for r in self.all_rows]
+        self.rows=[changed.get(r['id'],r) for r in self.rows]
+        if not self.editing_id:self._rebuild_filter()
+        for key in changed:
+            index=self.id_index.get(key)
+            if index is not None and key!=self.editing_id:
+                self.dataChanged.emit(self.index(index,0),self.index(index,1));self.headerDataChanged.emit(Qt.Vertical,index,index)
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self.rows)
@@ -135,6 +154,13 @@ class LineModel(QAbstractTableModel):
             return Qt.NoItemFlags
         if index.column() == CHECK_COLUMN:
             return Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
+        if getattr(self.parent(),'translation_preparing',False):return super().flags(index)
+        updates=getattr(self.parent(),'translation_updates',None)
+        if updates and updates.active():
+            # Flags are queried during paint/layout. Never wait on SQLite here.
+            # Store.edit_line still checks ownership inside its transaction.
+            if updates.last is None or self.doc_id in updates.last['automation_locked']:return super().flags(index)
+            return super().flags(index) | Qt.ItemIsEditable
         repo=getattr(self.store,'automation',None)
         owner=repo.line_owner(self.rows[index.row()]['id']) if repo else None
         if owner and owner['state'] in ('running','stopping'):return super().flags(index)

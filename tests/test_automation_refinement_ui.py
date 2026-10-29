@@ -19,7 +19,7 @@ def test_pinned_actions_and_numbers_survive_sidebar_resize_scroll_and_filter(gui
     app,w,p,id=gui;w.resize(*size)
     if w.dark!=dark:w.toggle_theme()
     if (w.sidebar.width()>100)!=expanded:w.toggle_sidebar()
-    gid,_,_=add_group(p.repo,id,tmp_path/'g');p.refresh();app.processEvents();p.timer.stop()
+    gid,_,_=add_group(p.repo,id,tmp_path/'g');p.refresh();app.processEvents();p.timer.stop();assert p.snapshots.wait_for_idle()
     # Stress the view only, without creating 200 files or issuing work.
     prototype=p.model.rows[0];rows=[]
     for n in range(200):

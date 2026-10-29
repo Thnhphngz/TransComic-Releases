@@ -25,6 +25,11 @@ class LineCheck(GlassButton):
 
     def schedule(self, *_):
         if self.owner._closed or self.owner._exit_pending or self._stopped: return
+        if getattr(self.owner,'import_busy',False):
+            self.timer.stop();self.setText('◷ Đang nhập/kiểm tra…');self.setProperty('glassRole','secondary');return
+        if getattr(self.owner,'_applying_translation_snapshot',False):return
+        updates=getattr(self.owner,'translation_updates',None)
+        if updates and updates.active():updates.request();return
         if self.report is not None and self.report.document_id != self.owner.doc_id:
             self.report = None; self.rows = (); self.setText('◷ Đang kiểm tra dòng…'); self.setProperty('glassRole','secondary')
             if self.dialog is not None:self.dialog.update_rows(())
@@ -33,6 +38,8 @@ class LineCheck(GlassButton):
     def recount(self):
         owner = self.owner
         if owner._closed or owner._exit_pending or self._stopped: return
+        updates=getattr(owner,'translation_updates',None)
+        if updates and updates.active():updates.request();return
         signature = self.signature(); doc_id = signature[0]
         if not doc_id:
             self._signature = signature; self.report = None; self.rows = ()
@@ -67,7 +74,8 @@ class LineCheck(GlassButton):
         owner = self.owner
         if owner._closed or owner._exit_pending or self._stopped:return
         signature, doc, report, key, layout = payload
-        if owner.doc_id != signature[0]:self.schedule();return
+        snapshot=len(signature)>1 and signature[1]=='snapshot'
+        if getattr(owner,'import_busy',False) or not snapshot and signature!=self.signature():self.schedule();return
         self._signature = signature
         if report is None:
             self.setText('⚠ Không xác minh được số dòng'); self.setProperty('glassRole','warning')

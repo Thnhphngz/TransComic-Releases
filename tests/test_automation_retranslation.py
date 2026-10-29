@@ -58,7 +58,9 @@ def test_203_rows_200_success_three_errors_real_ui_enqueues_and_dispatches(gui,t
     try:
         assert c.validate(id)['passed'];c.start(id)
         wait(app,normal_done.is_set)
-        assert Counter(i for ids in calls for i in ids if i in failed)==Counter({i:5 for i in failed})
+        initial=Counter(i for ids in calls for i in ids if i in failed)
+        assert set(initial)==failed and all(1<=n<=5 for n in initial.values())
+        assert len([ids for ids in calls if set(ids)&failed])==5
         assert sum(r['state']=='done' for r in repo.store.lines(doc))==200
         w.workspace_ids=[doc];w.open_document(doc);w.model.selected_ids=failed;w.refresh()
         monkeypatch.setattr(w,'make_provider',lambda *a:pytest.fail('Manual scheduler must not start'))
@@ -71,13 +73,13 @@ def test_203_rows_200_success_three_errors_real_ui_enqueues_and_dispatches(gui,t
         allow.set();release.set()
         wait(app,lambda:not c.busy,seconds=15)
         assert repo.workset(id)['state']=='completed',repo.events(id)[:4]
-        assert Counter(i for ids in calls for i in ids if i in failed)==Counter({i:6 for i in failed})
+        assert Counter(i for ids in calls for i in ids if i in failed)==Counter({i:n+1 for i,n in initial.items()})
         assert set(i for ids in calls for i in ids)&{r['id'] for r in rows if r['id'] not in failed}==set()
         assert max(live)==1
         assert len(c.retry_requests(id))==1 and c.retry_requests(id)[0]['state']=='done'
         assert len(s.tts_store.items(repo.group(gid)['data']['tts_run']))==203
         assert source.read_text(encoding='utf8').count('\n')==202
-        print(f'{action}: 200 preserved; failed IDs 5 automatic + 1 explicit request each; peak scheduler=1; WAV=203; MAU=complete')
+        print(f'{action}: 200 preserved; 5 bounded attempts in original batch + 1 explicit request per failed ID; peak scheduler=1; WAV=203; MAU=complete')
     finally:release.set()
 
 

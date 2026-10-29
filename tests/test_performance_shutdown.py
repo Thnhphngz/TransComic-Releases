@@ -149,11 +149,22 @@ def test_safe_exit_during_sqlite_commit_remains_responsive_and_preserves_result(
     w.scheduler.start(job);assert entered.wait(2)
     monkeypatch.setattr(w,'confirm_exit',lambda running:'safe')
     timer=QTimer(w);ticks=[];timer.setInterval(10);timer.timeout.connect(lambda:ticks.append(1));timer.start()
-    QTimer.singleShot(80,release.set)
-    start=time.monotonic();w.stop_translation();w.close()
+    timing={};start=time.monotonic()
+    def release_on_gui():
+        timing['release_ms']=(time.monotonic()-start)*1000;release.set()
+    QTimer.singleShot(80,release_on_gui)
+    # A refresh already queued before safe exit must not wait on the writer.
+    w.automation_page.dirty=True
+    QTimer.singleShot(0,w.automation_page.flush)
+    w.stop_translation();timing['stop_ms']=(time.monotonic()-start)*1000
+    close_started=time.monotonic();w.close();timing['close_ms']=(time.monotonic()-close_started)*1000
     while not w._closed and time.monotonic()-start<3:
         QTest.qWait(5);time.sleep(.005)
-    assert w._closed and len(ticks)>=4
+    timing.update(total_ms=(time.monotonic()-start)*1000,ticks=len(ticks))
+    print('sqlite safe-exit timing',timing)
+    # Counting callbacks after a two-second freeze could falsely pass. The GUI
+    # itself must release the writer promptly, with a live heartbeat before exit.
+    assert w._closed and ticks and timing.get('release_ms',float('inf'))<750,timing
     reopened=Store(tmp_path/'performance.db')
     assert all(r['state']=='done' and r['translation'] for r in reopened.lines(doc))
     reopened.close()
@@ -228,6 +239,8 @@ def test_sky_switch_keyboard_persist_and_button_geometry(tmp_path,monkeypatch):
     app.processEvents()
     before=w.table.height();w.sky_switch.setFocus();QTest.keyClick(w.sky_switch,Qt.Key_Space);QTest.qWait(240)
     assert w.dark and w.sky_switch.isChecked() and store.setting('dark')=='1'
+    deadline=time.monotonic()+1
+    while w.sky_switch.get_night()!=1 and time.monotonic()<deadline:QTest.qWait(20)
     assert w.sky_switch.get_night()==1 and w.table.height()==before
     assert w.stop_button.objectName()=='danger' and w.start_button.objectName()=='primary'
     w.resize(900,580);app.processEvents();assert w.table.viewport().height()>80

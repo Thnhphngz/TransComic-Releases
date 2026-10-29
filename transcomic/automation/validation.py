@@ -21,12 +21,13 @@ def read_source(path):
     return import_txt(path),None
 
 
-def image_manifest(folder,mode):
+def image_manifest(folder,mode,*,cancelled=None):
     root=Path(folder)
     if not folder or not root.is_dir():raise ValueError('Chưa chọn thư mục ảnh hợp lệ.')
     paths=sorted((p for p in root.iterdir() if p.is_file() and p.suffix.lower() in IMAGES),key=lambda p:natural_key(p.name))
     values=[]
     for path in paths:
+        check_current(cancelled)
         media=probe(path,True)
         if media.error:raise ValueError(path.name+': '+media.error)
         row=asdict(media);row['sha256']=file_hash(path);values.append(row)
@@ -65,10 +66,12 @@ def defaults(store):
     try:cap=json.loads(store.setting('capcut_workspace_v1','{}'))
     except ValueError:cap={}
     cfg=dict(source_lang='vi',target_lang='en',provider='kira',model=store.setting('model',''),workers=30,
+             deepseek_batch_size=3,kira_recovery_version=4,
              voice='af_jessica',speed=tts.get('speed',1.0),variant=tts.get('variant','standard'),tts_language='en-us',
              device=tts.get('device','Auto'),format='wav',capcut_mode='separate',part_count=2,project_name='TransComic',part_names={},output=cap.get('output',''))
     try:cfg.update(json.loads(store.setting('automation_last_config','{}')))
     except ValueError:pass
+    cfg.update(kira_recovery_version=4,kira_completion_policy=1,kira_dispatch_policy=1,translation_completion_policy=1)
     history=getattr(getattr(store,'automation',None),'tts_store',None)
     if history:
         for run in history.history_runs():
@@ -82,10 +85,14 @@ def defaults(store):
 
 
 DEPENDENCIES={
-    'translation':('source_lang','target_lang','provider','model','workers'),
+    'translation':('source_lang','target_lang','provider','model','workers','deepseek_batch_size'),
     'kokoro':('target_lang','tts_language','voice','speed','variant','device','format'),
     'capcut':('capcut_mode','part_count','project_name','part_names','output'),
 }
+
+
+def prepared_identity(groups):
+    return fingerprint([(g['id'],g['document_id'],{k:g['data'].get(k) for k in ('source_sha256','image_folder','image_sort','images','slots')}) for g in groups])
 
 
 def config_identity(config,section,services=None):
@@ -115,9 +122,15 @@ def check_config(section,config):
     from ..languages import validate_pair,language
     from ..tts.catalog import voice_names,LANGUAGES
     if section=='translation':
+        if config.get('kira_recovery_version',2) not in (2,3,4):raise ValueError('Phiên bản recovery không hợp lệ.')
         validate_pair(config['source_lang'],config['target_lang'])
         if type(config['workers']) is not int or not 1<=config['workers']<=30:raise ValueError('Số worker phải từ 1–30.')
-        if config['provider'] not in ('kira','gemini') or not isinstance(config['model'],str) or not config['model'].strip():raise ValueError('Chọn provider/model hợp lệ.')
+        if config['provider'] not in ('kira','gemini','deepseek') or not isinstance(config['model'],str) or not config['model'].strip():raise ValueError('Chọn provider/model hợp lệ.')
+        if config['provider']=='deepseek':
+            from ..deepseek_models import validate_model
+            validate_model(config['model'])
+            from ..deepseek_batch import job_size
+            job_size('deepseek',config)
     elif section=='kokoro':
         _,target=validate_pair(config['source_lang'],config['target_lang'])
         tts_lang=config['tts_language']
@@ -135,10 +148,20 @@ def check_config(section,config):
         with tempfile.TemporaryFile(dir=output,prefix='.transcomic-preflight-') as probe_file:probe_file.write(b'1');probe_file.flush()
 
 
-def validate(repo,id,services=None,*,refresh=True,reuse_inputs=False,force_config=False):
+class ValidationSuperseded(Exception):
+    """An obsolete UI validation must not publish a checkpoint."""
+
+
+def check_current(cancelled):
+    if cancelled and cancelled():raise ValidationSuperseded()
+
+
+def validate(repo,id,services=None,*,refresh=True,reuse_inputs=False,force_config=False,cancelled=None,groups=None,prepared=False,inputs_only=False):
+    check_current(cancelled)
     work=repo.workset(id);config=work['config'];errors=[];result=[];sections={};checked=[]
     cached=work['checkpoint'].get('validation_sections',{}) if reuse_inputs and not force_config else {}
-    for section in DEPENDENCIES:
+    for section in (() if inputs_only else DEPENDENCIES):
+        check_current(cancelled)
         identity=config_identity(config,section,services);old=cached.get(section,{})
         if old.get('identity')==identity and not old.get('errors'):record=old
         else:
@@ -152,8 +175,16 @@ def validate(repo,id,services=None,*,refresh=True,reuse_inputs=False,force_confi
             record=dict(identity=identity,errors=faults)
         sections[section]=record;errors.extend(record['errors'])
     seen=set()
-    for group in repo.groups(id):
-        faults=[];doc=repo.store.document(group['document_id']);path=Path(doc['path']);meta=group['data'];images=[]
+    groups=repo.groups(id) if groups is None else groups
+    doc_ids=[g['document_id'] for g in groups]
+    documents={r['id']:r for r in repo.rows('SELECT id,path FROM documents WHERE id IN ('+','.join('?'*len(doc_ids))+')',doc_ids)} if doc_ids else {}
+    for group in groups:
+        check_current(cancelled)
+        faults=[];doc=documents[group['document_id']];path=Path(doc['path']);meta=group['data'];images=[]
+        if prepared:
+            images=meta.get('images',[]);slots=meta.get('slots',[]);faults=list(meta.get('validation',[]))
+            result.append(dict(group,path=str(path),name=path.name,line_count=len(slots),image_count=len(images),valid=not faults,errors=faults,input_cached=True))
+            continue
         rows=repo.store.lines(doc['id']);slots=[r for r in rows if speakable(r['source'])]
         stamp=None;used_cache=False
         try:
@@ -165,7 +196,9 @@ def validate(repo,id,services=None,*,refresh=True,reuse_inputs=False,force_confi
             else:
                 read_source(path)
                 if file_hash(path)!=meta['source_sha256']:raise ValueError('Nguồn đã thay đổi; cần đối chiếu từng dòng trước khi tiếp tục.')
-                images=image_manifest(meta['image_folder'],meta['image_sort'])
+                inspected=meta.get('image_inspection',{})
+                if reuse_inputs and inspected.get('version')==1 and inspected.get('stamp')==stamp and meta.get('images'):images=meta['images']
+                else:images=image_manifest(meta['image_folder'],meta['image_sort'])
             if len(images)!=len(slots) or not slots:raise ValueError(f'{len(slots)} dòng cần voice / {len(images)} ảnh — lệch {len(slots)-len(images)}')
             previous=meta.get('images',[])
             if previous and len(previous)==len(images):
@@ -182,9 +215,12 @@ def validate(repo,id,services=None,*,refresh=True,reuse_inputs=False,force_confi
             updates=dict(image_count=len(images),validation=faults,error=' · '.join(faults))
             if not used_cache:updates.update(images=images if not faults else meta.get('images',[]),slots=[r['id'] for r in slots])
             updates['input_validation']=dict(version=1,stamp=stamp) if not faults else {}
-            repo.update_group(group['id'],**updates)
+            with repo.store.transaction():
+                check_current(cancelled)
+                repo.update_group(group['id'],**updates)
+    check_current(cancelled)
     if not result:errors.append('Thêm ít nhất một tài liệu.')
-    try:parts=plan_parts(result,config)
+    try:parts=() if inputs_only else plan_parts(result,config)
     except ValueError as exc:parts=();errors.append(str(exc))
     proof=dict(passed=not errors and all(g['valid'] for g in result),errors=errors,groups=result,
                parts=[dict(name=p.name,group_ids=[g['id'] for g in p.groups],start=p.start,end=p.end) for p in parts],config_fingerprint=fingerprint(config),sections=sections,checked_sections=checked)

@@ -160,6 +160,7 @@ class Scheduler:
         self._stopped.clear()
         self._cancel_requested.clear()
         self.intervention_reason=None;self.quota_paused=False
+        self.dispatch_job_states={};self.job_block_reasons={}
         self._set_state('running')
         self._thread = threading.Thread(target=self._run_thread, name="TransComicTranslation", daemon=True)
         self._thread.start()
@@ -174,8 +175,9 @@ class Scheduler:
                 elif any(self.store.job(j)['state']=='ready' for j in self.job_ids if j not in phase):monitor_state='running'
             self.provider.monitor.set_state(monitor_state)
         for job_id in getattr(self,'_phase_job_ids',self.job_ids) or ([self.job_id] if self.job_id else []):
-            if getattr(self.provider,'multi_key',False) and self.store.job(job_id)['state']=='finished' and state!='finished':continue
-            self.store.job_state(job_id, state)
+            if (getattr(self.provider,'multi_key',False) or getattr(self,'admission',None)) and self.store.job(job_id)['state']=='finished' and state!='finished':continue
+            local=getattr(self,'dispatch_job_states',{}).get(job_id) if state in ('running','waiting_rate_limit','retry_scheduled','provider_recovering','network_waiting') else None
+            self.store.job_state(job_id,local or state)
         if self.run_id: self.store.run_state(self.run_id, state)
         if self.run_id and getattr(self,'current_locale',None) and state!='finished':
             self.store.run_language_state(self.run_id,self.current_locale,state)
@@ -239,6 +241,8 @@ class Scheduler:
                 if all(json.loads(self.store.job(j)['config']).get('kira_recovery_version',0)>=2 for j in self.job_ids):
                     from .kira_workflow import run
                     return run(self)
+            from .completion import reconcile_unknown
+            reconcile_unknown(self.store,self.job_ids)
             groups={}
             for jid in self.job_ids:
                 groups.setdefault(language(self.store.job(jid)['target_lang']).locale,[]).append(jid)
@@ -298,7 +302,13 @@ class Scheduler:
                 state=(self.store.run(self.run_id) if self.run_id else self.store.job(self.job_id)).get('state','interrupted')
                 final_jobs=self.store.run_jobs(self.run_id) if self.run_id else [self.store.job(j) for j in self.job_ids]
                 if self._stopped.is_set() and state!='interrupted':state='stopped'
-                elif all(j['state']=='finished' for j in final_jobs):state='finished'
+                elif all(j['state']=='finished' for j in final_jobs):
+                    admission=getattr(self,'admission',None)
+                    state='interrupted' if admission and len(admission.complete)<len(admission.order) else 'finished'
+                elif state=='finished':
+                    # The first completed file cannot represent later files
+                    # interrupted during lazy admission (there may be no run).
+                    state=next(j['state'] for j in final_jobs if j['state']!='finished')
                 self.provider.monitor.set_state(state)
                 self.monitor_checkpoint(force=True)
 
@@ -332,6 +342,8 @@ class Scheduler:
         import json
         interval = max(0.0, float(json.loads(job['config']).get('request_interval', 0)))
         config = json.loads(job['config'])
+        from .completion import enabled,retryable,delay as completion_delay
+        completing=enabled(config)
         backoff_base = max(.01, float(config.get('rate_backoff_base', 1)))
         backoff_max = max(backoff_base, float(config.get('rate_backoff_max', 30)))
         wait_budget = max(0, float(config.get('rate_wait_budget', 300)))
@@ -345,6 +357,7 @@ class Scheduler:
         retry_queue: asyncio.Queue[dict] = asyncio.Queue()
         prefer_retry = True
         rejected = set()
+        admission=None
         def ready_count():
             self.ready_batches = queue.qsize()+retry_queue.qsize()
             return self.ready_batches
@@ -362,7 +375,9 @@ class Scheduler:
                     while not self._stopped.is_set():
                         if self.intervention_reason: return False
                         now = time.monotonic()
-                        if not ready_count() and not self.active: return None
+                        if not ready_count() and not self.active:
+                            if admission and admission.unfinished_loading():await asyncio.sleep(.01);continue
+                            return None
                         if cooldown_announced and now >= self.cooldown_until and not self._paused.is_set():
                             cooldown_announced = False
                             self._set_state('running')
@@ -381,8 +396,7 @@ class Scheduler:
                     return False
             finally: self.waiting -= 1
         from .retry import allowed_retry
-        pending = []
-        for j in jobs:
+        def eligible_for(j):
             eligible = []
             for batch in self.store.batches(j):
                 prior = self.store.attempts(batch['id'])
@@ -393,15 +407,29 @@ class Scheduler:
                     batch['next_attempt'] = len(prior)+1
                     eligible.append(batch)
                     self._event('retry_scheduled', 'reconstructed_finished_attempt', job_id=j, batch_id=batch['id'], attempt_number=len(prior)+1)
-            pending.append(eligible)
+            return eligible
+        pending = [eligible_for(j) for j in jobs]
         # Round robin across file/language jobs. Larger files never monopolize the queue.
         for offset in range(max((len(p) for p in pending), default=0)):
             for group in pending:
                 if offset < len(group):
                     batch = group[offset]
                     batch['queued_at'] = time.monotonic()
+                    if completing and batch['next_attempt']>1:
+                        due=float((batch.get('diagnostics') or {}).get('retry_not_before',0))
+                        batch['retry_not_before']=time.monotonic()+max(0,due-time.time())
                     (retry_queue if batch['next_attempt'] > 1 else queue).put_nowait(batch)
         self.waiting_retries = retry_queue.qsize()
+        if getattr(self,'source_order',None) and callable(getattr(self,'job_loader',None)) and job['provider']=='deepseek':
+            from .deepseek_admission import DeepSeekAdmission
+            def enqueue(jid):
+                for batch in eligible_for(jid):
+                    batch['queued_at']=time.monotonic()
+                    if batch['next_attempt']>1:
+                        due=float((batch.get('diagnostics') or {}).get('retry_not_before',0))
+                        batch['retry_not_before']=time.monotonic()+max(0,due-time.time())
+                    (retry_queue if batch['next_attempt']>1 else queue).put_nowait(batch)
+            admission=DeepSeekAdmission(self,jobs,enqueue)
 
         @asynccontextmanager
         async def client_context():
@@ -417,8 +445,9 @@ class Scheduler:
         async def worker(client):
             nonlocal cooldown_announced, prefer_retry
             while not self._stopped.is_set():
+                if admission:await admission.refresh((queue,retry_queue))
                 if not ready_count():
-                    if not self.active: break
+                    if not self.active and not (admission and admission.unfinished_loading()): break
                     await asyncio.sleep(.01)
                     continue
                 while self._paused.is_set() and not self._stopped.is_set():
@@ -427,13 +456,18 @@ class Scheduler:
                     break
                 dispatch_metrics = await wait_dispatch()
                 if dispatch_metrics is None or dispatch_metrics is False: break
-                source_queue = retry_queue if not retry_queue.empty() and (prefer_retry or queue.empty()) else queue
+                if admission:
+                    source_queue,batch=admission.take(queue,retry_queue,prefer_retry)
+                    if batch is None:await asyncio.sleep(.01);continue
+                else:
+                    source_queue = retry_queue if not retry_queue.empty() and (prefer_retry or queue.empty()) else queue
+                    try:batch=source_queue.get_nowait()
+                    except asyncio.QueueEmpty:break
                 prefer_retry = source_queue is queue
-                try:
-                    batch = source_queue.get_nowait()
-                    self.waiting_retries = retry_queue.qsize()
-                except asyncio.QueueEmpty:
-                    break
+                self.waiting_retries = retry_queue.qsize()
+                if completing and batch.get('retry_not_before',0)>time.monotonic():
+                    source_queue.put_nowait(batch);source_queue.task_done()
+                    await asyncio.sleep(.05);continue
                 job = jobs[batch['job_id']]
                 with self._dispatch_lock:
                     if self._paused.is_set() or self._stopped.is_set():
@@ -447,6 +481,7 @@ class Scheduler:
                 with self._active_lock:
                     self.active += 1
                     active_at_dispatch = self.active
+                if admission:admission.inflight[job['id']]+=1
                 changed_ids = [item["id"] for item in claimed]
                 started_batch = time.monotonic()
                 base_diagnostics = {"batch_id": batch["id"], "model": job["model"],
@@ -487,6 +522,7 @@ class Scheduler:
                             if number == 1:
                                 self.store.finish_batch(batch["id"], {}, "Request budget exhausted or attempt already reserved; not sent", False)
                             break
+                        if callable(getattr(self,'on_dispatch',None)):self.on_dispatch(job['id'])
                         if number > 1:
                             claimed = self.store.batch(batch['id'])['payload']
                             changed_ids = [item['id'] for item in claimed]
@@ -579,7 +615,10 @@ class Scheduler:
                             self.intervention_reason = diagnostics['failure_kind']
                             self._set_state('needs_intervention')
                             self._event('provider_quota_exhausted', self.intervention_reason)
-                        if diagnostics.get('http_status') == 429:
+                        if job['provider'] == 'deepseek' and (result.error or result.unknown) and (not completing or not retryable(diagnostics)):
+                            self.intervention_reason = diagnostics.get('failure_kind') or 'deepseek_error'
+                            self._set_state('needs_intervention')
+                        if diagnostics.get('http_status') == 429 and job['provider'] != 'deepseek':
                             self.rate_limits += 1
                             seconds = diagnostics.get('retry_after_seconds')
                             if diagnostics.get('failure_kind') == 'quota_exhausted':
@@ -650,13 +689,17 @@ class Scheduler:
                                 self.recovery_reason = 'successful_probe_window'
                                 self._event('concurrency_changed', self.recovery_reason, previous_concurrency=previous_concurrency, effective_concurrency=self.effective_concurrency, configured_concurrency=job['concurrency'], reduced_seconds=time.monotonic()-self.reduced_at, last_rate_limit_at=self.last_rate_limit_at)
                         from .retry import allowed_retry
-                        if number == 6 or not allowed_retry(job, diagnostics, number+1):
+                        if not completing and number >= (21 if config.get('kira_recovery_version')==4 else 6) or not allowed_retry(job, diagnostics, number+1):
                             if result.error or result.unknown or diagnostics.get('wrong_language_ids'):
                                 self._event('retry_exhausted', 'attempt_budget_or_non_retryable', job_id=job['id'], batch_id=batch['id'], attempt_number=number)
                             break
                         self._event('retry_scheduled', 'eligible_finished_attempt', job_id=job['id'], batch_id=batch['id'], attempt_number=number+1)
                         batch['next_attempt'] = number+1
                         batch['queued_at'] = time.monotonic()
+                        if completing:
+                            seconds=completion_delay(config,number,diagnostics)
+                            batch['retry_not_before']=time.monotonic()+seconds
+                            self.store.record_batch_diagnostics(batch['id'],dict(diagnostics,retry_not_before=time.time()+seconds,auto_retry_scheduled=True))
                         batch['payload'] = self.store.batch(batch['id'])['payload']
                         retry_queue.put_nowait(batch)
                         self.waiting_retries = retry_queue.qsize()
@@ -666,6 +709,7 @@ class Scheduler:
                 finally:
                     with self._active_lock:
                         self.active -= 1
+                    if admission:admission.inflight[job['id']]-=1
                     source_queue.task_done()
                     self._notify(changed_ids, notify_attempt_id)
 
@@ -674,7 +718,10 @@ class Scheduler:
                 self._workers = [asyncio.create_task(worker(client)) for _ in range(job["concurrency"])]
                 if self._cancel_requested.is_set():
                     for task in self._workers: task.cancel()
-                await asyncio.gather(*self._workers, return_exceptions=True)
+                results=await asyncio.gather(*self._workers, return_exceptions=True)
+                if admission:
+                    for result in results:
+                        if isinstance(result,Exception):raise result
                 if self._stopped.is_set() or self.intervention_reason: break
                 # Reconcile persisted batches before completion. Never regroup or reset attempts.
                 added = 0
@@ -690,11 +737,15 @@ class Scheduler:
                 self._event('reconciled', 'eligible_remaining' if added else 'no_eligible_remaining', ready_batch_count=added)
                 if not added: break
         if self._abandoned.is_set(): return
+        if admission and not self._stopped.is_set() and len(admission.complete)<len(admission.gate.order):
+            self.intervention_reason=self.intervention_reason or 'deepseek_sources_incomplete'
         state = "interrupted" if any(self.store.job(j)['state'] == 'interrupted' for j in jobs) else "stopped" if self._stopped.is_set() else 'quota_exhausted' if self.quota_paused else 'needs_intervention' if self.intervention_reason else "finished"
         self._set_state(state)
         self._event('scheduler_drained', state, queued_batches=ready_count())
         from .status import usable
         missing = sum(not usable(r) for j in jobs.values() for b in self.store.batches(j['id']) for item in b['payload'] for r in [self.store.line(item['id'])])
+        if completing and state=='finished' and missing:
+            state='needs_intervention';self.intervention_reason='translation_revisions_changed';self._set_state(state)
         if state == 'finished':
             self._event('job_completed', 'completed_with_errors' if missing else 'completed', missing_lines=missing, state=state)
         self.store.log.emit("finished", provider=job["provider"], model=job["model"], document_id=job["document_id"], job_id=job["id"], state=state,

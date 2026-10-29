@@ -170,7 +170,7 @@ def test_attempt_constraint_migration_preserves_trace_foreign_keys(tmp_path):
     store.close()
     with sqlite3.connect(tmp_path/'state.db') as db:
         db.execute('PRAGMA writable_schema=ON')
-        db.execute("UPDATE sqlite_master SET sql=replace(sql,'BETWEEN 1 AND 6','BETWEEN 1 AND 4') WHERE name='request_attempts'")
+        db.execute("UPDATE sqlite_master SET sql=replace(sql,'attempt_number>=1','attempt_number BETWEEN 1 AND 4') WHERE name='request_attempts'")
         db.execute('PRAGMA writable_schema=OFF')
     store=Store(tmp_path/'state.db')
     assert not store.db.execute('PRAGMA foreign_key_check').fetchall()
@@ -178,5 +178,5 @@ def test_attempt_constraint_migration_preserves_trace_foreign_keys(tmp_path):
     assert store.attempts(batch['id'])[0]['reserved_tokens']==12345
     assert store.db.execute('SELECT COUNT(*) FROM api_text_versions').fetchone()[0]==1
     assert store.job(job)['auto_retries']==5
-    assert 'BETWEEN 1 AND 6' in store.db.execute("SELECT sql FROM sqlite_master WHERE name='request_attempts'").fetchone()[0]
+    assert 'attempt_number>=1' in store.db.execute("SELECT sql FROM sqlite_master WHERE name='request_attempts'").fetchone()[0]
     store.close()

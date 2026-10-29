@@ -24,13 +24,22 @@ class Services:
         elif section=='kokoro':self.preflight_kokoro(config)
     def validation_identity(self,section,config):
         if section!='translation':return None
+        if config['provider']=='deepseek':
+            from ..deepseek import key_identity
+            return dict(provider='deepseek', credential=key_identity(self.repo.store))
         keys=self.repo.store.kira_keys() if config['provider']=='kira' else self.repo.store.gemini_keys()
         accounts=[(row['id'],self.repo.store.kira_account_scope(row['id']),self.repo.store.setting('kira_account_confirmed:'+row['id'],'')) for row in keys] if config['provider']=='kira' else []
         return dict(keys=[{k:row.get(k) for k in ('id','enabled','status','project')} for row in keys],accounts=accounts,
                     limits=[self.repo.store.setting('gemini_'+k,'') for k in ('concurrency','rpm','tpm','rpd')]+[self.repo.store.setting('kira_account_limit','')])
     def preflight_translation(self,config):
         store=self.repo.store
-        if config['provider']=='kira':
+        if config['provider']=='deepseek':
+            from ..deepseek import read_key
+            from ..deepseek_models import validate_model
+            validate_model(config['model'])
+            if not read_key(store):raise ValueError('Chưa có key DeepSeek; mở trang API để cấu hình')
+            if not 1<=config['workers']<=30:raise ValueError('DeepSeek hỗ trợ 1–30 worker')
+        elif config['provider']=='kira':
             from ..models import KIRA_MODELS
             if config['model'] not in {id for label,id in KIRA_MODELS}:raise ValueError('Model Kira không nằm trong danh sách hiện có; chọn lại model.')
             if not any(k['enabled'] and k['status'] not in ('INVALID','DISABLED','PERMISSION_DENIED','QUOTA_EXHAUSTED','MODEL_UNAVAILABLE','CREDENTIAL_ERROR') for k in store.kira_keys()):raise ValueError('Kira chưa có key bật/khả dụng; mở Quản lý API.')

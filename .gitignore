@@ -60,3 +60,45 @@ venv/
 *.mp3
 *.npz
 *.bin
+
+# Private translation campaigns and an unreviewed local archive.
+/Chap 1 - 15 be con/
+/chap 1 - 23/
+/chap 16 - 25 be con hoa no/
+/transcomic.zip
+/tests/fixtures/deepseek_root_type.json
+
+# Local campaign/profiling helpers and their private-workflow tests.
+/scripts/audit_automation_final_readonly.py
+/scripts/audit_translation_live_fix.py
+/scripts/benchmark_deepseek_batches.py
+/scripts/benchmark_semantic_v3.py
+/scripts/capture_deepseek_batch_ui.py
+/scripts/capture_deepseek_ui.py
+/scripts/continue_clover.py
+/scripts/deepseek_benchmark_budget.py
+/scripts/deepseek_benchmark_data.py
+/scripts/final_pre_release_pass.py
+/scripts/finish_clover.py
+/scripts/inspect_translation_hang.py
+/scripts/pre_release_entrypoint.py
+/scripts/pre_release_gui.py
+/scripts/pre_release_gui_tts.py
+/scripts/pre_release_real_tts.py
+/scripts/profile_automation_start.py
+/scripts/profile_automation_ui.py
+/scripts/profile_kira_admission.py
+/scripts/profile_story_import.py
+/scripts/profile_translation_workspace.py
+/scripts/review_clover.py
+/scripts/review_clover_last.py
+/scripts/review_story_23.py
+/scripts/translate_new15.py
+/scripts/translate_story_23.py
+/tests/test_clover_review.py
+/tests/test_new15.py
+/tests/test_pre_release_ime.py
+/tests/test_semantic_v3.py
+/tests/test_semantic_v4.py
+/tests/test_story_continuation.py
+/tests/test_story_review.py

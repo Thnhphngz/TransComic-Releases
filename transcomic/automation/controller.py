@@ -18,7 +18,10 @@ class StagePool(ThreadPoolExecutor):
         super().__init__(max_workers=3,thread_name_prefix='automation-stage');self.controller=controller
     def __exit__(self,kind,value,trace):
         if kind:
-            self.controller.internal_abort=True;self.controller.stop_event.set();self.controller.services.translation.stop()
+            from .validation import ValidationSuperseded
+            expected_stop=isinstance(value,(Stopped,ValidationSuperseded)) and self.controller.stop_event.is_set()
+            if not expected_stop:self.controller.internal_abort=True
+            self.controller.stop_event.set();self.controller.services.translation.stop()
         return super().__exit__(kind,value,trace)
 
 
@@ -27,16 +30,31 @@ class Controller(Retranslation,Reconciliation):
         self.repo=repo;self.services=services;self.changed=changed;self.finished=finished
         self.resource_check=resource_check;self.editor_check=editor_check;self.thread=None;self.stop_event=threading.Event();self.lock=threading.RLock();self.current=None
         self.pending_terminal=None;self.internal_abort=False;repo.controller=self
+        self.paused=threading.Event();self.preparing=threading.Event()
     @property
     def busy(self):return bool(self.thread and self.thread.is_alive())
-    def validate(self,id,*,reuse_inputs=True,force_config=False):
+    def execution_config(self,work):
+        cfg=dict(work['config'])
+        # An explicit Start in the updated app authorizes completion for
+        # historical worksets without the new field. Stored jobs stay frozen.
+        if 'translation_completion_policy' not in cfg and cfg['provider'] in ('kira','deepseek'):
+            cfg['translation_completion_policy']=1
+            if cfg['provider']=='kira':cfg.update(kira_recovery_version=4,kira_completion_policy=1,kira_dispatch_policy=1)
+        return cfg
+    def validate(self,id,*,reuse_inputs=True,force_config=False,cancelled=None):
+        from .validation import check_current
+        check_current(cancelled)
         if self.pending_terminal and not self.busy and self.current==id:
             self.repo.state(id,self.pending_terminal);self.pending_terminal=None
-        self.repo.editable(id);self.reconcile_sources(id)
-        proof=validate(self.repo,id,self.services,reuse_inputs=reuse_inputs,force_config=force_config)
+        self.repo.editable(id);self.reconcile_sources(id,cancelled=cancelled)
+        proof=validate(self.repo,id,self.services,reuse_inputs=reuse_inputs,force_config=force_config,cancelled=cancelled)
+        check_current(cancelled)
         self.reconcile_stages(id)
         proof['pending']=self.has_pending(id,proof) if proof['passed'] and self.repo.workset(id)['state']=='completed' else True
-        self.checkpoint(id,validation=dict(passed=proof['passed'],errors=proof['errors'],config_fingerprint=proof['config_fingerprint'],pending=proof['pending']),validation_sections=proof['sections'])
+        with self.repo.store.transaction():
+            check_current(cancelled)
+            from .validation import prepared_identity
+            self.checkpoint(id,validation=dict(passed=proof['passed'],errors=proof['errors'],config_fingerprint=proof['config_fingerprint'],pending=proof['pending']),validation_sections=proof['sections'],validation_inputs=prepared_identity(self.repo.groups(id)))
         return proof
     def start(self,id,selected=None):
         with self.lock:
@@ -54,7 +72,8 @@ class Controller(Retranslation,Reconciliation):
             if not work['started']:selected=None
             self.editor_check();self.resource_check()
             with self.repo.store.transaction():self.repo.activate(id);self.checkpoint(id,tts_config_fingerprint=tts_fp)
-            self.current=id;self.stop_event.clear();self.internal_abort=False;self.closing_translation=False
+            self.current=id;self.stop_event.clear();self.paused.clear();self.internal_abort=False;self.closing_translation=False
+            self.preparing.set();self.checkpoint(id,preparing=True)
             if hasattr(self.services.translation,'reset'):self.services.translation.reset()
             self.changed()
             self.thread=threading.Thread(target=self._run,args=(id,selected),daemon=True,name='TransComic-Automation')
@@ -67,8 +86,22 @@ class Controller(Retranslation,Reconciliation):
         # Fence assignment immediately; never join or wait on SQLite on Qt's thread.
         with self.lock:
             if not self.busy or self.repo.active()!=self.current:return
-            self.stop_event.set();self.services.translation.stop()
+            self.stop_event.set();self.paused.clear();self.services.translation.stop()
             if self.current:self.repo.state(self.current,'stopping')
+        self.changed()
+    def pause(self):
+        if not self.busy or self.stop_event.is_set():return
+        self.paused.set()
+        translation=self.services.translation
+        with translation.dispatch_lock:
+            if translation.scheduler:translation.scheduler.pause()
+        self.changed()
+    def resume(self):
+        if not self.busy or self.stop_event.is_set():return
+        self.paused.clear()
+        translation=self.services.translation
+        with translation.dispatch_lock:
+            if translation.scheduler and translation.scheduler._thread and translation.scheduler._thread.is_alive():translation.scheduler.resume()
         self.changed()
     def join(self,timeout=None):
         if self.thread:self.thread.join(timeout)
@@ -76,10 +109,14 @@ class Controller(Retranslation,Reconciliation):
         with self.repo.store.transaction():
             data=self.repo.workset(id)['checkpoint'];data.update(changes)
             self.repo.execute('UPDATE automation_worksets SET checkpoint=? WHERE id=?',(json.dumps(data,ensure_ascii=False),id))
-    def reconcile_sources(self,id):
+    def reconcile_sources(self,id,*,cancelled=None):
         """Stable IDs survive equal-layout edits; ambiguous/manual conflicts block."""
         self.repo.editable(id)
+        from ..deepseek_batch import job_size
+        config=self.repo.workset(id)['config'];batch_size=job_size(config['provider'],config)
         for group in self.repo.groups(id):
+            from .validation import check_current
+            check_current(cancelled)
             path=Path(self.repo.store.document(group['document_id'])['path']);meta=group['data']
             try:
                 digest=file_hash(path)
@@ -92,10 +129,11 @@ class Controller(Retranslation,Reconciliation):
                 changed_ids={r['id'] for r,text in changed};affected=set(changed_ids)
                 for candidates in ([r['id'] for r in rows if translatable(r['source'])],
                                    [r['id'] for r,line in zip(rows,data.lines) if translatable(line.text)]):
-                    for offset in range(0,len(candidates),3):
-                        chunk=candidates[offset:offset+3]
+                    for offset in range(0,len(candidates),batch_size):
+                        chunk=candidates[offset:offset+batch_size]
                         if changed_ids.intersection(chunk):affected.update(chunk)
                 with self.repo.store.transaction():
+                    check_current(cancelled)
                     for r,text in changed:
                         self.repo.store.db.execute("UPDATE lines SET source=?,source_revision=source_revision+1,state='pending',updated_at=CURRENT_TIMESTAMP WHERE id=?",(text,r['id']))
                     for r in rows:
@@ -108,14 +146,20 @@ class Controller(Retranslation,Reconciliation):
     def _run(self,id,selected=None):
         errors=[];groups=[];parts=[];terminal='needs_attention'
         try:
-            work=self.repo.workset(id);cfg=work['config'];first=work['cycle']==1
-            proof=validate(self.repo,id,self.services)
+            work=self.repo.workset(id);cfg=self.execution_config(work);first=work['cycle']==1
+            if cfg!=work['config']:self.repo.event(id,None,'translation','Lệnh Bắt đầu mới dùng phục hồi đến khi dịch đủ; giữ nguyên snapshot và lịch sử job cũ.')
+            streaming=bool(cfg['provider']=='kira' and cfg.get('kira_dispatch_policy')==1 or cfg['provider']=='deepseek' and cfg.get('translation_completion_policy')==1)
+            from .validation import prepared_identity
+            cached_groups=self.repo.groups(id)
+            prepared=streaming and work['checkpoint'].get('validation_inputs')==prepared_identity(cached_groups)
+            proof=validate(self.repo,id,self.services,reuse_inputs=streaming,prepared=prepared,groups=cached_groups,cancelled=self.stop_event.is_set)
             groups=[g for g in proof['groups'] if g['valid'] and (selected is None or g['id'] in selected or g['data']['state']=='completed')]
             if proof['errors'] or first and not proof['passed']:raise ValueError(' · '.join(proof['errors']+[g['name']+': '+', '.join(g['errors']) for g in proof['groups'] if not g['valid']]))
             # Keep failed groups in part definitions so merged export cannot omit them.
             parts=[dict(p,id=fingerprint(p['group_ids']),state='waiting') for p in proof['parts']]
             self.checkpoint(id,started=time.time(),ended=None,parts=parts)
-            audio_ready,_=self.reconcile_stages(id)
+            if streaming and first and not any(g['data'].get('tts_run') for g in groups):audio_ready=set()
+            else:audio_ready,_=self.reconcile_stages(id)
             for group in proof['groups']:
                 if not group['valid']:self.repo.update_group(group['id'],state='needs_attention')
             self.repo.store.set_setting('automation_last_config',json.dumps(cfg))
@@ -126,12 +170,13 @@ class Controller(Retranslation,Reconciliation):
                 for group in groups:
                     if all(usable(r) for r in self.repo.store.lines(group['document_id']) if translatable(r['source'])):
                         self.repo.update_group(group['id'],translation_ready_cycle=cycle,translation_ready_at=time.monotonic_ns())
+                if not streaming:self.preparing.clear();self.checkpoint(id,preparing=False)
                 translation=pool.submit(self.normal_translation,id,groups,cfg)
                 while True:
                     pending_groups=self.pending_retry_groups(id)
                     # A request waits for the current translation scheduler and any
                     # dependent stage using its old snapshot. No second lane starts.
-                    if translation.done() and not self.stop_event.is_set():
+                    if translation.done() and not self.stop_event.is_set() and not self.paused.is_set():
                         translation.result()
                         for request in self.retry_requests(id):
                             if request['state'] not in ('pending','running'):continue
@@ -183,7 +228,7 @@ class Controller(Retranslation,Reconciliation):
                             exported.add(cap_part['id']);cap_part.update(state='needs_attention',error=str(exc));errors.append(type(exc).__name__)
                             for gid in cap_part['group_ids']:self.fail(id,gid,'capcut',exc)
                         cap_future=None;self.checkpoint(id,parts=parts)
-                    if not self.stop_event.is_set():
+                    if not self.stop_event.is_set() and not self.paused.is_set():
                         next_ready=next((gid for gid in ready if gid not in pending_groups),None)
                         if next_ready and not tts_future and not tts_blocked:
                             gid=next_ready;ready.remove(gid);tts_group=self.repo.group(gid);rescuing=False
@@ -220,7 +265,9 @@ class Controller(Retranslation,Reconciliation):
             try:self.fail(id,None,'pipeline',exc);self.checkpoint(id,ended=time.time())
             except Exception:self.repo.store.log.emit('gui_error',reason='automation_checkpoint_failed',exception=type(exc).__name__)
         finally:
+            self.preparing.clear()
             try:
+                self.checkpoint(id,preparing=False)
                 self.reconcile_stages(id)
                 if terminal=='completed' and any(g['data']['state']!='completed' for g in self.repo.groups(id)):terminal='needs_attention'
             except Exception:self.repo.store.log.emit('gui_error',reason='automation_stage_reconcile_failed')

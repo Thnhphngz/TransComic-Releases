@@ -39,15 +39,17 @@ def warnings(row):
     if not target and state != "skip":
         found.append(("Chưa có bản dịch", "Chưa có văn bản dịch hợp lệ"))
     if target:
-        found.extend(language_warnings(source,target,row.get('source_lang'),row.get('target_lang')))
+        from .translation_policy import SEMANTIC_VERSIONS
+        semantic=row.get('translation_policy') in SEMANTIC_VERSIONS
+        found.extend(language_warnings(source,target,row.get('source_lang'),row.get('target_lang'),semantic=semantic))
         src, dst = sentence_marks(source), sentence_marks(target)
-        if sum("." in x for x in dst) > sum("." in x for x in src):
+        if not semantic and sum("." in x for x in dst) > sum("." in x for x in src):
             found.append(("Thêm dấu chấm", "Có thể đã chia câu khác nguồn; cần kiểm tra thủ công"))
         def end(text):
             clean = text.rstrip().rstrip('"\u201d\u2019\'')
             marks = sentence_marks(clean)
             return marks[-1] if marks and clean.endswith(marks[-1]) else ""
-        if end(source) != end(target):
+        if not semantic and end(source) != end(target):
             found.append(("Dấu câu cuối", "Dấu câu cuối không khớp nguồn (heuristic)"))
         if sorted(PLACEHOLDER.findall(source)) != sorted(PLACEHOLDER.findall(target)):
             found.append(("Placeholder", "Placeholder nguồn và bản dịch không khớp"))
@@ -96,11 +98,11 @@ def language_evidence(source,target,source_lang,target_lang):
     return ('suspected' if notes else 'insufficient' if b.script=='Latin' and own<3 else 'compatible'),notes
 
 
-def language_warnings(source,target,source_lang,target_lang):
+def language_warnings(source,target,source_lang,target_lang,*,semantic=False):
     evidence,notes=language_evidence(source,target,source_lang,target_lang)
     # Insufficient evidence is an information state, not a warning on an otherwise valid row.
     # Specific user-provided failure fixtures, no speculative rewriting.
-    if re.search(r'\b(sao|ư)\s*$',source,re.I) and not any(mark in target for mark in ('?','？')):
+    if not semantic and re.search(r'\b(sao|ư)\s*$',source,re.I) and not any(mark in target for mark in ('?','？')):
         notes.append(('Sắc thái câu hỏi','Nguồn có sao/ư; kiểm tra xem bản dịch có giữ nghi vấn'))
     if 'ly hôn' in source.casefold() and re.search(r'\byou\b',target,re.I):
         notes.append(('Đối tượng lời thoại','Có thêm you trong câu ly hôn; đối chiếu ngữ cảnh'))
@@ -113,6 +115,16 @@ def language_warnings(source,target,source_lang,target_lang):
         english=language(target_lang).locale in ('en','en-CA')
     except ValueError:english=False
     if english:
+        if semantic:
+            if re.search(r'chết chóc|chớt chóc',source,re.I) and not re.search(r'\b(death|dead|deadly|dying|die|dies|died|lethal|fatal|murderous|carnage|slaughter|bloodshed|killing|mortal)\b',target,re.I):
+                notes.append(('Thiếu ý nghĩa','Nguồn có chết/chớt chóc nhưng bản dịch có thể thiếu nghĩa tử vong; cần người đọc xác minh'))
+            if re.search(r'gào|hét',source,re.I) and 'bắt lấy' in source.lower() and re.search(r'\b(shouting|yelling|screaming)\s*,?\s+grabbing\b',target,re.I):
+                notes.append(('Câu mệnh lệnh','Có thể đã biến lời hô bắt giữ thành hành động đang diễn ra; cần đối chiếu lời thoại'))
+            question='?' in source or bool(re.search(r'\b(sao|ư|hả|chăng)\s*[.!?]*$|\bcó\s+[^,;]{1,160}\bkhông\s*(?:[,!?!.]|$)',source,re.I))
+            interrogative=any(m in target for m in ('?','？')) or re.search(r'\b(what|why|how|who|where|when|whether)\b',target,re.I) or re.search(r'(?:^|[,:;.!]\s*)(?:is|are|was|were|do|does|did|can|could|will|would|shall|should|has|have)\b',target,re.I)
+            if question and not interrogative:notes.append(('Sắc thái câu hỏi','Có thể đã đổi nghi vấn thành câu kể; đối chiếu nghĩa, không dựa riêng dấu hỏi'))
+            if re.search(r'không hề|không phải|chưa từng|không bao giờ|chẳng hề',source,re.I) and not re.search(r"\b(not|never|no|cannot|without|yet|lacks?|failed)\b|n['’]t",target,re.I):
+                notes.append(('Phủ định','Có thể thiếu nghĩa phủ định; cần đối chiếu thủ công'))
         male=re.match(r'\s*(cậu ta|anh ta|anh ấy|ông ta|ông ấy)\b',source,re.I)
         female=re.match(r'\s*(cô ta|cô ấy|bà ta|bà ấy)\b',source,re.I)
         if male and re.match(r'\s*she\b',target,re.I) or female and re.match(r'\s*he\b',target,re.I):

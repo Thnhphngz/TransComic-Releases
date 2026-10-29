@@ -23,7 +23,7 @@ def test_numbers_follow_group_order_and_remain_stable_through_filter_move_delete
     assert not p.model.setData(index,Qt.Checked,Qt.CheckStateRole)
     QTest.mouseClick(p.number_table.viewport(),Qt.LeftButton,pos=p.number_table.visualRect(index).center())
     assert p.number_table.selectionModel().isRowSelected(0) and index.data()==1
-    before=p.number_table.width();p.search.setText('Chapter 3');p.flush();app.processEvents()
+    before=p.number_table.width();p.search.setText('Chapter 3');p.flush();assert p.snapshots.wait_for_idle();app.processEvents()
     assert p.model.rowCount()==1 and p.model.index(0,0).data()==3 and p.number_table.width()==before
     p.search.clear();p.repo.move(ids[2],-1);p.refresh()
     assert [r['id'] for r in p.model.rows]==[ids[0],ids[2],ids[1]]

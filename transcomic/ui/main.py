@@ -198,6 +198,8 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         self.automation_page=AutomationPage(self,self.automation_repo,self.automation_services,self.automation_controller)
         self.automation_services.kokoro.before_finalize=self.automation_page.release_audio
         self.pages.addWidget(self.automation_page)
+        from .translation_updates import TranslationUpdates
+        self.translation_updates=TranslationUpdates(self)
 
     def automation_resource_check(self):
         if self.scheduler and self.scheduler._thread and self.scheduler._thread.is_alive():raise ValueError('Chờ tác vụ Dịch thủ công dừng an toàn.')
@@ -562,6 +564,10 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
     def update_editorial(self):
         if self._closed or self._exit_pending:
             return
+        if hasattr(self,'translation_updates') and self.translation_updates.active():
+            if not getattr(self,'_applying_translation_snapshot',False):
+                self.translation_updates.request([r['id'] for r in self.model.all_rows],validate_editor=any(r.get('attempt_kind')=='manual' for r in self.model.all_rows))
+            return
         self.editorial_rows = self.store.warning_rows(self.doc_id) if self.doc_id else []
         states = {r['id']:r['state'] for r in self.store.lines(self.doc_id)} if self.doc_id else {}
         changed=[r['id'] for r in self.model.all_rows if states.get(r['id'])!=r['state']] if self.doc_id else []
@@ -616,7 +622,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
     def save_model_choice(self):
         model_id = self.selected_model_id()
         if model_id:
-            self.store.set_setting('gemini_model' if self.provider_id() == 'gemini' else 'kira_model', model_id)
+            self.store.set_setting(self.provider_id()+'_model', model_id)
 
     def build_queue(self) -> QWidget:
         page = QWidget()
@@ -697,9 +703,8 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(28, 24, 28, 24)
-        layout.addWidget(self.heading("Quản lý API", "Khóa Kira được mã hóa bằng Windows DPAPI theo tài khoản Windows hiện tại."))
+        layout.addWidget(self.heading("Quản lý API", "API key được mã hóa bằng Windows DPAPI theo tài khoản Windows hiện tại. Không tự gửi request kiểm tra."))
         api_card, content = card()
-        content.addWidget(self.section("KẾT NỐI KIRA AI"))
         self.key_status = QLabel()
         content.addWidget(self.key_status)
         form = QFormLayout()
@@ -717,6 +722,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         detail.setObjectName("muted")
         content.addWidget(detail)
         layout.addWidget(api_card)
+        self.kira_api_panel = api_card
         layout.addStretch()
         return page
 
@@ -833,6 +839,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             return None
 
     def start_translation(self):
+        if getattr(self,'translation_preparing',False):return
         if getattr(self,'queue_clear_busy',False):return
         if hasattr(self, "target_chips") and not any(c.isChecked() and c.isEnabled() for c in self.target_chips.values()):
             QMessageBox.information(self, "Ngôn ngữ đích", "Chọn ít nhất một ngôn ngữ đích khác nguồn."); return
@@ -843,7 +850,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             QMessageBox.information(self, "Đang dịch", "Hãy dừng hoặc hoàn thành lượt dịch đang chạy.")
             return
         changed_target = self.store.document(self.doc_id)['target_lang'] != self.target_lang.currentText() and any(j['document_id'] == self.doc_id for j in self.store.jobs())
-        if self.provider_id() in ('kira','gemini') or len(self.target_languages()) > 1 or len(self.workspace_ids) > 1 or changed_target:
+        if self.provider_id() in ('kira','gemini','deepseek') or len(self.target_languages()) > 1 or len(self.workspace_ids) > 1 or changed_target:
             self.start_stage2()
             return
         if not self.valid_languages():
@@ -866,6 +873,11 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         self.refresh()
 
     def pause_or_resume(self):
+        context=self.translation_updates.context()
+        if context['kind']=='automation' and context['controller'].busy:
+            controller=context['controller'];controller.resume() if controller.paused.is_set() else controller.pause()
+            self.pause_button.setText('▶  Tiếp tục' if controller.paused.is_set() else 'Ⅱ  Tạm dừng')
+            self.refresh();return
         if getattr(self,'queue_clear_busy',False):return
         if not self.scheduler or not self.scheduler._thread or not self.scheduler._thread.is_alive():
             return
@@ -876,6 +888,11 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         self.refresh()
 
     def stop_translation(self):
+        if getattr(self,'translation_preparing',False):
+            self._translation_prepare_cancel.set();self.stop_button.setEnabled(False);self.notice.setText('Đang dừng chuẩn bị; chưa gửi API.');return
+        context=self.translation_updates.context()
+        if context['kind']=='automation' and context['controller'].busy:
+            context['controller'].stop();self.stop_button.setEnabled(False);return
         if self.scheduler:
             self.scheduler.stop()
         self.stop_button.setEnabled(False)
@@ -918,7 +935,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         if len({(j["provider"], j["model"], j["source_lang"], j["target_lang"]) for j in origins.values()}) > 1:
             QMessageBox.information(self, "Khác cấu hình gốc", "Các dòng được chọn thuộc nhiều model/ngôn ngữ gốc. Chọn các dòng cùng cấu hình để dịch lại đúng model gốc.")
             return
-        if original and original["provider"] not in ('kira', 'gemini'):
+        if original and original["provider"] not in ('kira', 'gemini', 'deepseek'):
             QMessageBox.information(self, "Nhà cung cấp gốc", "Không hỗ trợ tự chuyển nhà cung cấp của lượt dịch gốc.")
             return
         model = original["model"] if original else self.selected_model_id()
@@ -930,7 +947,8 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
                 return
             source, target = self.source_lang.currentText(), self.target_lang.currentText()
         provider = original['provider'] if original else self.provider_id()
-        allowed = {m for _, m in KIRA_MODELS} if provider == 'kira' else {m['name'] for m in json.loads(self.store.setting('gemini_models', '{"models":[]}')).get('models', [])}
+        from ..deepseek_models import MODEL_NAMES
+        allowed = set(MODEL_NAMES) if provider == 'deepseek' else {m for _, m in KIRA_MODELS} if provider == 'kira' else {m['name'] for m in json.loads(self.store.setting('gemini_models', '{"models":[]}')).get('models', [])}
         if model not in allowed:
             if provider != self.provider_id():
                 QMessageBox.information(self, 'Model gốc không khả dụng', 'Chọn đúng provider và làm mới danh sách model trước khi dịch lại.'); return
@@ -941,7 +959,9 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         if source == target:
             self.valid_languages()
             return
-        message = f"Dịch lại {'tất cả dòng lỗi trong lần nhập này' if all_errors else 'dòng đã chọn đang hiển thị'}: {len(ids)} dòng, {(len(ids)+2)//3} batch, {self.concurrency.value()} luồng, {model}, {source} → {target}? Request mới có thể tốn thêm token. Bản cũ được giữ nếu lỗi."
+        from ..deepseek_batch import job_size
+        size=job_size(provider,json.loads(original['config']) if original else {'deepseek_batch_size':self.deepseek_batch.currentData()})
+        message = f"Dịch lại {'tất cả dòng lỗi trong lần nhập này' if all_errors else 'dòng đã chọn đang hiển thị'}: {len(ids)} dòng, {(len(ids)+size-1)//size} batch, {self.concurrency.value()} luồng, {model}, {source} → {target}? Request mới có thể tốn thêm token. Bản cũ được giữ nếu lỗi."
         if any(r["state"] == "unknown" for r in selected):
             message += "\nRequest timeout/504 trước có thể đã tiêu thụ token; gửi mới có thể tốn thêm token."
         if original and model != original["model"]:
@@ -999,6 +1019,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         self.setStyleSheet(stylesheet(self.dark))
         self.sky_switch.set_dark(self.dark)
         if hasattr(self,'tts_page'):self.tts_page.apply_theme()
+        for section in getattr(self,'api_sections',{}).values():section.update_header_colors()
         self.update_branding()
         from .controls import install_combo_popup
         for combo in self.findChildren(QComboBox): install_combo_popup(combo)
@@ -1011,7 +1032,9 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         if getattr(self, '_row_gutter_key', None) == key: return
         self._row_gutter_key = key
         font = self.table.font(); font.setPixelSize(size); font.setBold(True)
-        header.setStyleSheet(f'QHeaderView, QHeaderView::section {{ font-size: {size}px; }}')
+        if getattr(self,'_gutter_style_size',None)!=size:
+            header.setStyleSheet(f'QHeaderView, QHeaderView::section {{ font-size: {size}px; }}')
+            self._gutter_style_size=size
         header.setFont(font); header.ensurePolished()
         metrics = QFontMetrics(font)
         # Reserve the widest status once for the entire document, including filtered rows.
@@ -1080,6 +1103,15 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
 
     def refresh(self, changed_ids: list[str] | None = None):
         if self._exit_pending: return
+        updates=getattr(self,'translation_updates',None)
+        if updates and updates.context()['kind']=='automation':
+            if self.pages.currentIndex()==0:updates.request(changed_ids or (),full=changed_ids is None)
+            return
+        if hasattr(self,'translation_updates') and self.translation_updates.active():
+            self.translation_updates.recently_active=True
+            self.translation_updates.request(changed_ids or (),full=changed_ids is None)
+            self.start_button.setEnabled(False);self.pause_button.setEnabled(not getattr(self,'translation_preparing',False));self.stop_button.setEnabled(True)
+            return
         try:
             self._refresh(changed_ids)
         except Exception as exc:
@@ -1091,11 +1123,73 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
     def queue_api_updates(self, ids):
         if self._closed or self._exit_pending:return
         self.pending_changed_ids.update(ids)
+        fast=hasattr(self,'translation_updates') and (self.translation_updates.active() or self.translation_updates.recently_active)
+        self.refresh_timer.setInterval(100 if fast else 40)
         if not self.refresh_timer.isActive(): self.refresh_timer.start()
 
     def flush_api_updates(self):
         ids = list(self.pending_changed_ids); self.pending_changed_ids.clear()
+        if hasattr(self,'translation_updates') and (self.translation_updates.active() or self.translation_updates.recently_active):
+            terminal=not self.translation_updates.active()
+            self.translation_updates.request(ids,full=terminal)
+            if terminal:self.translation_updates.recently_active=False
+            return
         self.refresh(ids)
+
+    def _apply_translation_snapshot(self,payload):
+        """Apply committed deltas; no SQLite calls, reset, or editor replacement."""
+        from ..documents import translatable
+        from .workspace_v2 import render_document_snapshot
+        self._applying_translation_snapshot=True
+        try:
+            own=payload.get('editor')
+            if own and payload['view']==self.doc_id:
+                self.model.apply_committed_rows(own['rows'])
+                self.editorial_rows=own['editorial'];wrong=sum(r['state']=='wrong_target_language' for r in self.editorial_rows)
+                self.warning_button.setText(f'Cần kiểm tra: {len(self.editorial_rows)}'+(f' · {wrong} sai ngôn ngữ' if wrong else ''));self.warning_button.setEnabled(bool(self.editorial_rows))
+                evidence=own['evidence'];self.warning_button.setToolTip(f"Kiểm tra ngôn ngữ cục bộ: {evidence.count('suspected')} nghi vấn · {evidence.count('insufficient')} không đủ bằng chứng. Không bảo đảm ngữ nghĩa; locale gần nhau cần người đọc kiểm tra.")
+                self.dirty_export=bool(any(r['source_revision'] or r['translation_revision'] for r in self.model.all_rows) and self.export_revision()!=own['export_revision'])
+                compact=hasattr(self,'_v2_layout_mode') and not self._v2_layout_mode[2]
+                self.export_button.setText(('Xuất file' if compact else '⇩  Xuất tài liệu')+(' •' if self.dirty_export else ''))
+                self.export_button.setToolTip('Có thay đổi chưa xuất' if self.dirty_export else 'Xuất tài liệu')
+                self.update_selection_count()
+                doc=own['document'];report=own['report'];layout=None
+                self.line_check.apply_result(((self.doc_id,'snapshot',payload['generation']),doc,report,None,layout))
+            self.period_warning.apply_rows(payload['period'],('snapshot',payload['generation']))
+            render_document_snapshot(self,payload)
+            if self.search.query.text() and (own or self.search.document_scope.currentIndex()!=0):self.search.rebuild()
+            statuses=payload['statuses'];current=statuses.get(self.doc_id,{})
+            total=current.get('total',0);done=current.get('done',0);errors=current.get('errors',0)+current.get('unknown',0)
+            self.stats_label.setText(f'{total:,} dòng cần dịch · {done:,} hoàn tất · {errors:,} cần xem lại')
+            self.file_progress.setValue(current.get('progress',0))
+            context=self.translation_updates.context();scope=payload['scope'];rows_by_doc=payload['rows_by_document']
+            ids=set(scope['line_ids']);docs=set(scope['docs'])
+            if scope['kind']=='direct' and not ids:
+                jobs=set(getattr(context['scheduler'],'job_ids',()))
+                docs={d for d,j in payload['jobs'].items() if j['id'] in jobs} or set(statuses)
+            required_rows=[r for d,rows in rows_by_doc.items() for r in rows if (r['id'] in ids if ids else d in docs) and translatable(r['source'])]
+            accepted=sum(usable(r) and r['state']=='done' for r in required_rows)
+            if required_rows or scope['kind']=='direct':self.total_progress.setValue(int(accepted*100/len(required_rows)) if required_rows else 0)
+            self.total_progress.setToolTip(scope['name']+' · tiến độ dịch trong phạm vi hiện tại; không gồm Kokoro/CapCut')
+            s=context['scheduler'];preparing=getattr(self,'translation_preparing',False);native_running=bool(s and s._thread and s._thread.is_alive());running=native_running or context['busy'] or preparing
+            paused=context['controller'].paused.is_set() if context['busy'] else native_running and s._paused.is_set()
+            stopped=context['controller'].stop_event.is_set() if context['busy'] else native_running and s._stopped.is_set()
+            text='Đã xong' if current.get('complete') else current.get('state','Đang chờ')
+            if running:
+                text='Đang chuẩn bị lượt dịch…' if preparing else ('Đang dừng an toàn' if stopped else 'Tạm dừng' if paused else text)+f' · {s.active if s else 0} request'
+            self.active_label.setText(text);self.active_label.setToolTip(text)
+            self.start_button.setEnabled(bool(self.doc_id) and bool(self.target_languages()) and not running)
+            self.pause_button.setEnabled(running and not preparing);self.pause_button.setText('▶  Tiếp tục' if paused else 'Ⅱ  Tạm dừng');self.stop_button.setEnabled(running)
+            direct_running=native_running and context['kind']=='direct'
+            self.retry_errors_button.setEnabled(not direct_running and bool(errors))
+            self.retry_workspace_button.setEnabled(not direct_running and any(s['errors'] or s['unknown'] for s in statuses.values()))
+            self.export_button.setEnabled(bool(self.doc_id));self.folder_button.setEnabled(self.last_export is not None and self.last_export.parent.is_dir())
+            if s and payload['updates']:s.acknowledge([r['id'] for r in payload['updates']],self.doc_id)
+            from .notifications import notify_scheduler
+            notify_scheduler(self,payload)
+            if s and s is not getattr(self,'_deepseek_terminal_displayed',None) and not running and getattr(s.provider,'__class__',type(None)).__name__=='DeepSeekProvider':
+                self._deepseek_terminal_displayed=s;self.refresh_deepseek_display()
+        finally:self._applying_translation_snapshot=False
 
     def _refresh(self, changed_ids: list[str] | None = None):
         if self._closed or self._exit_pending or not hasattr(self, "model"):
@@ -1144,7 +1238,21 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
                 'needs_intervention':reason_label(getattr(self.scheduler,'intervention_reason',None)) or 'Cần kiểm tra lỗi không thể tự phục hồi an toàn',
                 'completed_with_errors':'Đã rà soát · còn lỗi sau giới hạn tự phục hồi',
                 'blocked':'Bị chặn · kiểm tra quyền truy cập hoặc ngân sách',
+                'needs_reconciliation':'Chưa rõ kết quả · cần đối chiếu hoặc quyền gửi lại riêng',
+                'blocked_budget':'Đã đạt giới hạn phục hồi · giữ checkpoint',
+                'blocked_auth':'Key không hợp lệ · cần thay key',
+                'blocked_quota':'Hết quota · chờ reset hoặc key khác',
                 'quota_exhausted':'Hết quota/số dư; các bản dịch đã lưu được giữ'}.get(job_state, job_state))
+            if self.store.job(self.scheduler.job_id)['provider']=='deepseek' and getattr(self.scheduler,'intervention_reason',None):
+                reason=self.scheduler.intervention_reason
+                self.active_label.setText({'authentication':'DeepSeek: key không hợp lệ (401); kiểm tra trang API',
+                    'quota_exhausted':'DeepSeek: không đủ số dư (402)',
+                    'rate_limit':'DeepSeek: vượt giới hạn API (429); chủ động thử lại sau',
+                    'model_or_request':'DeepSeek: yêu cầu không hợp lệ (400)',
+                    'client_timeout':'DeepSeek timeout; chưa rõ chi phí, không tự gửi lại',
+                    'network_error':'DeepSeek: lỗi mạng; chưa rõ máy chủ đã xử lý hay chưa',
+                    'not_sent':'DeepSeek: không kết nối được, chưa gửi request',
+                    'http_server_error':'DeepSeek: lỗi máy chủ; không tự gửi lại'}.get(reason,'DeepSeek: phản hồi không hợp lệ; xem dòng lỗi để chủ động xử lý'))
             self.stats_label.setText(f"{total:,} dòng cần dịch · {done:,} hoàn tất · {errors:,} cần xem lại")
         elif running and self.scheduler._paused.is_set():
             self.active_label.setText(f"Đã tạm dừng · {self.scheduler.active} request đang hoàn tất")
@@ -1187,7 +1295,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             self.active_label.setToolTip(self.active_label.text())
         self.update_editorial()
         self.retry_errors_button.setEnabled(any(r['state'] in ('error', 'unknown', 'wrong_target_language') for r in rows) and not running)
-        self.key_status.setText("●  API key đã lưu bằng Windows DPAPI" if self.store.load_key() else "○  Chưa cấu hình API key")
+        self.refresh_api_headers()
         if hasattr(self, 'workspace_ids'): self.refresh_stage2()
         if self.pages.currentIndex() == 1:
             selected_job = self.job_list.currentItem().data(Qt.UserRole) if self.job_list.currentItem() else None
@@ -1344,6 +1452,9 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
                 for timer_name in ('local_timer','queue_timer','refresh_timer','layout_save_timer'):
                     timer = getattr(self,timer_name,None)
                     if timer: timer.stop()
+                if hasattr(self,'automation_page'):
+                    self.automation_page.timer.stop()
+                    self.automation_page.validation_timer.stop()
                 self._exit_deadline = time.monotonic()+self.shutdown_grace_seconds
                 if self.scheduler: self.scheduler.stop()
                 if hasattr(self,'automation_controller') and self.automation_controller.busy:self.automation_controller.stop()
@@ -1363,6 +1474,8 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         if self.tray:
             self.tray.hide()
         self.exit_timer.stop()
+        if hasattr(self,'translation_updates'):self.translation_updates.shutdown()
+        if hasattr(self,'automation_page'):self.automation_page.snapshots.shutdown()
         for name in ('local_timer','queue_timer','refresh_timer','layout_save_timer'):
             timer=getattr(self,name,None)
             if timer:timer.stop()

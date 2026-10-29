@@ -10,7 +10,11 @@ def validate(path,rate=24000):
     frames=0;peak=0.
     with sf.SoundFile(str(path)) as stream:
         if stream.samplerate!=rate or stream.channels!=1:raise ValueError('Audio sai sample rate/channel')
-        for block in stream.blocks(blocksize=65536,dtype='float32'):
+        # The bundled mpg123 can misdecode when a read splits an MP3 granule.
+        # A multiple of 1152 also aligns MPEG-2's 576-sample granules, while
+        # retaining bounded memory instead of decoding the whole file at once.
+        blocksize=1152*56 if stream.format=='MP3' else 65536
+        for block in stream.blocks(blocksize=blocksize,dtype='float32'):
             if not np.isfinite(block).all():raise ValueError('Audio chứa số không hữu hạn')
             frames+=len(block)
             if len(block):peak=max(peak,float(np.max(np.abs(block))))

@@ -22,6 +22,8 @@ REASONS = {'ready':'Sẵn sàng nhưng rảnh','no_pending_work':'Không có bat
     'permission_denied':'Không có quyền dùng model','model_unavailable':'Model không khả dụng','credential_error':'Không giải mã được key',
     'request_exceeds_tpm':'Batch vượt trần TPM'}
 REASONS['account_quota_exhausted']='Nhóm đã xác nhận: provider báo hết quota model'
+RUN_STATES.update(needs_reconciliation='Cần đối chiếu kết quả',blocked_auth='Key không hợp lệ',
+    blocked_quota='Hết quota',blocked_budget='Đã đạt giới hạn phục hồi')
 
 
 def kira_pool(owner):

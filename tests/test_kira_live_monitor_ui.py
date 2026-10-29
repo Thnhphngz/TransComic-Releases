@@ -196,7 +196,7 @@ def test_idle_key_status_changes_and_removal_keep_other_cards_stable(gui):
     QTest.mouseClick(w.kira_manage_button,Qt.LeftButton);d=w.kira_monitor_dialog
     a,b=[k['id'] for k in store.kira_keys()];card_b=d.cards[b]
     for state,text in [('QUOTA_EXHAUSTED','Quota model'),('INVALID','Key không hợp lệ'),
-        ('COOLDOWN','Đang cooldown'),('UNKNOWN_ERROR','Lỗi chưa phân loại')]:
+        ('COOLDOWN','Đang cooldown'),('UNKNOWN_ERROR','Lỗi tạm thời')]:
         store.kira_key_status(a,state,time.time()+60 if state=='COOLDOWN' else 0)
         d.refresh_data();assert text in d.cards[a].header.toolTip()
         assert d.cards[b] is card_b
