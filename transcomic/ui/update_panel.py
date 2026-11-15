@@ -22,6 +22,8 @@ class UpdatePanel(QFrame):
         super().__init__(window);self.window=window;self.setObjectName('card')
         from ..update.internal import InternalUpdateService
         self.service=service or InternalUpdateService();self.machine=InstallMachine()
+        from ..update.timing import UpdateTrace
+        self.trace=UpdateTrace(component='updater')
         self.item=None;self.busy=False;self.cancel_event=threading.Event();self.worker=None
         self.downloaded_path=None;self.shutdown_event=threading.Event()
         self.manual_check_pending=False;self.update_dialog=None
@@ -96,12 +98,14 @@ class UpdatePanel(QFrame):
     def download_now(self):
         if self.window._closed or self.window._exit_pending:return
         if not self.item or self.item.signature_status not in ('VERIFIED_ED25519','VERIFIED_INTERNAL_HTTPS_SHA256') or self.busy:return
+        from ..update.timing import UpdateTrace
+        self.trace=UpdateTrace(self.service.directory,'updater');self.trace.event('update_clicked')
         if self.downloaded_path is not None and not self.service.testing:
             self.begin_native_install();return
         item=self.item;self.status.setText('Đang tải…')
         self.machine.state=State.DOWNLOADING
         def run(cancel):
-            path=self.service.download(item,self.emit_progress,cancel)
+            with self.trace.span('download_verify'):path=self.service.download(item,self.emit_progress,cancel)
             return {'kind':'downloaded','path':str(path)}
         self.start_work(run)
 
@@ -205,12 +209,12 @@ class UpdatePanel(QFrame):
                     return {'kind':'installed_edition_required'}
             except (ValueError,OSError):
                 return {'kind':'installed_edition_required'}
-            service.confirm_install(item,cancel)
+            with self.trace.span('confirm_candidate'):service.confirm_install(item,cancel)
             # This plan is an intent only; the helper cannot execute until a
             # separate COMMIT sent after Store/log close and process exit.
             raw,plan=prepare_install_plan(service,item,path,installation,current_process_identity(),
                 SafetySnapshot(app_closed=True,safe_exit_verified=True))
-            session=HelperHandoff(service.directory,installation,None,policy='internal').launch(raw,cancel)
+            with self.trace.span('helper_handoff'):session=HelperHandoff(service.directory,installation,None,policy='internal').launch(raw,cancel)
             if cancel.is_set():session.abort();raise Cancelled('Handoff cancelled')
             return {'kind':'handoff_ready','session':session}
         self.start_work(prepare)

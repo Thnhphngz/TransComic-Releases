@@ -77,6 +77,10 @@ def main():
     def exercise():
         try:
             assert store.path.resolve().is_relative_to(root)
+            phase=os.environ.get('TRANSCOMIC_SMOKE_HOTFIX_204')
+            if phase in ('seed','delete','verify'):
+                from .release_smoke_204 import run
+                code=run(window,root,wait,phase);app.exit(code);return
             from .release_smoke import verify_baseline,run_automation,verify_reopen,verify_gateway_recovery
             if os.environ.get('TRANSCOMIC_SMOKE_REOPEN')=='1':
                 verify_reopen(window,root)

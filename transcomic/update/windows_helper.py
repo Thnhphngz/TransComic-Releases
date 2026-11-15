@@ -460,7 +460,8 @@ class WindowsRuntime:
         self.require_execution(path,install_directory)
         try:
             with system_dll_search():
-                process=subprocess.Popen([str(path),'/VERYSILENT','/NORESTART','/SP-','/SUPPRESSMSGBOXES',
+                log=safe_path(self._native_session.updates/('installer-'+uuid4().hex+'.log'),self._native_session.updates)
+                process=subprocess.Popen([str(path),'/VERYSILENT','/NORESTART','/SP-','/SUPPRESSMSGBOXES','/LOG='+str(log),
                                    '/DIR='+str(install_directory)],cwd=install_directory,shell=False,
                                   stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=0x08000000)
             code=process.wait(timeout=timeout)
@@ -500,8 +501,11 @@ class WindowsRuntime:
             raise UpdateError('VERIFIED_NEW_APPLICATION_REQUIRED')
         ticket=os.urandom(32).hex()
         receipt=safe_path(session.updates/('startup-'+ticket+'.json'),session.updates)
+        trace=getattr(self,'trace',None)
+        if trace:trace.event('new_exe_launch_started')
         process=subprocess.Popen([str(app),'--update-startup-token='+ticket],cwd=app.parent,shell=False,creationflags=0x08000000,
                                  env=dict(os.environ,PYINSTALLER_RESET_ENVIRONMENT='1'))
+        if trace:trace.event('new_exe_launch_finished')
         launcher=process_identity(process.pid)
         deadline=time.monotonic()+30
         while time.monotonic()<deadline:
@@ -517,6 +521,7 @@ class WindowsRuntime:
                     raise UpdateError('NEW_APP_STARTUP_IDENTITY_MISMATCH')
                 if identity.pid!=process.pid and parent_process_id(identity.pid)!=process.pid:
                     raise UpdateError('NEW_APP_STARTUP_PARENT_MISMATCH')
+                if trace:trace.event('startup_receipt_verified')
                 return identity.pid
             time.sleep(.05)
         raise UpdateError('NEW_APP_STARTUP_NOT_ACKNOWLEDGED')
@@ -561,6 +566,8 @@ class ProductionUpdateHelper:
         if policy not in ('internal','signed-stable'):raise UpdateError('UNKNOWN_UPDATE_POLICY')
         self.policy=policy
         self.updates=safe_path(updates);self.installation=safe_path(installation)
+        from .timing import UpdateTrace
+        self.trace=UpdateTrace(self.updates,'helper');self.runtime.trace=self.trace
         self.app=self.installation/'TransComic.exe'
 
     def validate(self,plan):
@@ -598,7 +605,8 @@ class ProductionUpdateHelper:
         try:
             os.close(fd)
             self._native_install_started=False;self._native_install_returned=False
-            return self._run(plan,snapshot,cancel,timeout,handoff,native_session)
+            with self.trace.span('update_install'):
+                return self._run(plan,snapshot,cancel,timeout,handoff,native_session)
         finally:
             self.runtime._native_session=None
             self.release_lock(lock,plan)
@@ -622,35 +630,40 @@ class ProductionUpdateHelper:
         check_previous_install(self.updates,plan,self.policy,self.testing,lock_owned=True)
         if self.testing:handle=self.runtime.open_process(plan.process)
         else:
-            native_session.ready_and_wait(cancel)
+            with self.trace.span('safe_exit_commit'):native_session.ready_and_wait(cancel)
             handle=native_session.handle
             self.runtime._native_session=native_session;self.runtime._plan=plan
-        try:self.runtime.wait_exit(handle,timeout,cancel)
+        try:
+            with self.trace.span('old_process_exit'):self.runtime.wait_exit(handle,timeout,cancel)
         finally:
             self.runtime.close_process(handle)
             if native_session is not None:native_session.handle=None
         if native_session is not None:
             if native_session.launcher_handle is not None:
                 launcher=native_session.launcher_handle
-                try:self.runtime.wait_exit(launcher,timeout,cancel)
+                try:
+                    with self.trace.span('old_launcher_exit'):self.runtime.wait_exit(launcher,timeout,cancel)
                 finally:self.runtime.close_process(launcher);native_session.launcher_handle=None
             native_session.exited=True
         if cancel.is_set():raise UpdateError('UPDATE_CANCELLED')
         # Recheck crypto/path after wait; holding the no-write/delete handle narrows TOCTOU for Windows.
         path,item=self.validate(plan)
         with self.runtime.hold_installer(path) as stream:
-            if path.stat().st_size!=item.size or hashlib.file_digest(stream,'sha256').hexdigest()!=item.sha256:raise UpdateError('INSTALLER_TAMPERED_AFTER_DOWNLOAD')
+            with self.trace.span('installer_hash'):
+                if path.stat().st_size!=item.size or hashlib.file_digest(stream,'sha256').hexdigest()!=item.sha256:raise UpdateError('INSTALLER_TAMPERED_AFTER_DOWNLOAD')
             if cancel.is_set():raise UpdateError('UPDATE_CANCELLED')
             self.receipt(item,'INSTALL_OUTCOME_UNKNOWN')
             self._native_install_started=True
-            code=self.runtime.install(path,self.installation,900)
+            with self.trace.span('installer'):code=self.runtime.install(path,self.installation,900)
             self._native_install_returned=True
             if code!=0:
                 self.receipt(item,'INSTALL_FAILED');raise UpdateError('INSTALLER_FAILED_'+str(code))
-        if self.runtime.installed_version(self.app)!=plan.version:raise UpdateError('INSTALLED_VERSION_MISMATCH')
-        if not self.testing and registered_installation(plan.version)!=self.installation:raise UpdateError('UPGRADED_REGISTRATION_UNVERIFIED')
+        with self.trace.span('installed_identity'):
+            if self.runtime.installed_version(self.app)!=plan.version:raise UpdateError('INSTALLED_VERSION_MISMATCH')
+            if not self.testing and registered_installation(plan.version)!=self.installation:raise UpdateError('UPGRADED_REGISTRATION_UNVERIFIED')
         self.receipt(item,'INSTALLED_RESTART_PENDING')
-        if plan.restart:self.runtime.restart(self.app)
+        if plan.restart:
+            with self.trace.span('restart'):self.runtime.restart(self.app)
         self.receipt(item,'COMPLETED')
         return {'success':True,'simulated':self.testing,'actual_install':not self.testing}
 

@@ -256,6 +256,7 @@ class AutomationPage(QWidget):
         self.current=None;self.loading=False;self.proof=None;self.dirty=True;self.tasks=[];self.progress_cache={};self.dirty_groups=set();self.setAcceptDrops(True)
         self.validation_details='Chưa kiểm tra đầu vào.';self.validation_busy=False;self.validation_again=False;self.validation_force=False;self.validation_generation=0;self._adapting=False;self.pair_generation={};self.pair_pending=set()
         self.import_busy=False;self.import_queue=[];self.project_error_requested=False;self._preview_signature=None
+        self.draft_cancel=threading.Event();self._pair_tokens=set()
         self.pair_slots=threading.BoundedSemaphore(2)
         self.validation_timer=QTimer(self);self.validation_timer.setSingleShot(True);self.validation_timer.setInterval(250);self.validation_timer.timeout.connect(self.run_validation)
         self.task_done.connect(self.on_done,Qt.QueuedConnection);self.refresh_requested.connect(self.mark_dirty,Qt.QueuedConnection);self.completion.connect(self.on_finished,Qt.QueuedConnection)
@@ -386,6 +387,7 @@ class AutomationPage(QWidget):
         self.snapshots=AutomationSnapshots(self)
         self.timer=QTimer(self);self.timer.setInterval(150);self.timer.timeout.connect(self.flush);self.timer.start()
         self.load_worksets()
+        QTimer.singleShot(0,self.restore_draft_inputs)
     def add_button(self,layout,text,callback,primary=False):
         control=AutomationButton(text)
         if primary:control.setProperty('glassRole','primary')
@@ -515,14 +517,37 @@ class AutomationPage(QWidget):
         def run():
             try:result=(work(),None)
             except Exception as exc:result=(None,str(exc))
-            self.task_done.emit(done,result)
+            try:self.task_done.emit(done,result)
+            except RuntimeError:pass
+        if self.draft_cancel.is_set():return
+        self.tasks=[t for t in self.tasks if t.is_alive()]
+        self.owner.background_threads=[t for t in self.owner.background_threads if t.is_alive()]
         thread=threading.Thread(target=run,daemon=True,name='automation-ui-task');self.tasks.append(thread);self.owner.background_threads.append(thread);thread.start()
     def on_done(self,callback,value):
-        if self.owner._closed:return
+        if self.owner._closed or self.owner._exit_pending or self.draft_cancel.is_set():return
         result,error=value
         if error:self.notice.setText(error)
         else:self.safe(lambda:callback(result))
         self.mark_dirty()
+    def request_draft_stop(self):
+        """Fence callbacks and cancel checks; never cancel user-started stages here."""
+        self.draft_cancel.set();self.validation_generation+=1
+        self.validation_timer.stop();self.timer.stop();self.snapshots.shutdown()
+    def restore_draft_inputs(self):
+        if self.draft_cancel.is_set() or self.owner._exit_pending:return
+        from ..automation.draft_inputs import pending
+        queued={entry['token'] for _,entry in self.import_queue}
+        queued.add(getattr(self,'_import_token',None))
+        for work in self.repo.workset_summaries():
+            if work['state'] in ('running','stopping'):continue
+            for entry in pending(self.repo,work['id'],'draft_imports'):
+                if entry['token'] not in queued:self.import_queue.append((work['id'],entry));queued.add(entry['token'])
+        if self.import_queue and not self.import_busy:self.import_next()
+        if self.current:
+            for entry in pending(self.repo,self.current,'draft_pairings'):
+                if entry['token'] in self._pair_tokens:continue
+                group=self.repo.group(entry['group'])
+                if group and group['workset_id']==self.current:self.safe(lambda e=entry:self.pair_folder(e['group'],e['folder'],e['sort'],intent=e))
     def load_worksets(self,select=None):
         self.loading=True;self.worksets.clear()
         for work in self.repo.workset_summaries():self.worksets.addItem(work['name'],work['id'])
@@ -542,6 +567,7 @@ class AutomationPage(QWidget):
             self.loading=False
         self.refresh()
         if self.current and self.repo.workset(self.current)['checkpoint'].get('validation_sections'):self.queue_validation()
+        QTimer.singleShot(0,self.restore_draft_inputs)
     def set_field(self,key,value):
         control=self.fields[key]
         if isinstance(control,QComboBox):
@@ -629,26 +655,38 @@ class AutomationPage(QWidget):
             else:self.notice.setText('Thả thư mục ảnh vào đúng hàng; không nhận thư mục tài liệu để quét.')
             return
         workset=self.current
-        self.validation_generation+=1;self.proof=None;self.validation_timer.stop();self.import_queue.append((workset,tuple(paths)))
+        from ..automation.draft_inputs import remember
+        entry=remember(self.repo,workset,'draft_imports',paths=[str(Path(p).absolute()) for p in paths])
+        self.validation_generation+=1;self.proof=None;self.validation_timer.stop();self.import_queue.append((workset,entry))
         if not self.import_busy:self.import_next()
     def import_next(self):
+        if self.draft_cancel.is_set():return
         if not self.import_queue:
             self.import_busy=False;self.queue_validation();self.mark_dirty();return
-        self.import_busy=True;workset,paths=self.import_queue.pop(0)
+        self.import_busy=True;workset,entry=self.import_queue.pop(0);self._import_token=entry['token'];paths=entry['paths']
         self.set_validation_status('Đang nhập tài liệu','Đọc tài liệu trong nền; giữ thứ tự các đợt thêm.');self.start.setEnabled(False)
         def done(result):self.import_done(workset);self.import_next()
         def work():
-            try:return self.repo.add(workset,paths),None
+            from ..automation.draft_inputs import forget
+            from ..automation.validation import ValidationSuperseded
+            try:
+                result=self.repo.add(workset,paths,cancelled=self.draft_cancel.is_set)
+                forget(self.repo,workset,'draft_imports',entry['token'])
+                return result,None
+            except ValidationSuperseded:return (),None  # intent remains for next startup
             except Exception as exc:return (),str(exc)
         def finish(value):
             result,error=value
             if error:self.notice.setText(error)
             done(result)
         self.background(work,finish)
-    def pair_folder(self,id,folder,sort=None):
+    def pair_folder(self,id,folder,sort=None,*,intent=None):
         """Validate a proposed mapping off-thread before changing any saved mapping."""
         group=self.repo.group(id);workset=group['workset_id'];self.repo.editable(workset)
         if workset!=self.current:raise ValueError('Nhóm không thuộc bộ công việc đang xem.')
+        from ..automation.draft_inputs import remember,forget
+        intent=intent or remember(self.repo,workset,'draft_pairings',group=id,folder=str(Path(folder).absolute()),sort=sort or group['data'].get('image_sort','name'))
+        self._pair_tokens.add(intent['token'])
         sort=sort or group['data'].get('image_sort','name');generation=self.pair_generation.get(id,0)+1;self.pair_generation[id]=generation
         self.pair_pending.add(id);self.start.setEnabled(False)
         self.model.set_image_pairing(id,folder)
@@ -662,25 +700,35 @@ class AutomationPage(QWidget):
             path=path.resolve();doc=self.repo.store.document(group['document_id']);rows=self.repo.store.lines(group['document_id'])
             proposed={**group,'data':{**group['data'],'image_folder':str(path),'image_sort':sort}}
             stamp=input_stamp(proposed,Path(doc['path']),rows)
-            images=image_manifest(path,sort,cancelled=lambda:self.owner._closed or self.pair_generation.get(id)!=generation or self.current!=workset)
+            images=image_manifest(path,sort,cancelled=cancelled)
             if not images:raise ValueError('Thư mục không có ảnh hợp lệ; giữ nguyên mapping trước đó.')
             if input_stamp(proposed,Path(doc['path']),rows)!=stamp:raise ValueError('Đầu vào thay đổi khi kiểm tra; giữ mapping trước đó.')
             return dict(folder=str(path),images=images,stamp=stamp,slots=[r['id'] for r in rows if speakable(r['source'])])
         def checked(result):
+            self._pair_tokens.discard(intent['token'])
             if self.pair_generation.get(id)!=generation:return
             self.pair_pending.discard(id)
             value,error=result
             if self.current!=workset:self.model.set_image_pairing(id);return
-            if error:self.model.set_image_pairing(id);self.notice.setText(error);return
+            if error:
+                forget(self.repo,workset,'draft_pairings',intent['token']);self.model.set_image_pairing(id);self.notice.setText(error);return
             current=self.repo.group(id);self.repo.editable(workset)
             if (current['data'].get('image_folder'),current['data'].get('image_sort','name'))!=original:self.model.set_image_pairing(id);return
-            self.repo.pair_images(id,value['folder'],sort,inspection=value);self.proof=None;self.mark_dirty();self.notice.setText('')
+            with self.repo.store.transaction():
+                self.repo.pair_images(id,value['folder'],sort,inspection=value)
+                forget(self.repo,workset,'draft_pairings',intent['token'])
+            self.proof=None;self.mark_dirty();self.notice.setText('')
             self.model.set_image_pairing(id,value['folder'])
             if self.current==workset:self.queue_validation()
         def check():
+            from ..automation.validation import check_current
             try:
-                with self.pair_slots:return inspect(),None
+                while not self.pair_slots.acquire(timeout=.05):check_current(cancelled)
+                try:
+                    check_current(cancelled);result=inspect();check_current(cancelled);return result,None
+                finally:self.pair_slots.release()
             except Exception as exc:return None,str(exc) or 'Đã hủy kiểm tra thư mục ảnh lỗi thời.'
+        def cancelled():return self.draft_cancel.is_set() or self.owner._closed or self.pair_generation.get(id)!=generation or self.current!=workset
         self.background(check,checked)
     def import_done(self,id):
         if id==self.current:self.proof=None;self.mark_dirty();self.queue_validation()
@@ -743,6 +791,7 @@ class AutomationPage(QWidget):
         close=QDialogButtonBox(QDialogButtonBox.Close);close.rejected.connect(dialog.reject);layout.addWidget(close)
         self.validation_dialog=dialog;self.validation_detail_text=text;dialog.finished.connect(lambda *_:setattr(self,'validation_detail_text',None));dialog.show()
     def queue_validation(self,force=False):
+        force=force or self.validation_force
         self.validation_generation+=1;self.proof=None
         if self.import_busy:self.validation_again=True;self.validation_force=self.validation_force or force;return
         if not self.current or self.repo.active() or self.controller.busy:return
@@ -765,7 +814,7 @@ class AutomationPage(QWidget):
             if self.validation_again:self.validation_timer.start()
         def work():
             from ..automation.validation import ValidationSuperseded
-            try:return self.controller.validate(id,force_config=force,cancelled=lambda:self.owner._closed or self.validation_generation!=generation or self.current!=id)
+            try:return self.controller.validate(id,force_config=force,cancelled=lambda:self.draft_cancel.is_set() or self.owner._closed or self.validation_generation!=generation or self.current!=id)
             except ValidationSuperseded:return {'validation_cancelled':True}
             except Exception as exc:return {'validation_error':str(exc),'config_fingerprint':''}
         def done(proof):

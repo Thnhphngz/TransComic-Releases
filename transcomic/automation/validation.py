@@ -198,7 +198,7 @@ def validate(repo,id,services=None,*,refresh=True,reuse_inputs=False,force_confi
                 if file_hash(path)!=meta['source_sha256']:raise ValueError('Nguồn đã thay đổi; cần đối chiếu từng dòng trước khi tiếp tục.')
                 inspected=meta.get('image_inspection',{})
                 if reuse_inputs and inspected.get('version')==1 and inspected.get('stamp')==stamp and meta.get('images'):images=meta['images']
-                else:images=image_manifest(meta['image_folder'],meta['image_sort'])
+                else:images=image_manifest(meta['image_folder'],meta['image_sort'],cancelled=cancelled)
             if len(images)!=len(slots) or not slots:raise ValueError(f'{len(slots)} dòng cần voice / {len(images)} ảnh — lệch {len(slots)-len(images)}')
             previous=meta.get('images',[])
             if previous and len(previous)==len(images):

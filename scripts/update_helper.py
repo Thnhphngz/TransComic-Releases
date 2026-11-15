@@ -37,6 +37,7 @@ def main(argv=None):
         return 0
     except Exception as error:
         if session is not None:
+            if 'helper' in locals():helper.trace.event('helper_failed',error=error)
             # Do not overwrite the durable install receipt (especially UNKNOWN).
             from transcomic.update.metadata import canonical
             from uuid import uuid4

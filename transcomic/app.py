@@ -37,11 +37,14 @@ def main() -> int:
     if '--local-build-smoke' in sys.argv:
         from .local_build_smoke import main as smoke
         return smoke()
+    from .update.timing import startup_trace
+    trace=getattr(sys,'_transcomic_startup_trace',None) or startup_trace(sys.argv[1:],data_path().parent/'Updates')
     if os.name == 'nt':
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('TransComic.Desktop')
     QApplication.setAttribute(Qt.AA_DontUseNativeDialogs, True)
     app = QApplication(sys.argv)
+    trace.event('qt_ready')
     app.setApplicationName("TransComic")
     if os.name=='nt':
         from .update.windows_helper import check_application_start,acquire_application_mutex
@@ -55,15 +58,15 @@ def main() -> int:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.information(None,'Cập nhật chưa hoàn tất','Đang cập nhật hoặc cần kiểm tra kết quả cài đặt. Không chạy lại bộ cài khi kết quả chưa rõ. Xem thư mục Updates trong dữ liệu TransComic.')
             return 2
-    window = MainWindow(Store(data_path()))
-    show_initial(window)
+    trace.event('startup_guard_finished')
+    with trace.span('database_open'):store=Store(data_path())
+    with trace.span('window_create'):window=MainWindow(store)
     if getattr(sys,'frozen',False):
-        def startup_ack():
-            if not window.isVisible() or window._closed:return
-            from .update.windows_helper import acknowledge_restart
-            try:acknowledge_restart(sys.argv[1:])
-            except Exception:window.store.log.emit('shutdown_error',exception='StartupAcknowledgementFailed')
-        QTimer.singleShot(0,startup_ack)
+        from .ui.startup_ack import StartupAcknowledgement
+        from .update.windows_helper import acknowledge_restart
+        window._startup_ack=StartupAcknowledgement(window,lambda:acknowledge_restart(sys.argv[1:]),trace)
+    trace.event('window_show_requested')
+    show_initial(window)
     window.update_panel.start_auto()
     return app.exec()
 

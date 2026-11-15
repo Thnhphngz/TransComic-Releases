@@ -41,7 +41,7 @@ class HistoryCard(QFrame):
         active=page.scheduler.busy and page.scheduler.run_id==self.doc['run_id'];state=self.doc['run_state']
         if state in RECOVERABLE:add('Tiếp tục lượt',page.resume_history,not page.is_busy() and not owned)
         add('Tạm dừng lượt',page.pause,active and not owned);add('Dừng / Hủy lượt',lambda:page.stop(self.doc['run_id']),not owned and state not in TERMINAL and (not page.scheduler.busy or active))
-        menu.addSeparator();add('Xóa bản ghi (giữ audio)',page.delete_history,not owned and not page.is_busy() and state in TERMINAL);return menu
+        menu.addSeparator();add('Xóa bản ghi (giữ audio)',lambda:page.delete_history(self.id),page.store.can_delete_history(self.doc['run_id']));return menu
 
 
 class HistoryPanel(QWidget):
@@ -91,10 +91,10 @@ class HistoryPanel(QWidget):
         if changed is not None:
             affected={item['document_id'] for id in changed if (item:=self.page.store.segment(id))}
             if not affected:return
-            selected='SELECT d.id FROM documents d JOIN runs r ON r.id=d.run_id WHERE r.history_accepted=1 AND d.id IN ('+','.join('?' for _ in affected)+')';arguments=tuple(affected)
+            selected='SELECT d.id FROM documents d JOIN runs r ON r.id=d.run_id WHERE r.history_accepted=1 AND NOT EXISTS (SELECT 1 FROM hidden_history h WHERE h.document_id=d.id) AND d.id IN ('+','.join('?' for _ in affected)+')';arguments=tuple(affected)
         else:
             query=self.search.text().strip().replace('\\','\\\\').replace('%','\\%').replace('_','\\_');term='%'+query+'%'
-            selected="SELECT d.id FROM documents d JOIN runs r ON r.id=d.run_id WHERE r.history_accepted=1 AND (d.name LIKE ? ESCAPE '\\' OR json_extract(r.config,'$.voice') LIKE ? ESCAPE '\\') ORDER BY r.created DESC,d.position LIMIT ?";arguments=(term,term,self.limit+1)
+            selected="SELECT d.id FROM documents d JOIN runs r ON r.id=d.run_id WHERE r.history_accepted=1 AND NOT EXISTS (SELECT 1 FROM hidden_history h WHERE h.document_id=d.id) AND (d.name LIKE ? ESCAPE '\\' OR json_extract(r.config,'$.voice') LIKE ? ESCAPE '\\') ORDER BY r.created DESC,d.position LIMIT ?";arguments=(term,term,self.limit+1)
         rows=self.page.store.rows("WITH selected AS ("+selected+") SELECT d.id,d.run_id,d.name,d.path,d.folder,d.position,r.config,r.created,r.state run_state,COUNT(s.id) total,SUM(s.state='success') success,SUM(CASE WHEN s.state='success' THEN s.duration ELSE 0 END) duration,GROUP_CONCAT(DISTINCT s.backend) backend FROM selected q JOIN documents d ON d.id=q.id JOIN runs r ON r.id=d.run_id LEFT JOIN segments s ON s.document_id=d.id AND s.skip=0 GROUP BY d.id ORDER BY r.created DESC,d.position",arguments)
         if changed is not None:
             for doc in rows:
@@ -102,7 +102,7 @@ class HistoryPanel(QWidget):
             return
         wanted={d['id'] for d in rows[:self.limit]}
         for id in list(self.cards):
-            if id not in wanted:card=self.cards.pop(id);self.column.removeWidget(card);card.deleteLater()
+            if id not in wanted:card=self.cards.pop(id);card.hide();self.column.removeWidget(card);card.deleteLater()
         for n,doc in enumerate(rows[:self.limit]):
             card=self.cards.get(doc['id'])
             if not card:card=HistoryCard(self,doc);self.cards[doc['id']]=card

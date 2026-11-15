@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS segments(id TEXT PRIMARY KEY,document_id TEXT NOT NUL
 CREATE INDEX IF NOT EXISTS tts_segment_queue ON segments(document_id,state,position);
 CREATE TABLE IF NOT EXISTS presets(name TEXT PRIMARY KEY,config TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS preferences(name TEXT PRIMARY KEY,value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS hidden_history(document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE);
 '''
 
 RECOVERABLE=('ready','paused','interrupted','partial','stopped')
@@ -173,6 +174,44 @@ class TtsStore:
             for id in ids:
                 if self.run(id)['state'] in ('running','pausing','stopping'):raise ValueError('Dừng tác vụ trước khi xóa lịch sử')
                 self.db.execute('DELETE FROM runs WHERE id=?',(id,))
+
+    def can_delete_history(self,run):
+        row=self.run(run)
+        return bool(row and row['state'] in TERMINAL)
+
+    def delete_history_document(self,document):
+        """Commit before refreshing UI; Automation retains its durable checkpoint."""
+        repo=getattr(self,'automation',None)
+        doc=self.doc(document)
+        if not doc:return
+        # Never acquire the translation lock while holding the TTS lock:
+        # source edits invalidate TTS segments in the opposite direction.
+        owned=bool(repo and repo.tts_owner(doc['run_id']))
+        with self.transaction():
+            doc=self.doc(document)
+            if not doc:return
+            if not self.can_delete_history(doc['run_id']):
+                raise ValueError('Hủy hoặc hoàn tất lượt trước khi xóa lịch sử để giữ checkpoint')
+            if owned:
+                self.db.execute('INSERT OR IGNORE INTO hidden_history VALUES (?)',(document,))
+            else:
+                self.db.execute('DELETE FROM documents WHERE id=?',(document,))
+                self.db.execute('DELETE FROM runs WHERE id=? AND NOT EXISTS (SELECT 1 FROM documents WHERE run_id=?)',(doc['run_id'],doc['run_id']))
+
+    def clear_completed_history(self):
+        # One transaction: a failure cannot partially clear the visible list.
+        repo=getattr(self,'automation',None)
+        docs=self.rows('SELECT d.id,r.id run_id FROM documents d JOIN runs r ON r.id=d.run_id WHERE r.history_accepted=1 AND NOT EXISTS (SELECT 1 FROM hidden_history h WHERE h.document_id=d.id)')
+        owned={d['run_id'] for d in docs if repo and repo.tts_owner(d['run_id'])}
+        with self.transaction():
+            eligible=[d for d in docs if self.doc(d['id']) and self.can_delete_history(d['run_id'])]
+            if docs and not eligible:raise ValueError('Hoàn tất/hủy lượt trước khi xóa lịch sử để giữ checkpoint')
+            # delete_history_document uses the same lock but must not nest BEGIN.
+            for doc in eligible:
+                if doc['run_id'] in owned:self.db.execute('INSERT OR IGNORE INTO hidden_history VALUES (?)',(doc['id'],))
+                else:
+                    self.db.execute('DELETE FROM documents WHERE id=?',(doc['id'],))
+                    self.db.execute('DELETE FROM runs WHERE id=? AND NOT EXISTS (SELECT 1 FROM documents WHERE run_id=?)',(doc['run_id'],doc['run_id']))
 
     def close(self):
         with self.lock:self.db.close()

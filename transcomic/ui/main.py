@@ -1421,6 +1421,8 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             event.ignore();return
         update_exit=bool(getattr(self,'_update_exit_requested',False) and panel and panel.handoff_session)
         update_close_started=time.monotonic() if update_exit else None
+        if update_exit and not getattr(self,'_update_close_traced',False):
+            panel.trace.event('safe_exit_requested');self._update_close_traced=True
         if update_exit:
             from .update_panel import native_install_idle
             if not native_install_idle(self):
@@ -1432,6 +1434,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             return
         tts=getattr(self,'tts_page',None)
         running = bool(self.scheduler and self.scheduler._thread and self.scheduler._thread.is_alive()) or any(t.is_alive() for t in getattr(self, 'background_threads', [])) or bool(tts and tts.is_busy()) or bool(getattr(self,'automation_controller',None) and self.automation_controller.busy)
+        draft=getattr(self,'automation_page',None)
         if self._exit_pending and not self._exit_authorized:
             event.ignore()
             return
@@ -1448,6 +1451,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
                 return
             if running and choice in ("safe", "exit"):
                 self._exit_pending = True
+                if draft:draft.request_draft_stop()
                 self.statusBar().showMessage('Đang thoát an toàn · ngừng cấp request mới, chờ lưu kết quả…')
                 for timer_name in ('local_timer','queue_timer','refresh_timer','layout_save_timer'):
                     timer = getattr(self,timer_name,None)
@@ -1465,6 +1469,14 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
                 event.ignore()
                 return
             self._exit_authorized = True
+        if draft:
+            draft.request_draft_stop()
+            # Also cover an idle window closed while a queued import completes.
+            # Do not close a database still owned by a draft input worker.
+            if any(t.is_alive() for t in draft.tasks):
+                self._exit_pending=True
+                if not hasattr(self,'_exit_deadline'):self._exit_deadline=time.monotonic()+self.shutdown_grace_seconds
+                self.exit_timer.start();event.ignore();return
         if not getattr(self, "_reset_window_state", False):
             save_window_state(self)
         if hasattr(self, 'layout_save_timer'):
@@ -1490,6 +1502,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         self.store.close()
         self._closed = True
         if update_exit:
+            panel.trace.event('window_database_closed')
             from ..update.install import SafetySnapshot
             logger=self.store.log
             try:

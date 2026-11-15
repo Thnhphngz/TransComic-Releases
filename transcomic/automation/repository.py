@@ -150,12 +150,14 @@ class Repository:
             if old['started'] and any(config.get(k)!=old['config'].get(k) for k in ('source_lang','target_lang','provider','model')):
                 raise ValueError('Ngôn ngữ và provider/model của bộ đã chạy được giữ nguyên; hãy tạo bộ mới.')
             self.execute('UPDATE automation_worksets SET name=?,config=? WHERE id=?',(name or old['name'],json.dumps(config),id))
-    def add(self,id,paths):
+    def add(self,id,paths,*,cancelled=None):
         from ..bulk import natural_key
         from ..documents import import_txt,ImportedText,TextLine
         from ..docx_document import import_docx
         self.editable(id);cfg=self.workset(id)['config'];added=[]
         for path in sorted((Path(p).resolve() for p in paths),key=lambda p:natural_key(p.name)):
+            from .validation import check_current
+            check_current(cancelled)
             if not path.is_file() or path.suffix.lower() not in ('.docx','.txt'):raise ValueError('Chỉ nhận file DOCX/TXT; không quét thư mục tài liệu.')
             key=source_key(path)
             if self.rows('SELECT id FROM automation_groups WHERE workset_id=? AND source_key=?',(id,key)):continue
@@ -163,6 +165,7 @@ class Repository:
             data=ImportedText(tuple(TextLine(u.text,'') for u in obj.units),'docx',obj.raw) if obj else import_txt(path)
             group=str(uuid.uuid4())
             with self.store.transaction():
+                check_current(cancelled)
                 self.editable(id)
                 doc,_=self.store.import_document(path,data,cfg['source_lang'],cfg['target_lang'],'docx' if obj else 'txt',[u.locator for u in obj.units] if obj else None)
                 meta={'source_sha256':hashlib.sha256(data.raw).hexdigest(),'image_folder':'','image_sort':'name','images':[], 'state':'draft','error':'','batch_jobs':{},'tts_run':None,'slots':[]}

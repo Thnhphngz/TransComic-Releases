@@ -202,8 +202,8 @@ class TtsPage(QWidget):
     def save_history_width(self,*args):
         if not self.history_panel.isHidden():self.store.execute("INSERT OR REPLACE INTO preferences VALUES ('history_width',?)",(str(self.splitter.sizes()[1]),))
     def load_history(self):
-        if not self.history_document or not self.store.doc(self.history_document):
-            row=self.store.one('SELECT d.id FROM documents d JOIN runs r ON r.id=d.run_id WHERE r.history_accepted=1 ORDER BY r.created DESC,d.position LIMIT 1');self.history_document=row['id'] if row else None
+        if not self.history_document or not self.store.doc(self.history_document) or self.store.one('SELECT 1 FROM hidden_history WHERE document_id=?',(self.history_document,)):
+            row=self.store.one('SELECT d.id FROM documents d JOIN runs r ON r.id=d.run_id WHERE r.history_accepted=1 AND NOT EXISTS (SELECT 1 FROM hidden_history h WHERE h.document_id=d.id) ORDER BY r.created DESC,d.position LIMIT 1');self.history_document=row['id'] if row else None
         self.refresh_history()
     def refresh_history(self,changed=None):
         doc=self.store.doc(self.history_document) if self.history_document else None
@@ -241,33 +241,34 @@ class TtsPage(QWidget):
         if not document:return
         folder=QFileDialog.getExistingDirectory(self,'Chọn thư mục audio đã di chuyển')
         if folder:self.background(lambda:Outputs(self.store).relink(document,folder),lambda _:self.refresh_history())
-    def delete_history(self):
-        if self.is_busy():raise ValueError('Dừng tác vụ trước khi xóa bản ghi')
-        doc=self.store.doc(self.history_document) if self.history_document else None
+    def delete_history(self,document=None):
+        document=document or self.history_document
+        doc=self.store.doc(document) if document else None
         if not doc:return
         from ..tts.storage import TERMINAL
         if self.store.run(doc['run_id'])['state'] not in TERMINAL:raise ValueError('Hủy hoặc hoàn tất lượt trước khi xóa lịch sử để giữ checkpoint')
         if QMessageBox.question(self,'Xóa lịch sử','Xóa bản ghi tài liệu này? Giữ nguyên mọi audio trên ổ đĩa.')!=QMessageBox.Yes:return
-        self.player.stop();self.store.execute('DELETE FROM documents WHERE id=?',(doc['id'],))
-        if not self.store.docs(doc['run_id']):self.store.delete_history([doc['run_id']])
+        self.store.delete_history_document(doc['id']);self.stop_playback()
+        if self.audio_dialog and self.audio_dialog.document==doc['id']:self.audio_dialog.reject()
+        self.history_document=None
         if not self.store.run(self.run_id):self.run_id=self.store.draft()
         self.detail_document=None;self.tabs.setTabEnabled(2,False);self.refresh_files();self.load_history()
 
     def clear_history(self):
-        if self.is_busy():raise ValueError('Không thể xóa lịch sử khi còn tác vụ đang chạy')
         from ..tts.storage import TERMINAL
         runs=self.store.history_runs()
-        if any(r['state'] not in TERMINAL for r in runs):raise ValueError('Còn lượt tạm dừng hoặc cần khôi phục. Hoàn tất/hủy các lượt đó trước khi xóa toàn bộ lịch sử.')
+        if runs and not any(r['state'] in TERMINAL for r in runs):raise ValueError('Còn lượt tạm dừng hoặc cần khôi phục. Hoàn tất/hủy các lượt đó trước khi xóa toàn bộ lịch sử.')
         if not runs:return
         if not self.confirm_clear_history():return
-        self.stop_playback();self.store.delete_history([r['id'] for r in runs])
+        self.store.clear_completed_history();self.stop_playback();self.history_document=None
+        if self.audio_dialog:self.audio_dialog.reject()
         if not self.store.run(self.run_id):self.run_id=self.store.draft()
         self.detail_document=None;self.tabs.setTabEnabled(2,False);self.tab_bar.setTabEnabled(2,False);self.refresh_files();self.load_history()
 
     def confirm_clear_history(self):
         dialog=QMessageBox(self);dialog.setWindowTitle('Xóa toàn bộ lịch sử TTS?')
         dialog.setText('Các bản ghi lịch sử TTS sẽ bị xóa. File audio đã xuất và tài liệu gốc sẽ được giữ nguyên. Thao tác này không thể hoàn tác.')
-        dialog.setInformativeText('Áp dụng toàn bộ lịch sử, kể cả ngoài kết quả tìm kiếm.')
+        dialog.setInformativeText('Xóa các lượt đã kết thúc, kể cả ngoài kết quả tìm kiếm. Giữ lượt đang chạy hoặc cần khôi phục và checkpoint Automation.')
         cancel=dialog.addButton('Hủy',QMessageBox.RejectRole);delete=dialog.addButton('Xóa lịch sử',QMessageBox.DestructiveRole)
         delete.setObjectName('danger');delete.setStyleSheet('QPushButton { color: #e45151; }');dialog.setDefaultButton(cancel);dialog.setEscapeButton(cancel)
         dialog.exec();return dialog.clickedButton()==delete
@@ -562,7 +563,8 @@ class TtsPage(QWidget):
         self.automation_context.setVisible(contextual)
         for widget in (self.controls,self.tab_strip,self.tabs,self.action_strip):widget.setVisible(not contextual)
         self.settings_button.setEnabled(not contextual)
-        self.history_panel.clear_button.setEnabled(not contextual and not self.is_busy())
+        eligible=self.store.one("SELECT 1 FROM documents d JOIN runs r ON r.id=d.run_id WHERE r.history_accepted=1 AND r.state IN ('completed','cancelled','failed') AND NOT EXISTS (SELECT 1 FROM hidden_history h WHERE h.document_id=d.id) LIMIT 1")
+        self.history_panel.clear_button.setEnabled(bool(eligible))
         if contextual:
             work=repo.workset(active);self.automation_context_text.setText(f'Bộ công việc: {work["name"]}\nKokoro: 1 luồng · 1 nhóm mỗi lượt\n\nCác job Automation hiển thị trong Lịch sử bên phải, có nhãn Automation. Xem câu và nghe audio tại đó.\n\nBản nháp thủ công được giữ riêng và sẽ hiển thị lại sau khi Automation dừng an toàn hoặc kết thúc. Điều khiển tác vụ tại tab Tự động hóa.')
             self.runtime_label.setText('Kokoro · Automation · 1 luồng')
