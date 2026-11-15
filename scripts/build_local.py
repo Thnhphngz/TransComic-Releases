@@ -18,7 +18,7 @@ from transcomic.version import VERSION
 
 
 def input_files(root):
-    files=[root/name for name in ('run_transcomic.py','pyproject.toml','requirements-release.lock','TransComic.spec','installer/TransComic.iss','installer/TransComic.ico','scripts/release_config.py','scripts/update_helper.py')]
+    files=[root/name for name in ('run_transcomic.py','pyproject.toml','requirements-release.lock','TransComic.spec','TransComic-UpdateHelper.spec','installer/TransComic.iss','installer/TransComic.ico','scripts/release_config.py','scripts/update_helper.py')]
     # Exact public inputs required by the TTS hook; do not glob runtime caches,
     # imported documents, keys, fixtures or arbitrary JSON into the build.
     files += [root/name for name in ('scripts/tts_packaging.py','transcomic/tts/setup-catalog.json',
@@ -99,6 +99,7 @@ def main(argv=None):
             report.update(status='OFFICIAL LOCAL BUILD — NOT PUBLISHED',source_tree_state='clean_local_commit',official_version=version)
             (output/'build-inputs.json').write_text(json.dumps(report,indent=2),encoding='utf8')
         run_tool([sys.executable,'-m','PyInstaller','--noconfirm','--clean','--distpath',str(stage/'dist'),'--workpath',str(output/'work'),str(stage/'TransComic.spec')],stage,output/'pyinstaller.log',1800)
+        run_tool([sys.executable,'-m','PyInstaller','--noconfirm','--clean','--distpath',str(stage/'dist'),'--workpath',str(output/'helper-work'),str(stage/'TransComic-UpdateHelper.spec')],stage,output/'helper-pyinstaller.log',900)
         from scripts.tts_packaging import audit_payload
         report['native_payload']=audit_payload(stage/'dist/TransComic')
         shutil.copytree(args.distribution_kit,stage/'dist/TransComic/ThirdParty')

@@ -57,3 +57,14 @@ def test_failed_ack_never_records_success(tmp_path,monkeypatch):
     assert 'startup_ack_failed' in [r['stage'] for r in rows(trace)]
     assert 'startup_ack_finished' not in [r['stage'] for r in rows(trace)]
     w.close()
+
+
+def test_staged_build_includes_guarded_separate_helper(tmp_path,monkeypatch):
+    from scripts import build_local as build
+    from uuid import uuid4
+    monkeypatch.setattr(build,'static_configuration',lambda root:dict(missing=[],qt_windows_plugin=True))
+    stage,report=build.prepare(build.ROOT,build.ROOT/'artifacts/release-2.0.4'/('stage-test-'+uuid4().hex))
+    helper=stage/'TransComic-UpdateHelper.spec'
+    assert helper.is_file() and 'STAGE_A_LOCKED' in helper.read_text(encoding='utf8')
+    assert 'TransComic-UpdateHelper.spec' in report['hashes']
+    assert not report['install_allowed'] and not report['remote_release_allowed']

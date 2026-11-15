@@ -13,3 +13,5 @@ EXE mới xác nhận startup sau paint và lượt xử lý GUI tiếp theo, kh
 **Gate phát hành:** chưa có môi trường Windows riêng truy cập được để cài sạch và nâng cấp thật v2.0.3 → v2.0.4; người dùng đã xác nhận phải ghi rõ bước bị chặn. Không cài đè production, không dùng Sandbox và không lấy mock/download/hash thay native upgrade. Giữ candidate chưa public cho đến khi gate đạt; không kế thừa waiver native update của đợt v2.0.3.
 
 Thành phần, Mutagen, tài nguyên/animation CapCut MAU và hồ sơ quyền phân phối giữ nguyên.
+
+Pipeline build tách phân tích GUI và helper thành hai tiến trình PyInstaller tuần tự để giảm đỉnh RAM; giữ nguyên định dạng onedir GUI, onefile helper và các kiểm tra nguồn/PE/checksum trước đóng gói.

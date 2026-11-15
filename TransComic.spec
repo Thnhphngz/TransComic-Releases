@@ -59,16 +59,5 @@ exe = EXE(
 )
 app_distribution = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='TransComic')
 
-# External helper ships beside the app; native execution requires installed identity and Safe Exit.
-helper_analysis = Analysis(
-    [str(root/'scripts/update_helper.py')],
-    pathex=[str(root)], binaries=[], hiddenimports=[], hookspath=[],
-    hooksconfig={}, runtime_hooks=[], excludes=['pytest','tests','PySide6','tkinter'],
-    noarchive=False, optimize=0,
-)
-helper_pyz = PYZ(helper_analysis.pure)
-helper_exe = EXE(
-    helper_pyz, helper_analysis.scripts, helper_analysis.binaries, helper_analysis.datas, [],
-    name='TransComic-UpdateHelper', console=False, debug=False, upx=False,
-    icon=str(root/'installer/TransComic.ico'), version=eval(exe_version_resource(VERSION,'TransComic-UpdateHelper.exe')),
-)
+# The helper is analyzed in a separate PyInstaller process by build_local.py.
+# Keeping two module graphs in this process creates a large deepcopy RAM peak.
