@@ -51,7 +51,7 @@ def test_close_while_check_completes_suppresses_late_dialog(tmp_path):
         assert entered.wait(1)
         w._exit_authorized = True
         w.close()
-        assert w._closed and panel.shutdown_event.is_set()
+        assert wait_until(lambda: w._closed and panel.shutdown_event.is_set(), 2500)
     finally:
         gate.set()
         worker.join(3)

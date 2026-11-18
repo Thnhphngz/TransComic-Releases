@@ -13,6 +13,16 @@ from .providers import BatchResult, KiraProvider
 from .storage import Store
 
 
+def _discarded_automation_job(store,job):
+    import json
+    config=json.loads(job['config'])
+    if config.get('automation_discarded'):return True
+    owner=config.get('automation_owner');repo=getattr(store,'automation',None)
+    if owner and repo:
+        return repo.session_closing.is_set() or not repo.owns(owner)
+    return False
+
+
 class Scheduler:
     def __init__(self, store: Store, provider: KiraProvider, on_change: Callable[[list[str]], None] | None = None):
         self.store = store
@@ -151,6 +161,8 @@ class Scheduler:
         if self._abandoned.is_set():raise RuntimeError('Retired scheduler requires a new confirmed recovery session')
         jobs = [self.store.job(j) for j in job_ids]
         if not jobs or any(not j for j in jobs): raise ValueError('Missing jobs')
+        if any(_discarded_automation_job(self.store,j) for j in jobs):
+            raise ValueError('Phiên Tự động hóa đã xóa; không thể tiếp tục job cũ.')
         if len({(j['provider'], j['model'], j['concurrency'], j['prompt_version']) for j in jobs}) != 1:
             raise ValueError('A run must use one frozen provider/model/concurrency/prompt')
         self.job_ids, self.job_id, self.run_id = list(job_ids), job_ids[0], run_id
@@ -210,6 +222,7 @@ class Scheduler:
     def has_work(store, job_id):
         from .retry import allowed_retry
         job = store.job(job_id)
+        if job and _discarded_automation_job(store,job):return False
         for batch in store.batches(job_id):
             prior = store.attempts(batch['id'])
             if batch['state'] == 'pending' and not prior: return True

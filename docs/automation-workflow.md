@@ -2,14 +2,16 @@
 
 ## Sử dụng
 
-1. Mở **Tự động hóa**, tạo bộ công việc và thêm từng file DOCX/TXT hoặc kéo thả nhiều file từ Explorer. Thư mục tài liệu không được quét tự động.
+1. Mở **Tự động hóa**. Có thể kéo một hoặc nhiều thư mục để nhập danh sách ảnh theo từng thư mục. Chỉ quét file ở cấp trực tiếp như luồng ghép ảnh cũ. DOCX trong thư mục chỉ được đếm. Chọn DOCX từ Explorer rồi thả vào mục ảnh tương ứng, hoặc chọn một dòng tài liệu và một thư mục rồi bấm **Ghép với dòng đã chọn**. Mỗi thư mục có từ hai DOCX trở lên vẫn hiện cảnh báo trong phiên sau khi ghép. Có thể nhập DOCX/TXT trước như trước đây.
 2. Chọn thư mục ảnh cho từng hàng bằng nút **Ảnh**; có thể kéo thư mục ảnh trực tiếp vào bất kỳ ô nào của hàng đó. Drop giữ chính sách sort đang chọn; không đoán hàng qua tên folder. Folder được kiểm tra ngoài GUI trước khi ghi mapping; folder rỗng/lỗi giữ nguyên mapping cũ. Số lượng và badge tự kiểm tra sau khi nhận, không tự chạy dịch.
 3. Kiểm tra cấu hình chung, provider/model dịch, ngôn ngữ, voice Kokoro, tốc độ và thư mục project. Model/runtime Kokoro giữ cấu hình nội bộ hiện có; UI ghi rõ **Kokoro: 1 luồng · 1 nhóm mỗi lượt**. Chọn xuất riêng nhóm, gộp hoặc chia đều; bảng Project / sửa tên luôn hiện cho cả ba chế độ. Số part giữ nguyên vị trí, chỉ được chỉnh trong chế độ chia.
 4. Bấm **Kiểm tra lại**. Lần đầu chỉ được bắt đầu khi tất cả nhóm hợp lệ, số dòng cần voice khớp ảnh và tài nguyên sẵn sàng. Xem xác nhận trước khi chạy.
 5. Bấm **Bắt đầu**. Dịch dùng tối đa số worker tổng đã chọn; Kokoro xử lý một nhóm, CapCut xuất một project tại một thời điểm. Các stage chạy chồng nhau khi có nhóm sẵn sàng.
 6. **Dừng an toàn** ngăn cấp việc mới, chờ request/WAV/project đang xử lý đạt điểm lưu an toàn. Chỉ chỉnh sửa sau khi dừng xong. Voice/model/tốc độ/runtime của bộ đã chạy vẫn cố định.
 7. Muốn sửa bản dịch, mở nhóm trong tab **Dịch**. Automation cập nhật checkpoint và đánh dấu voice/project phụ thuộc cần kiểm tra. Không chỉnh sửa voice của bộ này qua tab TTS.
-8. Sau khi dừng hoặc mở lại ứng dụng, bấm **Kiểm tra lại**, rồi **Tiếp tục** để xử lý phần còn thiếu theo checkpoint. Không tự gọi API khi mở ứng dụng và không tự chạy bộ tiếp theo.
+8. Sau khi dừng, có thể bấm **Kiểm tra lại**, rồi **Tiếp tục** trong cùng phiên đang mở. **Đóng app sẽ dừng và xóa phiên Automation; mở lại luôn là phiên mới trống**, kể cả sau crash hoặc buộc kết thúc tiến trình. Không có khôi phục thủ công cho việc còn dở.
+
+Khi còn bộ chưa hoàn tất, hộp thoại **Xóa phiên Tự động hóa?** cho chọn **Dừng, xóa phiên và thoát** hoặc **Ở lại ứng dụng**. Ở lại/Esc không hủy worker hay thay đổi dữ liệu. Khi thoát thật, app ngăn việc mới, hủy worker, chờ giải phóng tài nguyên rồi dọn metadata và staging có đăng ký. File nguồn, bản dịch và QA đã lưu, WAV/MP3 đã tạo, project đã xuất, lịch sử hoàn tất, key và thiết lập dùng chung được giữ nguyên.
 
 **Tab TTS khi Automation chạy:** chỉ hiển thị ngữ cảnh Automation và lịch sử chỉ đọc, không đưa bản nháp thủ công cũ vào batch đang hiển thị. Sau khi dừng/kết thúc, bản nháp còn nguyên được hiển thị lại với chú thích rõ. Các job Automation trong lịch sử có nhãn **Automation · Chỉ đọc**, cho phép xem câu/nghe audio; điều khiển tác vụ từ tab Tự động hóa.
 
@@ -31,9 +33,9 @@ Sau lần xác minh đầu vào, thay đổi cấu hình được tự kiểm tr
 - WAV dùng `TtsStore` và manifest hiện có, giữ số thứ tự slot gốc dù một câu lỗi. Bản sửa tạo thư mục voice phiên bản mới, giữ media cũ của project đã xuất.
 - CapCut dùng exporter MAU hiện có, hai video track, keyframe/animation, audio gap 0 và đường dẫn media trực tiếp. Mỗi part bắt đầu timeline từ 0; không gộp MP3, không sao chép media vào project.
 - File/project đã có không bị ghi đè. Output bị chỉnh sửa bên ngoài được giữ lại; output mới dùng hậu tố phiên bản.
-- Checkpoint nằm trong SQLite, manifest và hash xác định quyền sở hữu. Mở lại chỉ nạp trạng thái; Resume kiểm tra lại source, ảnh, bản dịch, WAV và project trước khi cấp việc.
+- Trạng thái tạm nằm trong SQLite và được phân vùng bằng ID phiên. UI không đọc/khôi phục workset cũ. Worker nền dọn các phiên không còn tiến trình sở hữu, theo transaction từng workset và có thể chạy lại sau gián đoạn. Lịch sử hoàn tất được lưu riêng, không chứa checkpoint phục hồi.
 - Source thay đổi cấu trúc hoặc xung đột bản dịch sửa tay sẽ chặn riêng nhóm. Không dịch chuyển mapping để cố xuất. Khi thứ tự ảnh mới không xác định được, cần ghép lại rõ ràng.
-- Báo cáo HTML/JSON ở `TransComic_Automation_Reports` cạnh file nguồn đầu tiên; lỗi ghi báo cáo không xóa checkpoint nội bộ.
+- Báo cáo HTML/JSON đã xuất ở `TransComic_Automation_Reports` được giữ. Các bản ghi lịch sử hoàn tất, bản dịch, lịch sử request và TTS tồn tại độc lập với phiên; đóng app chỉ xóa metadata điều phối và quyền tiếp tục công việc cũ.
 
 ## Retry và giới hạn
 

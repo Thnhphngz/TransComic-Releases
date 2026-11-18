@@ -56,3 +56,16 @@ class ExitDialog(QDialog):
     def choose(self, choice):
         self.choice = choice
         self.accept()
+
+
+class AutomationExitDialog(ExitDialog):
+    def __init__(self,parent):
+        QDialog.__init__(self,parent)
+        self.choice='cancel';self.buttons={};self.setModal(True)
+        self.setWindowTitle('Xóa phiên Tự động hóa?')
+        layout=QVBoxLayout(self);layout.setContentsMargins(24,22,24,20)
+        text=QLabel('Các công việc Tự động hóa chưa hoàn thành sẽ bị dừng và xóa toàn bộ tiến độ. Bạn sẽ không thể tiếp tục các công việc này khi mở lại ứng dụng.')
+        text.setWordWrap(True);layout.addWidget(text)
+        row=QHBoxLayout();self.add_choice(row,'safe','Dừng, xóa phiên và thoát')
+        stay=self.add_choice(row,'cancel','Ở lại ứng dụng');stay.setDefault(True)
+        layout.addLayout(row);self.resize(min(620,parent.screen().availableGeometry().width()-40),self.sizeHint().height())

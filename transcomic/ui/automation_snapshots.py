@@ -17,16 +17,19 @@ class AutomationReader:
     def trace(self,_):self.sql+=1
     def close(self):self.db.close();self.tts.close()
     def rows(self,sql,args=()):return [dict(r) for r in self.db.execute(sql,args)]
-    def read(self,id,active_id=None):
+    def read(self,id,active_id=None,session_id=None):
         start=time.perf_counter();initial=self.sql
         self.db.execute('BEGIN')
         try:
-            active=self.rows("SELECT id FROM automation_worksets WHERE state IN ('running','stopping')")
+            if session_id is None:
+                scope=self.rows('SELECT session_id FROM automation_worksets WHERE id=?',(id,))
+                session_id=scope[0]['session_id'] if scope else None
+            active=self.rows("SELECT id FROM automation_worksets WHERE session_id=? AND state IN ('running','stopping')",(session_id,))
             active=active[0]['id'] if active else None
             scope_id=active_id or active or id
-            works=self.rows('SELECT * FROM automation_worksets WHERE id IN (?,?)',(id,scope_id))
+            works=self.rows('SELECT * FROM automation_worksets WHERE id IN (?,?) AND session_id=?',(id,scope_id,session_id))
             works={r['id']:{**r,'config':json.loads(r['config']),'checkpoint':json.loads(r['checkpoint'])} for r in works}
-            groups=self.rows('SELECT g.id,g.workset_id,g.document_id,g.position,d.path,g.data FROM automation_groups g JOIN documents d ON d.id=g.document_id WHERE g.workset_id IN (?,?) ORDER BY g.position,g.id',(id,scope_id))
+            groups=self.rows('SELECT g.id,g.workset_id,g.document_id,g.position,d.path,g.data FROM automation_groups g JOIN documents d ON d.id=g.document_id JOIN automation_worksets w ON w.id=g.workset_id WHERE g.workset_id IN (?,?) AND w.session_id=? ORDER BY g.position,g.id',(id,scope_id,session_id))
             docs=[g['document_id'] for g in groups];stats={}
             for offset in range(0,len(docs),400):
                 chunk=docs[offset:offset+400]
@@ -63,7 +66,7 @@ class AutomationSnapshots(QObject):
         # filesystem, DOCX, validation, media inspection or shared Store lock.
         reader=AutomationReader(self.path,self.tts_path)
         try:
-            payload=reader.read(self.page.current,self.page.controller.current);self.serial+=1;payload['serial']=self.serial;self.apply(payload)
+            payload=reader.read(self.page.current,self.page.controller.current,self.page.repo.session_id);self.serial+=1;payload['serial']=self.serial;self.apply(payload)
         finally:reader.close()
     def run(self):
         reader=None
@@ -75,7 +78,7 @@ class AutomationSnapshots(QObject):
                     id,active,serial=self.pending;self.pending=None;self.busy=True
                 try:
                     if reader is None:reader=AutomationReader(self.path,self.tts_path)
-                    payload=reader.read(id,active);payload['serial']=serial
+                    payload=reader.read(id,active,self.page.repo.session_id);payload['serial']=serial
                 except (sqlite3.Error,OSError,ValueError):payload={'error':True,'serial':serial,'id':id}
                 self.busy=False
                 if self.closed:return

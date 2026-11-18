@@ -1,4 +1,4 @@
-"""Durable input intentions, separate from execution/checkpoint authorization."""
+"""Input intents for the current session only; never replayed after app restart."""
 import json
 from uuid import uuid4
 

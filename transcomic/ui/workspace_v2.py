@@ -458,7 +458,14 @@ class WorkspaceV2Mixin:
             else:updates.request(full=True)
             return
         from .translation_updates import document_status
-        documents = {d['id']: d for d in self.store.documents()}
+        # Historical Automation manuscripts remain in Store for history/QA.
+        # A fresh empty workspace must not enumerate their metadata on startup.
+        documents = {}
+        with self.store.lock:
+            for start in range(0,len(self.workspace_ids),400):
+                ids=self.workspace_ids[start:start+400]
+                for row in self.store.db.execute('SELECT id,path,format,source_lang,target_lang,created_at,source_instance FROM documents WHERE id IN ('+','.join('?'*len(ids))+')',ids):
+                    documents[row['id']]=dict(row)
         self.workspace_ids = [d for d in self.workspace_ids if d in documents]
         if hasattr(self, 'period_warning'): self.period_warning.schedule()
         if hasattr(self, 'line_check'): self.line_check.schedule()

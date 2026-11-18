@@ -97,6 +97,7 @@ def test_exit_dialog_idle_cancel_default_and_exit(tmp_path, monkeypatch):
     monkeypatch.setattr(window, "confirm_exit", lambda running: "exit")
     window.resize(1000, 650)
     window.close()
+    wait_until(lambda:window._closed,900,30)
     reopened = Store(tmp_path / "lifecycle.db")
     state = json.loads(reopened.setting("window_state"))
     assert state["rect"][2:] == [1000, 650]

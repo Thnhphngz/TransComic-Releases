@@ -12,6 +12,8 @@ from .controls import QComboBox,QSpinBox,QDoubleSpinBox
 from .glass import GlassButton
 from ..automation.validation import defaults,plan_parts,config_identity
 from ..automation.repository import fingerprint
+from ..automation.folder_inputs import DOCUMENTS, word_names, word_notice
+from .automation_folders import FolderInputs, local_paths
 from .automation_widgets import AutomationCard,RoundedTableFrame,CompletionRing,ElidingPathEdit,STAGE_COLORS,status_color
 
 STATES={'draft':'Chưa chạy','waiting':'Đợi dịch','translating':'Đang dịch','waiting_tts':'Đợi Kokoro','waiting_tts_rescue':'Đợi cứu lỗi voice','speaking':'Đang tạo voice',
@@ -62,6 +64,8 @@ class GroupModel(QAbstractTableModel):
         if not index.isValid():return None
         row=self.rows[index.row()];column=index.column();meta=row['data']
         if role==Qt.UserRole:return row['id']
+        if role==Qt.ToolTipRole and column==2 and (warning:=word_notice(meta.get('image_word_count',0))):
+            return f"{meta['image_folder']}\n{warning}. Chỉ DOCX bạn chọn mới được nhập."
         if role==Qt.AccessibleTextRole and column==6:return 'Chọn thư mục ảnh; Mở bản dịch; Bỏ nhóm'
         if role==Qt.ToolTipRole:
             from ..kira_recovery import reason_label
@@ -144,6 +148,13 @@ class GroupActions(QuietItemDelegate):
         elif column==5:
             color=QColor(status_color(meta.get('display_state',meta['state']),dark));badge=QRectF(content);badge.setHeight(29);badge.moveCenter(QPointF(content.center()));shade=QColor(color);shade.setAlpha(23 if dark else 15)
             painter.setPen(Qt.NoPen);painter.setBrush(shade);painter.drawRoundedRect(badge,10,10);painter.setPen(color);painter.drawText(badge.adjusted(5,0,-5,0),Qt.AlignCenter,painter.fontMetrics().elidedText(str(index.data() or ''),Qt.ElideRight,int(badge.width()-10)))
+        elif column==2 and (warning:=word_notice(meta.get('image_word_count',0))):
+            painter.setPen(QColor(c['ink']))
+            fm=painter.fontMetrics()
+            line=QRect(content);line.setHeight(fm.height());line.moveTop(rect.center().y()-fm.height())
+            painter.drawText(line,Qt.AlignVCenter,fm.elidedText(str(index.data()),Qt.ElideMiddle,line.width()))
+            line.translate(0,fm.height()+2);painter.setPen(QColor('#f5bb69' if dark else '#81450c'))
+            painter.drawText(line,Qt.AlignVCenter,fm.elidedText(warning,Qt.ElideRight,line.width()))
         elif column!=6:
             paired_ink=index.data(Qt.ForegroundRole) if column==1 else None
             painter.setPen(paired_ink if paired_ink is not None else QColor(status_color('needs_attention' if meta.get('error') else 'completed',dark) if column==3 and meta.get('slot_count') else c['muted'] if column==3 else c['ink']))
@@ -216,9 +227,7 @@ class GroupTable(QTableView):
     def dragEnterEvent(self,event):
         self.update_drop(event)
     def valid_drop(self,event):
-        paths=[Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
-        if len(paths)==1 and paths[0].is_dir():return self.model().can_mutate and self.indexAt(event.position().toPoint()).isValid()
-        return self.model().can_mutate and bool(paths) and all(p.is_file() and p.suffix.lower() in ('.txt','.docx') for p in paths)
+        return self.model().can_mutate and bool(local_paths(event))
     def dragMoveEvent(self,event):
         self.update_drop(event)
     def update_drop(self,event):
@@ -282,7 +291,7 @@ class AutomationPage(QWidget):
         self.validate_button=self.add_button(actions,'Kiểm tra lại',self.validate_clicked);self.validate_button.setIcon(QIcon(str(Path(__file__).parent/'assets/automation-check.svg')));self.validate_button.setIconSize(QSize(16,16))
         self.add=self.add_button(actions,'+ Thêm tài liệu',self.choose_files,True)
         self.start=self.add_button(actions,'Bắt đầu',self.start_clicked)
-        self.stop=self.add_button(actions,'Dừng an toàn',self.controller.stop)
+        self.stop=self.add_button(actions,'Dừng an toàn',self.controller.stop);self.stop.setEnabled(False)
         self.start.setProperty('glassRole','primary');self.stop.setProperty('glassRole','danger')
         self.toolbar_buttons=(self.add,self.validate_button,self.start,self.stop)
         for i,button in enumerate(self.toolbar_buttons):actions.removeWidget(button);self.toolbar_grid.addWidget(button,0,i)
@@ -292,8 +301,10 @@ class AutomationPage(QWidget):
         for label,value in (('Tất cả','all'),('Đang xử lý','active'),('Cần xử lý','needs_attention'),('Hoàn thành','completed')):self.filter.addItem(label,value)
         filters.addWidget(self.filter);self.up=self.add_button(filters,'↑',lambda:self.move(-1));self.down=self.add_button(filters,'↓',lambda:self.move(1))
         self.search.textChanged.connect(self.mark_dirty);self.filter.currentIndexChanged.connect(self.mark_dirty)
+        self.folder_inputs=FolderInputs(self);body.addWidget(self.folder_inputs)
         # Adjacent number/content/action views share selection and pixel offsets.
         self.table=GroupTable();self.model=GroupModel(self.table);self.table.setModel(self.model)
+        self.table.selectionModel().currentChanged.connect(lambda *_:self.folder_inputs.update_controls())
         self.number_table=GroupTable();self.action_table=GroupTable();self.table_shell=RoundedTableFrame();table_row=QHBoxLayout(self.table_shell.content);table_row.setContentsMargins(0,0,0,0);table_row.setSpacing(0)
         self.table_panes=(self.number_table,self.table,self.action_table)
         for pane,columns in zip(self.table_panes,((0,),(1,2,3,4,5),(6,))):
@@ -318,7 +329,7 @@ class AutomationPage(QWidget):
         self.table.viewport().installEventFilter(self)
         self.table.horizontalScrollBar().rangeChanged.connect(self.horizontal_range_changed)
         self.table_shell.setMinimumHeight(110);body.addWidget(self.table_shell,1)
-        self.empty_state=QLabel('Thêm hoặc kéo thả file văn bản vào đây',self.table_shell);self.empty_state.setObjectName('muted');self.empty_state.setAlignment(Qt.AlignCenter);self.empty_state.setWordWrap(True)
+        self.empty_state=QLabel('Thêm hoặc kéo thả file văn bản vào đây',self.table_shell);self.empty_state.setToolTip('Có thể kéo thư mục để chỉ nhập ảnh.');self.empty_state.setObjectName('muted');self.empty_state.setAlignment(Qt.AlignCenter);self.empty_state.setWordWrap(True)
         self.empty_state.setAttribute(Qt.WA_TransparentForMouseEvents);self.empty_state.setAcceptDrops(False)
         self.table_shell.installEventFilter(self)
         self.table.horizontalHeader().sectionResized.connect(self.bound_column_width)
@@ -337,7 +348,7 @@ class AutomationPage(QWidget):
             self.progress_labels[stage]=label;self.progress_bars[stage]=bar
         self.completion_ring=CompletionRing();stage_row.addWidget(self.completion_ring,0,3)
         self.config_frame,config_layout=panel('Cấu hình chung');right_layout.addWidget(self.config_frame)
-        self.lock_note=QLabel('');self.lock_note.setWordWrap(True);config_layout.addWidget(self.lock_note)
+        self.lock_note=QLabel('');self.lock_note.setWordWrap(True);self.lock_note.hide();config_layout.addWidget(self.lock_note)
         self.kokoro_lanes=QLabel('Kokoro: 1 luồng · 1 nhóm mỗi lượt');self.kokoro_lanes.setObjectName('muted');config_layout.addWidget(self.kokoro_lanes)
         self.fields={};self.field_titles={};form=None
         from ..languages import LANGUAGES
@@ -387,7 +398,6 @@ class AutomationPage(QWidget):
         self.snapshots=AutomationSnapshots(self)
         self.timer=QTimer(self);self.timer.setInterval(150);self.timer.timeout.connect(self.flush);self.timer.start()
         self.load_worksets()
-        QTimer.singleShot(0,self.restore_draft_inputs)
     def add_button(self,layout,text,callback,primary=False):
         control=AutomationButton(text)
         if primary:control.setProperty('glassRole','primary')
@@ -514,15 +524,17 @@ class AutomationPage(QWidget):
         if self.owner._closed or self.owner._exit_pending:return
         if self.dirty:self.dirty=False;self.snapshots.request()
     def background(self,work,done):
+        session=self.repo.session_id
         def run():
             try:result=(work(),None)
             except Exception as exc:result=(None,str(exc))
+            if self.repo.session_closing.is_set() or session!=self.repo.session_id:return
             try:self.task_done.emit(done,result)
             except RuntimeError:pass
         if self.draft_cancel.is_set():return
         self.tasks=[t for t in self.tasks if t.is_alive()]
         self.owner.background_threads=[t for t in self.owner.background_threads if t.is_alive()]
-        thread=threading.Thread(target=run,daemon=True,name='automation-ui-task');self.tasks.append(thread);self.owner.background_threads.append(thread);thread.start()
+        thread=threading.Thread(target=run,daemon=True,name='automation-ui-task');thread.automation_session_id=session;self.tasks.append(thread);self.owner.background_threads.append(thread);thread.start()
     def on_done(self,callback,value):
         if self.owner._closed or self.owner._exit_pending or self.draft_cancel.is_set():return
         result,error=value
@@ -532,22 +544,8 @@ class AutomationPage(QWidget):
     def request_draft_stop(self):
         """Fence callbacks and cancel checks; never cancel user-started stages here."""
         self.draft_cancel.set();self.validation_generation+=1
+        self.setEnabled(False)
         self.validation_timer.stop();self.timer.stop();self.snapshots.shutdown()
-    def restore_draft_inputs(self):
-        if self.draft_cancel.is_set() or self.owner._exit_pending:return
-        from ..automation.draft_inputs import pending
-        queued={entry['token'] for _,entry in self.import_queue}
-        queued.add(getattr(self,'_import_token',None))
-        for work in self.repo.workset_summaries():
-            if work['state'] in ('running','stopping'):continue
-            for entry in pending(self.repo,work['id'],'draft_imports'):
-                if entry['token'] not in queued:self.import_queue.append((work['id'],entry));queued.add(entry['token'])
-        if self.import_queue and not self.import_busy:self.import_next()
-        if self.current:
-            for entry in pending(self.repo,self.current,'draft_pairings'):
-                if entry['token'] in self._pair_tokens:continue
-                group=self.repo.group(entry['group'])
-                if group and group['workset_id']==self.current:self.safe(lambda e=entry:self.pair_folder(e['group'],e['folder'],e['sort'],intent=e))
     def load_worksets(self,select=None):
         self.loading=True;self.worksets.clear()
         for work in self.repo.workset_summaries():self.worksets.addItem(work['name'],work['id'])
@@ -566,8 +564,8 @@ class AutomationPage(QWidget):
                 if key in self.fields:self.set_field(key,value)
             self.loading=False
         self.refresh()
+        self.folder_inputs.render()
         if self.current and self.repo.workset(self.current)['checkpoint'].get('validation_sections'):self.queue_validation()
-        QTimer.singleShot(0,self.restore_draft_inputs)
     def set_field(self,key,value):
         control=self.fields[key]
         if isinstance(control,QComboBox):
@@ -638,34 +636,51 @@ class AutomationPage(QWidget):
     def new_workset(self):
         name,ok=QInputDialog.getText(self,'Bộ công việc mới','Tên bộ truyện:')
         if ok and name.strip():
-            cfg=defaults(self.repo.store);cfg.update(project_name='',part_names={})
-            self.load_worksets(self.repo.create(name,cfg))
+            self.create_workset(name)
+    def create_workset(self,name):
+        cfg=defaults(self.repo.store);cfg.update(project_name='',part_names={})
+        self.load_worksets(self.repo.create(name,cfg))
     def delete_workset(self):
         if not self.current:return
         self.repo.editable(self.current)
         if QMessageBox.question(self,'Xóa bộ công việc','Chỉ xóa metadata/checkpoint của bộ này; giữ toàn bộ file nguồn và kết quả ngoài ổ đĩa.',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)==QMessageBox.Yes:
-            self.repo.delete(self.current);self.current=None;self.load_worksets()
+            self.repo.delete(self.current);self.folder_inputs.discard_workset(self.current);self.current=None;self.load_worksets()
     def choose_files(self):
         paths,_=QFileDialog.getOpenFileNames(self,'Thêm DOCX/TXT từ nhiều thư mục','','DOCX/TXT (*.docx *.txt)')
         if paths:self.drop_paths(paths,None)
     def drop_paths(self,paths,id=None):
-        if not self.current:self.notice.setText('Tạo/chọn bộ công việc trước.');return
-        if len(paths)==1 and Path(paths[0]).is_dir():
-            if id:self.safe(lambda:self.pair_folder(id,paths[0]))
-            else:self.notice.setText('Thả thư mục ảnh vào đúng hàng; không nhận thư mục tài liệu để quét.')
+        if self.draft_cancel.is_set() or self.repo.session_closing.is_set():return
+        if self.controller.busy:
+            self.notice.setText('Dừng an toàn trước khi thêm tài liệu hoặc thư mục ảnh.')
             return
+        folders,documents=[],[]
+        for path in map(Path,paths):
+            if path.is_dir():folders.append(path)
+            elif path.suffix.lower() in DOCUMENTS and path.is_file():documents.append(path)
+        if len(folders)==1 and len(paths)==1 and id:
+            self.safe(lambda:self.pair_folder(id,folders[0],preview_if_invalid=True))
+            return
+        if folders:
+            if not self.current:self.create_workset(folders[0].name)
+            self.folder_inputs.add(self.current,folders)
+        if documents:
+            if not self.current:self.notice.setText('Tạo/chọn bộ công việc trước khi nhập tài liệu.');return
+            self.safe(lambda:self.queue_documents(documents))
+        if len(folders)+len(documents)<len(paths):
+            self.notice.setText('Chỉ hỗ trợ tài liệu DOCX/TXT và thư mục ảnh.')
+
+    def queue_documents(self,paths,after_import=None):
         workset=self.current
         from ..automation.draft_inputs import remember
         entry=remember(self.repo,workset,'draft_imports',paths=[str(Path(p).absolute()) for p in paths])
-        self.validation_generation+=1;self.proof=None;self.validation_timer.stop();self.import_queue.append((workset,entry))
+        self.validation_generation+=1;self.proof=None;self.validation_timer.stop();self.import_queue.append((workset,entry,after_import))
         if not self.import_busy:self.import_next()
     def import_next(self):
         if self.draft_cancel.is_set():return
         if not self.import_queue:
             self.import_busy=False;self.queue_validation();self.mark_dirty();return
-        self.import_busy=True;workset,entry=self.import_queue.pop(0);self._import_token=entry['token'];paths=entry['paths']
+        self.import_busy=True;workset,entry,after_import=self.import_queue.pop(0);paths=entry['paths']
         self.set_validation_status('Đang nhập tài liệu','Đọc tài liệu trong nền; giữ thứ tự các đợt thêm.');self.start.setEnabled(False)
-        def done(result):self.import_done(workset);self.import_next()
         def work():
             from ..automation.draft_inputs import forget
             from ..automation.validation import ValidationSuperseded
@@ -673,14 +688,17 @@ class AutomationPage(QWidget):
                 result=self.repo.add(workset,paths,cancelled=self.draft_cancel.is_set)
                 forget(self.repo,workset,'draft_imports',entry['token'])
                 return result,None
-            except ValidationSuperseded:return (),None  # intent remains for next startup
+            except ValidationSuperseded:return (),None
             except Exception as exc:return (),str(exc)
         def finish(value):
             result,error=value
             if error:self.notice.setText(error)
-            done(result)
+            elif after_import:
+                if result:self.safe(lambda:after_import(result))
+                else:self.notice.setText('DOCX đã có trong bộ. Chọn dòng đó rồi bấm Ghép với dòng đã chọn.')
+            self.import_done(workset);self.import_next()
         self.background(work,finish)
-    def pair_folder(self,id,folder,sort=None,*,intent=None):
+    def pair_folder(self,id,folder,sort=None,*,intent=None,preview_if_invalid=False):
         """Validate a proposed mapping off-thread before changing any saved mapping."""
         group=self.repo.group(id);workset=group['workset_id'];self.repo.editable(workset)
         if workset!=self.current:raise ValueError('Nhóm không thuộc bộ công việc đang xem.')
@@ -703,7 +721,8 @@ class AutomationPage(QWidget):
             images=image_manifest(path,sort,cancelled=cancelled)
             if not images:raise ValueError('Thư mục không có ảnh hợp lệ; giữ nguyên mapping trước đó.')
             if input_stamp(proposed,Path(doc['path']),rows)!=stamp:raise ValueError('Đầu vào thay đổi khi kiểm tra; giữ mapping trước đó.')
-            return dict(folder=str(path),images=images,stamp=stamp,slots=[r['id'] for r in rows if speakable(r['source'])])
+            return dict(folder=str(path),images=images,stamp=stamp,slots=[r['id'] for r in rows if speakable(r['source'])],
+                        word_count=len(word_names(path,cancelled)))
         def checked(result):
             self._pair_tokens.discard(intent['token'])
             if self.pair_generation.get(id)!=generation:return
@@ -711,7 +730,9 @@ class AutomationPage(QWidget):
             value,error=result
             if self.current!=workset:self.model.set_image_pairing(id);return
             if error:
-                forget(self.repo,workset,'draft_pairings',intent['token']);self.model.set_image_pairing(id);self.notice.setText(error);return
+                forget(self.repo,workset,'draft_pairings',intent['token']);self.model.set_image_pairing(id);self.notice.setText(error)
+                if preview_if_invalid:self.folder_inputs.add(workset,[folder])
+                return
             current=self.repo.group(id);self.repo.editable(workset)
             if (current['data'].get('image_folder'),current['data'].get('image_sort','name'))!=original:self.model.set_image_pairing(id);return
             with self.repo.store.transaction():
@@ -893,7 +914,8 @@ class AutomationPage(QWidget):
             return
         self.sync_views(snapshot=snapshot)
         if self.owner.pages.currentIndex()!=9:return
-        active=snapshot['active'];work=snapshot['work'];self._render_work=work;locked=bool(active==self.current or self.controller.busy and self.controller.current==self.current)
+        active=snapshot['active'];work=snapshot['work'];self._render_work=work;locked=bool(active and active==self.current or self.controller.busy and self.controller.current==self.current)
+        self.folder_inputs.update_controls()
         self.model.can_mutate=not locked
         self.worksets.setEnabled(True);self.add.setEnabled(bool(work) and not locked);self.delete_button.setEnabled(bool(work) and not locked)
         self.up.setEnabled(bool(work) and not locked);self.down.setEnabled(bool(work) and not locked)
@@ -947,9 +969,9 @@ class AutomationPage(QWidget):
             self.progress_labels[stage].setText(f'{done}/{total}');self.progress_labels[stage].setToolTip(f'{stage}: {done}/{total}');self.progress_bars[stage].setValue(round(done*100/total) if total else 0)
         if not self.preview.state()==QAbstractItemView.EditingState:self.preview_parts(groups)
     def on_finished(self,id,state):
-        if self.owner._closed:return
+        if self.owner._closed or self.repo.session_closing.is_set():return
         self.proof=None;self.sync_views();self.mark_dirty()
-        if state=='stopped':self.notice.setText('Đã dừng an toàn và lưu checkpoint. Kiểm tra lại trước khi Tiếp tục.');return
+        if state=='stopped':self.notice.setText('Đã dừng an toàn. Có thể tiếp tục trong phiên này; đóng app sẽ xóa phiên.');return
         title='Automation hoàn tất' if state=='completed' else 'Automation cần xử lý'
         self.notice.setText(title+' · '+self.repo.workset(id)['name'])
         if QSystemTrayIcon.isSystemTrayAvailable():
@@ -957,7 +979,9 @@ class AutomationPage(QWidget):
             self.owner.tray.show();self.owner.tray.showMessage(title,self.repo.workset(id)['name'],QSystemTrayIcon.Information if state=='completed' else QSystemTrayIcon.Warning,10000)
         if self.repo.store.setting('automation_sound','0')=='1':QApplication.beep()
     def dragEnterEvent(self,event):
-        paths=[Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
-        if not self.repo.active() and paths and all(p.is_file() and p.suffix.lower() in ('.txt','.docx') for p in paths):event.acceptProposedAction()
+        if not self.controller.busy and local_paths(event):event.acceptProposedAction()
         else:event.ignore()
-    def dropEvent(self,event):self.drop_paths([u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]);event.acceptProposedAction()
+    def dropEvent(self,event):
+        paths=local_paths(event)
+        if not paths:event.ignore();return
+        self.drop_paths([str(path) for path in paths]);event.acceptProposedAction()

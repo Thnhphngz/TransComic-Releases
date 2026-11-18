@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import time
 import uuid
+import threading
 
 SCHEMA='''
 CREATE TABLE IF NOT EXISTS automation_worksets(
@@ -25,7 +26,6 @@ CREATE TABLE IF NOT EXISTS automation_artifacts(
  id TEXT PRIMARY KEY,workset_id TEXT NOT NULL REFERENCES automation_worksets(id) ON DELETE CASCADE,
  unit TEXT NOT NULL,kind TEXT NOT NULL,fingerprint TEXT NOT NULL,path TEXT NOT NULL,
  state TEXT NOT NULL,sha256 TEXT,created REAL NOT NULL);
-CREATE UNIQUE INDEX IF NOT EXISTS automation_one_active ON automation_worksets((1)) WHERE state IN ('running','stopping');
 '''
 ACTIVE=('running','stopping')
 IMMUTABLE=('voice','variant','speed','tts_language','device')
@@ -54,16 +54,10 @@ class Repository:
         with store.lock:store.db.executescript(SCHEMA)
         from ..documents import translatable
         store.db.create_function('automation_translatable',1,translatable,deterministic=True)
-        # Separate immutable manifests from frequently changing stage state.
-        # Idempotently preserve worksets saved by an earlier development snapshot.
-        with store.transaction():
-            for row in self.rows('SELECT id,data FROM automation_groups'):
-                data=json.loads(row['data']);large={k:data.pop(k) for k in LARGE_FIELDS if k in data}
-                for k,v in large.items():self.execute('INSERT OR IGNORE INTO automation_group_fields VALUES (?,?,?)',(row['id'],k,json.dumps(v,ensure_ascii=False)))
-                if large:
-                    data.setdefault('slot_count',len(large.get('slots',[])))
-                    self.execute('UPDATE automation_groups SET data=? WHERE id=?',(json.dumps(data,ensure_ascii=False),row['id']))
-        self.recover()
+        from .session import initialize
+        self.session_id=initialize(store);self.session_closing=threading.Event();self.session_closed=False
+        self.cleanup=None;self.stale_cleanup=None
+        self.unfinished_worksets=set()
         store.automation=self
 
     def rows(self,sql,args=()):
@@ -71,15 +65,40 @@ class Repository:
     def execute(self,sql,args=()):
         with self.store.lock:return self.store.db.execute(sql,args)
     def recover(self):
-        import psutil
-        for row in self.rows("SELECT * FROM automation_worksets WHERE state IN ('running','stopping')"):
-            alive=False
-            try:alive=abs(psutil.Process(row['owner_pid']).create_time()-row['owner_started'])<.1
-            except (psutil.Error,TypeError):pass
-            if not alive:self.execute("UPDATE automation_worksets SET state='interrupted',owner_pid=NULL,owner_started=NULL WHERE id=?",(row['id'],))
-    def worksets(self):return [self.workset(r['id']) for r in self.rows('SELECT id FROM automation_worksets ORDER BY created DESC')]
-    def workset_summaries(self):return self.rows('SELECT id,name,state FROM automation_worksets ORDER BY created DESC')
+        # Compatibility entry point: prior sessions are never resumable.
+        return None
+    def start_stale_cleanup(self):
+        from .session import Cleanup
+        if not self.stale_cleanup:self.stale_cleanup=Cleanup(self,self.tts_store.path).start()
+        return self.stale_cleanup
+    def begin_close(self):
+        self.session_closing.set()
+    def discard_session(self):
+        """Call only after all session workers have released database/output leases."""
+        from .session import Cleanup
+        self.begin_close()
+        if not self.cleanup:
+            self.cleanup=Cleanup(self,self.tts_store.path,current=True).start()
+        return self.cleanup
+    def require_open(self):
+        if self.session_closing.is_set():raise ValueError('Phiên Tự động hóa đã đóng; không nhận thêm công việc.')
+    def owns(self,id):
+        return bool(self.rows('SELECT 1 FROM automation_worksets WHERE id=? AND session_id=?',(id,self.session_id)))
+    def archive(self,id):
+        from .session import archive
+        with self.store.transaction():self.workset(id);archive(self.store.db,id)
+    def completed_history(self):return self.rows('SELECT * FROM automation_history ORDER BY created DESC')
+    def register_staging(self,path,root,kind):
+        from .session import path_identity
+        path=Path(path).resolve();root=Path(root).resolve()
+        if path_identity(path.parent)!=path_identity(root) or kind not in ('audio-part','capcut-stage'):raise ValueError('Staging không thuộc phiên.')
+        self.execute('INSERT INTO automation_staging VALUES (?,?,?,?)',(self.session_id,str(path),str(root),kind))
+    def unregister_staging(self,path):
+        self.execute('DELETE FROM automation_staging WHERE session_id=? AND path=?',(self.session_id,str(Path(path).resolve())))
+    def worksets(self):return [self.workset(r['id']) for r in self.workset_summaries()]
+    def workset_summaries(self):return self.rows('SELECT id,name,state FROM automation_worksets WHERE session_id=? ORDER BY created DESC',(self.session_id,))
     def group_summaries(self,id):
+        self.workset(id)
         rows=self.rows('''SELECT g.id,g.workset_id,g.document_id,g.position,d.path,
             json_extract(g.data,'$.state') state,json_extract(g.data,'$.error') error,
             json_extract(g.data,'$.tts_run') tts_run,json_extract(g.data,'$.image_folder') image_folder,
@@ -93,10 +112,11 @@ class Repository:
         for row in rows:row['data']={key:row.pop(key) for key in ('state','error','tts_run','image_folder','image_count','slot_count','project','audio_folder','translation_recovery_state','translation_recovery_reason','next_retry_at')}
         return rows
     def workset(self,id):
-        rows=self.rows('SELECT * FROM automation_worksets WHERE id=?',(id,))
+        rows=self.rows('SELECT * FROM automation_worksets WHERE id=? AND session_id=?',(id,self.session_id))
         if not rows:raise KeyError(id)
         row=rows[0];row['config']=json.loads(row['config']);row['config'].setdefault('deepseek_batch_size',3);row['checkpoint']=json.loads(row['checkpoint']);return row
     def groups(self,id):
+        self.workset(id)
         values=self.rows('SELECT * FROM automation_groups WHERE workset_id=? ORDER BY position,id',(id,))
         fields={r['id']:{} for r in values}
         for r in self.rows('SELECT f.group_id,f.field,f.value FROM automation_group_fields f JOIN automation_groups g ON g.id=f.group_id WHERE g.workset_id=?',(id,)):
@@ -106,8 +126,11 @@ class Repository:
             for key in LARGE_FIELDS:r['data'].setdefault(key,[] if key in ('images','slots') else {})
         return values
     def group(self,id):
-        row=self.rows('SELECT * FROM automation_groups WHERE id=?',(id,))[0];row['data']=self.enrich(id,json.loads(row['data']));return row
-    def group_state(self,id):return json.loads(self.rows('SELECT data FROM automation_groups WHERE id=?',(id,))[0]['data'])
+        row=self.rows('SELECT g.* FROM automation_groups g JOIN automation_worksets w ON w.id=g.workset_id WHERE g.id=? AND w.session_id=?',(id,self.session_id))[0];row['data']=self.enrich(id,json.loads(row['data']));return row
+    def group_state(self,id):
+        rows=self.rows('SELECT g.data FROM automation_groups g JOIN automation_worksets w ON w.id=g.workset_id WHERE g.id=? AND w.session_id=?',(id,self.session_id))
+        if not rows:raise KeyError(id)
+        return json.loads(rows[0]['data'])
     def field(self,id,key,default=None):
         rows=self.rows('SELECT value FROM automation_group_fields WHERE group_id=? AND field=?',(id,key))
         return json.loads(rows[0]['value']) if rows else self.group_state(id).get(key,default)
@@ -123,18 +146,20 @@ class Repository:
         for key in LARGE_FIELDS:data.setdefault(key,[] if key in ('images','slots') else {})
         return data
     def active(self):
-        rows=self.rows("SELECT id FROM automation_worksets WHERE state IN ('running','stopping')")
+        rows=self.rows("SELECT id FROM automation_worksets WHERE session_id=? AND state IN ('running','stopping')",(self.session_id,))
         return rows[0]['id'] if rows else None
     def editable(self,id):
+        self.require_open()
         if self.workset(id)['state'] in ACTIVE:raise ValueError('Cấu hình đã khóa. Dừng an toàn để chỉnh sửa.')
     def create(self,name,config):
+        self.require_open()
         config={'deepseek_batch_size':3,'kira_recovery_version':4,'kira_completion_policy':0,'kira_dispatch_policy':0,'translation_completion_policy':0,**config}
         if set(config)!=CONFIG_KEYS:raise ValueError('Cấu hình Automation chỉ chứa các trường được hỗ trợ; không lưu API key/token.')
         # Creation-only, provider-scoped metadata. A new workset may select DeepSeek
         # later; old rows (including draft rows) are deliberately never backfilled.
         from ..deepseek_rolling import ROLLING
         checkpoint={'deepseek_admission_policy':dict(ROLLING)}
-        id=str(uuid.uuid4());self.execute('INSERT INTO automation_worksets(id,name,config,created,checkpoint) VALUES (?,?,?,?,?)',(id,name.strip() or 'Bộ truyện',json.dumps(config),time.time(),json.dumps(checkpoint)));return id
+        id=str(uuid.uuid4());self.execute('INSERT INTO automation_worksets(id,name,config,created,checkpoint,session_id) VALUES (?,?,?,?,?,?)',(id,name.strip() or 'Bộ truyện',json.dumps(config),time.time(),json.dumps(checkpoint),self.session_id));self.unfinished_worksets.add(id);return id
     def configure(self,id,config,name=None):
         config={'deepseek_batch_size':3,'kira_recovery_version':self.workset(id)['config'].get('kira_recovery_version',2),'kira_completion_policy':0,'kira_dispatch_policy':0,'translation_completion_policy':0,**config}
         if set(config)!=CONFIG_KEYS:raise ValueError('Cấu hình Automation không hợp lệ; không lưu API key/token.')
@@ -179,6 +204,9 @@ class Repository:
                 for n,g in enumerate(ordered):self.execute('UPDATE automation_groups SET position=? WHERE id=?',(n,g['id']))
         return added
     def update_group(self,id,**changes):
+        if changes.get('state') and changes['state']!='completed':
+            rows=self.rows('SELECT workset_id FROM automation_groups WHERE id=?',(id,))
+            if rows:self.unfinished_worksets.add(rows[0]['workset_id'])
         if not (LARGE_FIELDS&changes.keys()):
             with self.store.lock:
                 current=self.group_state(id)
@@ -197,9 +225,9 @@ class Repository:
         if sort not in ('name','created'):raise ValueError('Cách sắp ảnh không hợp lệ')
         with self.store.transaction():
             group=self.group(id);self.editable(group['workset_id'])
-            changes=dict(image_folder=str(Path(folder).resolve()),image_sort=sort,images=[],input_validation={},image_inspection={},state='draft',error='')
+            changes=dict(image_folder=str(Path(folder).resolve()),image_sort=sort,images=[],input_validation={},image_inspection={},state='draft',error='',image_word_count=0)
             if inspection:
-                changes.update(images=inspection['images'],image_count=len(inspection['images']),slots=inspection['slots'],image_inspection=dict(version=1,stamp=inspection['stamp']))
+                changes.update(images=inspection['images'],image_count=len(inspection['images']),slots=inspection['slots'],image_inspection=dict(version=1,stamp=inspection['stamp']),image_word_count=inspection.get('word_count',0))
             self.update_group(id,**changes)
     def move(self,id,delta):
         with self.store.transaction():
@@ -216,14 +244,26 @@ class Repository:
             self.editable(self.group(id)['workset_id']);self.execute('DELETE FROM automation_groups WHERE id=?',(id,))
     def delete(self,id):
         with self.store.transaction():self.editable(id);self.execute('DELETE FROM automation_worksets WHERE id=?',(id,))
+        self.unfinished_worksets.discard(id)
     def activate(self,id):
         import psutil
         with self.store.transaction():
             self.editable(id)
             if self.active():raise ValueError('Một bộ Tự động hóa khác đang chạy.')
+            # Keep the existing cross-process single-workset resource guard.
+            # Dead checkpoints do not count; a different live instance does.
+            for owner in self.rows("SELECT owner_pid,owner_started FROM automation_worksets WHERE session_id!=? AND state IN ('running','stopping')",(self.session_id,)):
+                alive=False
+                try:alive=abs(psutil.Process(owner['owner_pid']).create_time()-owner['owner_started'])<.1
+                except psutil.AccessDenied:alive=True
+                except (psutil.Error,TypeError,ValueError):pass
+                if alive:raise ValueError('Một bộ Tự động hóa khác đang chạy.')
             self.execute("UPDATE automation_worksets SET state='running',started=1,cycle=cycle+1,owner_pid=?,owner_started=? WHERE id=?",(os.getpid(),psutil.Process().create_time(),id))
+        self.unfinished_worksets.add(id)
     def state(self,id,state):
         self.execute('UPDATE automation_worksets SET state=?,owner_pid=CASE WHEN ? IN (\'running\',\'stopping\') THEN owner_pid ELSE NULL END WHERE id=?',(state,state,id))
+        if state=='completed':self.unfinished_worksets.discard(id)
+        else:self.unfinished_worksets.add(id)
     def event(self,id,group,stage,message):
         # Never accept credentials/configuration objects into durable logs.
         self.execute('INSERT INTO automation_events(workset_id,group_id,created,stage,message) VALUES (?,?,?,?,?)',(id,group,time.time(),stage,self.store.log.clean(str(message))))
@@ -233,7 +273,7 @@ class Repository:
     def artifacts(self,id):return self.rows('SELECT * FROM automation_artifacts WHERE workset_id=? ORDER BY created',(id,))
     def complete_artifact(self,id,digest):self.execute("UPDATE automation_artifacts SET state='complete',sha256=? WHERE id=?",(digest,id))
     def line_owner(self,line_id):
-        rows=self.rows('SELECT g.id,g.workset_id,w.state FROM automation_groups g JOIN lines l ON l.document_id=g.document_id JOIN automation_worksets w ON w.id=g.workset_id WHERE l.id=?',(line_id,))
+        rows=self.rows('SELECT g.id,g.workset_id,w.state FROM automation_groups g JOIN lines l ON l.document_id=g.document_id JOIN automation_worksets w ON w.id=g.workset_id WHERE l.id=? AND w.session_id=?',(line_id,self.session_id))
         return rows[0] if rows else None
     def assert_editable_line(self,line_id):
         owner=self.line_owner(line_id)
@@ -253,6 +293,6 @@ class Repository:
         self.update_group(owner['id'],state='stale',error='Bản dịch đã sửa; cần kiểm tra voice/project.')
         for callback in self.listeners:callback(owner['workset_id'],line_id)
     def tts_owner(self,run):
-        for row in self.rows('SELECT id,workset_id,data FROM automation_groups'):
-            if json.loads(row['data']).get('tts_run')==run:return row
-        return None
+        # Also protect stale TTS runs while asynchronous retirement is pending.
+        rows=self.rows("SELECT g.id,g.workset_id,g.data FROM automation_groups g WHERE json_extract(g.data,'$.tts_run')=? LIMIT 1",(run,))
+        return rows[0] if rows else None

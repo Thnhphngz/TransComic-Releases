@@ -48,7 +48,7 @@ def gui(tmp_path,monkeypatch):
     yield app,window,p,id
     window.automation_controller.stop_event.set();services.translation.stop()
     while window.automation_controller.busy:app.processEvents();time.sleep(.01)
-    window._exit_authorized=True;window.close();app.processEvents()
+    window._exit_authorized=True;window.close();wait(app,lambda:window._closed)
 
 
 @pytest.mark.parametrize('dark',[False,True])

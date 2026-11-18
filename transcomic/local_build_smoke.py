@@ -77,6 +77,11 @@ def main():
     def exercise():
         try:
             assert store.path.resolve().is_relative_to(root)
+            if os.environ.get('TRANSCOMIC_SMOKE_FOLDER_INPUTS')=='1':
+                from .release_smoke_205 import run
+                run(window,root,wait)
+                app.exit(0)
+                return
             phase=os.environ.get('TRANSCOMIC_SMOKE_HOTFIX_204')
             if phase in ('seed','delete','verify'):
                 from .release_smoke_204 import run

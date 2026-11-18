@@ -32,6 +32,7 @@ class Scheduler:
             if self.busy:raise RuntimeError('Đang chạy một lượt TTS')
             if self.store.run(run)['state'] in ('draft','cancelled','completed'):raise ValueError('Lượt chưa sẵn sàng hoặc đã kết thúc; tạo lượt mới')
             config=json.loads(self.store.run(run)['config'])
+            if config.get('automation_discarded'):raise ValueError('Phiên Tự động hóa đã xóa; tạo lượt TTS mới.')
             from .catalog import LANGUAGES,voice_names
             if config.get('language') not in LANGUAGES or config.get('voice') not in voice_names(config['language']):raise ValueError('Chọn ngôn ngữ và giọng đọc hợp lệ')
             if not any(not item['skip'] and (documents is None or item['document_id'] in documents) for item in self.store.items(run)):raise ValueError('Không có đoạn TTS để chạy')

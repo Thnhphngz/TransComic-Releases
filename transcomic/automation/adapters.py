@@ -39,14 +39,22 @@ class Translation:
     def __init__(self,repo,provider_factory=provider_for,scheduler_factory=None,network_probe=None):
         from ..translation import Scheduler
         self.repo=repo;self.store=repo.store;self.provider_factory=provider_factory;self.factory=scheduler_factory or Scheduler;self.scheduler=None
+        self.automation_session_id=repo.session_id
         self.network_probe=network_probe or network_ready;self.dispatch_lock=threading.RLock();self.stopping=False
         self.backoff=lambda phase:min(8,2**phase)
     def reset(self):
+        self.repo.require_open()
         with self.dispatch_lock:self.stopping=False
     def stop(self):
         with self.dispatch_lock:
             self.stopping=True
             if self.scheduler:self.scheduler.stop()
+    def waiting(self):
+        abandoned=getattr(self.scheduler,'_abandoned',None)
+        return self.scheduler._thread.is_alive() and not (abandoned and abandoned.is_set())
+    def join_scheduler(self):
+        abandoned=getattr(self.scheduler,'_abandoned',None)
+        if not (abandoned and abandoned.is_set()):self.scheduler.join()
     def run(self,id,groups,config,stop,changed,*,line_ids=None,scope=None,exclude_ids=()):
         cycle=self.repo.workset(id)['cycle'];boundaries={};line_groups={}
         from ..documents import translatable
@@ -61,6 +69,7 @@ class Translation:
             for row in self.repo.rows('SELECT l.id,l.document_id FROM lines l JOIN automation_groups g ON g.document_id=l.document_id WHERE g.workset_id=?',(id,)):
                 if row['document_id'] in by_doc:line_groups[row['id']]=by_doc[row['document_id']]
         def notify(ids):
+            if self.repo.session_closing.is_set():return
             controller=getattr(self.repo,'controller',None);scheduler=self.scheduler
             if controller and controller.preparing.is_set() and scheduler and scheduler._thread and scheduler._thread.is_alive() and getattr(scheduler,'waiting',0):
                 controller.preparing.clear();controller.checkpoint(id,preparing=False)
@@ -131,11 +140,11 @@ class Translation:
                     return
                 self.scheduler=self.factory(self.store,provider,notify)
                 self.scheduler.start_many(jobs)
-            while self.scheduler._thread.is_alive():
+            while self.waiting():
                 changed()
                 if stop.is_set():self.scheduler.stop()
                 time.sleep(.05)
-            self.scheduler.join();changed()
+            self.join_scheduler();changed()
             if deepseek:return  # No outer retry, network wait, or implicit replay.
             reason=self.scheduler.intervention_reason
             if self.scheduler.quota_paused or reason and ('key' in reason or 'quota' in reason or 'token_budget' in reason):
@@ -195,7 +204,7 @@ class Translation:
                 if paused is None or not paused.is_set():
                     self.scheduler.start_many(list(dict.fromkeys(jobs)));break
             stop.wait(.1)
-        while self.scheduler._thread.is_alive():
+        while self.waiting():
             for group in groups:
                 if group['id'] not in group_jobs:continue
                 state=self.store.job(group_jobs[group['id']])['state']
@@ -205,7 +214,7 @@ class Translation:
                     next_retry_at=detail.get('next_retry_at'))
             notify([])
             if stop.wait(.25):self.scheduler.stop()
-        self.scheduler.join()
+        self.join_scheduler()
         for gid,job in group_jobs.items():
             state=self.store.job(job)['state']
             reason='' if state=='finished' else getattr(self.scheduler,'job_block_reasons',{}).get(job) or self.scheduler.intervention_reason or ''
@@ -295,14 +304,14 @@ class Translation:
             stop.wait(.05)
         if stop.is_set() or self.stopping:return
         self.scheduler.start_many(jobs)
-        while self.scheduler._thread.is_alive():
+        while self.waiting():
             for gid,job in list(group_jobs.items()):
                 state=self.store.job(job)['state'];detail=getattr(self.scheduler,'recovery_details',{}).get(job,{})
                 self.repo.update_group(gid,translation_recovery_state=state,translation_recovery_reason=detail.get('reason') or state,
                                        next_retry_at=detail.get('next_retry_at'))
             notify([])
             if stop.wait(.25):self.scheduler.stop()
-        self.scheduler.join()
+        self.join_scheduler()
         for gid,job in list(group_jobs.items()):
             state=self.store.job(job)['state'];reason='' if state=='finished' else self.scheduler.job_block_reasons.get(job) or self.scheduler.intervention_reason or ''
             self.repo.update_group(gid,translation_recovery_state=state,translation_recovery_reason=reason,next_retry_at=None)
@@ -345,13 +354,21 @@ def retryable(diagnostics):
 class Kokoro:
     def __init__(self,repo,tts_store,manager,packs=None,engine_factory=None):
         self.repo=repo;self.store=tts_store;self.manager=manager;self.packs=packs;self.engine_factory=engine_factory
+        self.automation_session_id=repo.session_id;self.scheduler=None
         self.backoff=lambda phase:min(4,2**phase)
         self.before_finalize=lambda:None
+    def cancel_session(self):
+        scheduler=self.scheduler
+        if scheduler:
+            scheduler.stop_requested=True
+            for engine in list(scheduler.engines):
+                if hasattr(engine,'cancel'):engine.cancel()
     def config(self,config):
         return dict(language=config['tts_language'],voice=config['voice'],variant=config['variant'],speed=config['speed'],device=config['device'],
                     device_id=-1,format='wav',workers=1,split='lines',bitrate=128)
     def prepare(self,group,config):
         """Only the same group's owned outputs can be reused; preserve old WAVs."""
+        if self.repo.session_closing.is_set():raise Stopped()
         from ..tts.output import Outputs,atomic_json,MANIFEST
         meta=group['data'];rows=[self.repo.store.line(i) for i in meta['slots']]
         if any(not usable(r) and any(c.isalpha() for c in r['source']) or not speakable(r['translation'] if r['translation'] is not None else r['source']) for r in rows):raise ValueError('Bản dịch/mapping không đủ nội dung đọc.')
@@ -381,6 +398,7 @@ class Kokoro:
             copied=dict(data,segments={})
             try:
                 for item in items:
+                    if self.repo.session_closing.is_set():raise Stopped()
                     record=data['segments'].get(item['id']);source=folder/item['filename']
                     if record and source.is_file() and file_hash(source)==record['sha256']:
                         shutil.copyfile(source,target/item['filename']);copied['segments'][item['id']]=record
@@ -396,6 +414,7 @@ class Kokoro:
             self.store.execute("UPDATE runs SET state='ready',config=?,history_accepted=1 WHERE id=?",(json.dumps(self.config(config)),run))
         return run
     def run(self,group,config,stop,changed,*,rescue=False):
+        if self.repo.session_closing.is_set():raise Stopped()
         from ..tts.scheduler import Scheduler
         from ..tts.devices import backend_plan,CPU
         from ..tts.output import Outputs,safe_path
@@ -405,6 +424,8 @@ class Kokoro:
         if all(i['state']=='success' for i in self.store.items(run)):return self.finish(run,output)
         if shutil.disk_usage(self.store.docs(run)[0]['folder']).free<4*1024*1024:raise OSError(28,'Disk full')
         scheduler=Scheduler(self.store,self.manager,engine_factory=self.engine_factory) if self.engine_factory else Scheduler(self.store,self.manager)
+        self.scheduler=scheduler
+        if self.repo.session_closing.is_set():raise Stopped()
         backend=backend_plan(cfg['device'])[0]
         if self.packs:
             scheduler.external_runtime=runtime_for(self.packs,config)
@@ -431,8 +452,11 @@ class Kokoro:
                     self.repo.update_group(group['id'],wave_cycle=cycle,wave_attempts=counts,wave_attempt_history=history)
                     doc=self.store.doc(item['document_id']);folder,_=output.manifest(doc);temp=safe_path(folder/(item['id']+'.'+item['attempt']+'.part'))
                     try:
+                        self.repo.register_staging(temp,folder,'audio-part')
+                        if self.repo.session_closing.is_set():raise Stopped()
                         if shutil.disk_usage(folder).free<4*1024*1024:raise OSError(28,'Disk full')
                         info=encode(temp,engine.synthesize(item['text'],cfg['voice'],cfg['speed'],cfg['language']),'wav')
+                        if self.repo.session_closing.is_set():raise Stopped()
                         if not output.commit(item,temp,info,engine.backend):raise ValueError('TTS lease đã thay đổi.')
                     except (SegmentFailure,ValueError) as exc:
                         self.store.execute("UPDATE segments SET state='error',error=? WHERE id=?",(type(exc).__name__,item['id']))
@@ -441,6 +465,7 @@ class Kokoro:
                         self.store.execute("UPDATE segments SET state='unknown',error='Lỗi runtime/ghi file; kiểm tra trước khi tiếp tục' WHERE id=?",(item['id'],));raise
                     finally:
                         if temp.exists():temp.unlink()
+                        self.repo.unregister_staging(temp)
                         self.repo.progress(group['id'])
                         changed()
                 if all(i['state']=='success' for i in self.store.items(run)):return self.finish(run,output)
@@ -452,23 +477,28 @@ class Kokoro:
             scheduler.retire(engine)
             if stop.is_set():self.store.status(run,'stopped')
     def finish(self,run,output):
+        if self.repo.session_closing.is_set():raise Stopped()
         docs=self.store.docs(run)
         if any(Path(d['folder']).name!=d['base']+f'_{len(self.store.items(run))}tts' for d in docs):self.before_finalize()
+        if self.repo.session_closing.is_set():raise Stopped()
         output.finalize(run);self.store.status(run,'completed');return self.store.docs(run)[0]['folder']
 
 
 class Capcut:
-    def __init__(self,repo,tts_store):self.repo=repo;self.tts=tts_store
-    def scans(self,groups):
+    def __init__(self,repo,tts_store):self.repo=repo;self.tts=tts_store;self.automation_session_id=repo.session_id
+    def scans(self,groups,cancel=None):
         from ..capcut.media import MediaGroup,MediaPair,GroupScan,probe
+        from ..capcut.media import checkpoint
         result=[]
         for group in groups:
+            checkpoint(cancel)
             meta=self.repo.group(group['id'])['data'];doc=self.tts.docs(meta['tts_run'])[0];items=self.tts.items(meta['tts_run'])
             from ..documents import translatable
             if any(not usable(r) for r in self.repo.store.lines(group['document_id']) if translatable(r['source'])):raise ValueError('Bản dịch đã bị đánh dấu không hợp lệ; không xuất project.')
             if len(items)!=len(meta['images']) or any(i['state']!='success' for i in items):raise ValueError('Voice/mapping chưa đầy đủ.')
             media=MediaGroup(group['id'],Path(self.repo.store.document(group['document_id'])['path']).stem,meta['image_folder'],doc['folder'],meta['image_sort']);pairs=[]
             for i,(image,item) in enumerate(zip(meta['images'],items),1):
+                checkpoint(cancel)
                 if file_hash(image['path'])!=image['sha256']:raise ValueError('Ảnh thay đổi khi đang chạy.')
                 audio=Path(doc['folder'])/item['filename']
                 if file_hash(audio)!=item['sha256']:raise ValueError('WAV thay đổi khi đang chạy.')
@@ -476,8 +506,9 @@ class Capcut:
             result.append(GroupScan(media,tuple(pairs)))
         return tuple(result)
     def run(self,id,part,config,stop,changed):
+        if self.repo.session_closing.is_set():raise Stopped()
         from ..capcut.exporter import write_project,reference
-        scans=self.scans(part['groups']);fp=self.fingerprint(scans,part,config)
+        scans=self.scans(part['groups'],self.repo.session_closing);fp=self.fingerprint(scans,part,config,cancel=self.repo.session_closing)
         owned=[a for a in self.repo.artifacts(id) if a['kind']=='capcut' and a['unit']==part['id']]
         for artifact in reversed(owned):
             path=Path(artifact['path'])
@@ -494,11 +525,16 @@ class Capcut:
         ownership=dict(workset=id,unit=part['id'],fingerprint=fp)
         for attempt in range(4):
             if stop.is_set():raise Stopped()
+            staging=[]
+            def register(path):
+                self.repo.register_staging(path,output,'capcut-stage');staging.append(path)
             try:
                 self.repo.event(id,None,'capcut',f'{name}: lượt xuất {attempt+1}/4')
                 if shutil.disk_usage(output).free<16*1024*1024:raise OSError(28,'Disk full')
                 # Safe Stop does not interrupt the current atomic project.
-                path=write_project(scans,output,name,progress=lambda *args:changed(),ownership=ownership,strict_target=True)
+                path=write_project(scans,output,name,cancel=self.repo.session_closing,
+                    progress=lambda *args:changed(),ownership=ownership,strict_target=True,
+                    staging_created=register)
                 if reference(path)!=reference(target):raise ValueError('Output collision; không nhận project ngoài kế hoạch.')
                 self.repo.complete_artifact(aid,project_hash(path));return reference(path)
             except OSError as exc:
@@ -508,8 +544,18 @@ class Capcut:
                     if marker.is_file() and json.loads(marker.read_text(encoding='utf8'))==ownership:
                         self.repo.complete_artifact(aid,project_hash(target));return str(target)
                 stop.wait(min(4,2**attempt))
-    def fingerprint(self,scans,part,config):
-        snapshot=[(s.group.id,[(p.id,p.images[0].path,file_hash(p.images[0].path),p.audios[0].path,file_hash(p.audios[0].path),p.duration_us) for p in s.rows]) for s in scans]
+            finally:
+                for stage in staging:
+                    if not stage.exists():self.repo.unregister_staging(stage)
+    def fingerprint(self,scans,part,config,cancel=None):
+        from ..capcut.media import checkpoint
+        snapshot=[]
+        for s in scans:
+            pairs=[]
+            for p in s.rows:
+                checkpoint(cancel)
+                pairs.append((p.id,p.images[0].path,file_hash(p.images[0].path),p.audios[0].path,file_hash(p.audios[0].path),p.duration_us))
+            snapshot.append((s.group.id,pairs))
         return fingerprint(dict(name=part['name'],output=config['output'],snapshot=snapshot))
 
 

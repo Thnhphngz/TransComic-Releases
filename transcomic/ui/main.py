@@ -191,6 +191,8 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         from .automation_page import AutomationPage
         self.automation_repo=Repository(self.store)
         self.automation_services=Services(self.automation_repo)
+        # Separate connection/worker; UI only sees the indexed new session.
+        self.automation_repo.start_stale_cleanup()
         self.automation_controller=Controller(self.automation_repo,self.automation_services,
             changed=lambda:self.automation_page.refresh_requested.emit(),
             finished=lambda id,state:self.automation_page.completion.emit(id,state),
@@ -1449,6 +1451,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
                     return
                 event.ignore()
                 return
+            if hasattr(self,'automation_controller'):self.automation_controller.discard()
             if running and choice in ("safe", "exit"):
                 self._exit_pending = True
                 if draft:draft.request_draft_stop()
@@ -1461,7 +1464,6 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
                     self.automation_page.validation_timer.stop()
                 self._exit_deadline = time.monotonic()+self.shutdown_grace_seconds
                 if self.scheduler: self.scheduler.stop()
-                if hasattr(self,'automation_controller') and self.automation_controller.busy:self.automation_controller.stop()
                 if tts:tts.request_stop()
                 if hasattr(self,'capcut_page'):self.capcut_page.request_stop()
                 self.notice.setText("Đang thoát an toàn: chờ request đang chạy lưu kết quả…")
@@ -1477,6 +1479,10 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
                 self._exit_pending=True
                 if not hasattr(self,'_exit_deadline'):self._exit_deadline=time.monotonic()+self.shutdown_grace_seconds
                 self.exit_timer.start();event.ignore();return
+        if not self._automation_exit_ready():
+            self._exit_pending=True
+            if not hasattr(self,'_exit_deadline'):self._exit_deadline=time.monotonic()+self.shutdown_grace_seconds
+            self.exit_timer.start();event.ignore();return
         if not getattr(self, "_reset_window_state", False):
             save_window_state(self)
         if hasattr(self, 'layout_save_timer'):
@@ -1518,7 +1524,12 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
     def confirm_exit(self, running):
         self._exit_dialog_active=True
         try:
-            dialog = ExitDialog(self, running, QSystemTrayIcon.isSystemTrayAvailable())
+            repo=getattr(self,'automation_repo',None)
+            unfinished=bool(repo and repo.unfinished_worksets)
+            if unfinished:
+                from .exit_dialog import AutomationExitDialog
+                dialog=AutomationExitDialog(self)
+            else:dialog = ExitDialog(self, running, QSystemTrayIcon.isSystemTrayAvailable())
             dialog.exec()
             return dialog.choice
         finally:
@@ -1541,6 +1552,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             self.exit_timer.stop()
 
     def _finish_safe_exit(self):
+        if not self._automation_exit_ready():return
         if getattr(self,'automation_controller',None) and self.automation_controller.busy:return
         tts=getattr(self,'tts_page',None)
         if tts and tts.is_busy():return
@@ -1566,6 +1578,33 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         self._exit_authorized = True
         self.exit_timer.stop()
         self.close()
+
+    def _automation_exit_ready(self):
+        """Stop first, delete on a worker, close databases only after completion."""
+        repo=getattr(self,'automation_repo',None)
+        if not repo or repo.session_closed:return True
+        self.automation_controller.discard()
+        page=self.automation_page;page.request_draft_stop()
+        if self.automation_controller.busy:
+            translation=self.automation_services.translation;scheduler=translation.scheduler
+            if scheduler and time.monotonic()>getattr(self,'_exit_deadline',float('inf'))+.5 and not hasattr(self,'_automation_fence_thread'):
+                import threading
+                self._automation_fence_thread=threading.Thread(target=scheduler.fence_shutdown,daemon=True,name='AutomationHTTPFence')
+                self._automation_fence_thread.start()
+            return False
+        if any(t.is_alive() for t in page.tasks):return False
+        if page.snapshots.thread and page.snapshots.thread.is_alive():return False
+        if repo.stale_cleanup and not repo.stale_cleanup.done.is_set():return False
+        fence=getattr(self,'_automation_fence_thread',None)
+        if fence and fence.is_alive():return False
+        cleanup=repo.discard_session()
+        if not cleanup.done.is_set():return False
+        if cleanup.error:
+            repo.cleanup=None;self._exit_pending=False;self._exit_authorized=False
+            self.statusBar().showMessage('Không dọn được phiên Tự động hóa ('+cleanup.error+'). Kiểm tra quyền ghi/dung lượng rồi thử đóng lại.')
+            raise RuntimeError('Không dọn được phiên Tự động hóa: '+cleanup.error)
+        repo.session_closed=True
+        return True
 
     def _fence_active_scheduler(self):
         if time.monotonic() < getattr(self,'_exit_deadline',float('inf'))+.5: return False

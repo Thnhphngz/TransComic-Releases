@@ -176,7 +176,7 @@ def assert_sources(pairs,cancel=None):
             if not media.unchanged():raise ValueError('Media đã thay đổi hoặc bị xóa: '+media.path)
 
 
-def write_project(scans,output,name,cancel=None,progress=None,*,ownership=None,strict_target=False):
+def write_project(scans,output,name,cancel=None,progress=None,*,ownership=None,strict_target=False,staging_created=None):
     pairs=freeze(scans);assert_sources(pairs,cancel)
     output=native_path(output,force=True).resolve()
     for scan in scans:
@@ -199,7 +199,10 @@ def write_project(scans,output,name,cancel=None,progress=None,*,ownership=None,s
                 height=f.height,width=f.width,import_time=now//1_000_000,import_time_ms=now,item_source=1,md5='',metetype=kind,type=0,
                 roughcut_time_range=dict(duration=-1,start=-1),sub_time_range=dict(duration=-1,start=-1)))
     meta['draft_materials']=[dict(type=0,value=items)]
-    stage=output/('.transcomic-capcut-'+uuid.uuid4().hex);stage.mkdir()
+    stage=output/('.transcomic-capcut-'+uuid.uuid4().hex)
+    # Register the exact private path before creating it, closing the crash gap.
+    if staging_created:staging_created(stage)
+    stage.mkdir()
     try:
         from .resources import materialize
         effect_files=materialize(stage,target,content,cancel)

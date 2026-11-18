@@ -212,7 +212,7 @@ def test_completed_workset_rechecks_changed_source_without_replaying_other_rows(
 
 
 @pytest.mark.parametrize('legacy',[False,True])
-def test_stop_close_reopen_resume_keeps_jobs_attempts_and_committed_rows(setup,tmp_path,legacy):
+def test_stop_close_reopen_discards_session_keeps_jobs_attempts_and_committed_rows(setup,tmp_path,legacy):
     from types import SimpleNamespace
     from transcomic.storage import Store
     from transcomic.automation.repository import Repository
@@ -240,21 +240,20 @@ def test_stop_close_reopen_resume_keeps_jobs_attempts_and_committed_rows(setup,t
         c.stop();release.set();c.join(12);assert not c.busy
         original=repo.store;accepted={r['id']:dict(r) for d in docs for r in original.lines(d) if r['state']=='done'}
         jobs={j['id']:j['config'] for j in original.jobs()};attempts={r[0] for r in original.db.execute('SELECT id FROM request_attempts')}
-        checkpoint=repo.workset(wid)['checkpoint'];original.close()
+        checkpoint=repo.workset(wid)['checkpoint'];tts_before=len(FakeEngine.calls);sends_before=dict(seen);original.close()
         reopened=Store(original.path);newrepo=Repository(reopened);newrepo.tts_store=services.tts_store;services.tts_store.automation=newrepo
         newservices=SimpleNamespace(tts_store=services.tts_store,translation=Translation(newrepo,make,network_probe=lambda _:True),
                     kokoro=Kokoro(newrepo,services.tts_store,None,engine_factory=FakeEngine),capcut=Capcut(newrepo,services.tts_store),preflight=lambda _:None)
         resumed=Controller(newrepo,newservices)
-        assert newrepo.workset(wid)['checkpoint']==checkpoint
-        assert resumed.validate(wid)['passed'];resumed.start(wid);resumed.join(40)
-        assert not resumed.busy and newrepo.workset(wid)['state']=='completed',newrepo.events(wid)[:3]
-        assert len(reopened.jobs())==12 and all(reopened.job(j)['config']==cfg for j,cfg in jobs.items())
+        assert newrepo.worksets()==[]
+        with pytest.raises(KeyError):resumed.validate(wid)
+        assert not resumed.busy
+        assert len(reopened.jobs())==len(jobs) and all(reopened.job(j)['config']==cfg for j,cfg in jobs.items())
         assert attempts<={r[0] for r in reopened.db.execute('SELECT id FROM request_attempts')}
         assert all(reopened.line(rid)==row for rid,row in accepted.items())
-        assert max(seen.values())==1 and len(FakeEngine.calls)==120
-        assert newrepo.workset(wid)['checkpoint']['deepseek_admissions']['1']['admission_policy']==expected
-        write_evidence(f'close-reopen-{expected["mode"]}.json',dict(status='PASS',policy=expected,preserved_job_ids=list(jobs),preserved_attempt_ids=list(attempts),
-                         accepted_rows_preserved=len(accepted),completed_files=12,tts_calls=120,duplicate_row_sends=0))
+        assert dict(seen)==sends_before and len(FakeEngine.calls)==tts_before
+        write_evidence(f'fresh-session-{expected["mode"]}.json',dict(status='PASS',policy=expected,preserved_job_ids=list(jobs),preserved_attempt_ids=list(attempts),
+                         accepted_rows_preserved=len(accepted),restored_worksets=0,new_requests=0,new_tts_calls=0))
     finally:
         release.set();c.stop();c.join(8)
         if resumed:resumed.stop();resumed.join(8)

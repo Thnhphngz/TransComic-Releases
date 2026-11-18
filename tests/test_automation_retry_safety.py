@@ -63,7 +63,7 @@ def test_external_document_is_rejected_without_changing_owner_or_queue(setup,tmp
 
 
 @pytest.mark.parametrize('manual_completed',[False,True])
-def test_new_connections_recover_pending_request_and_preserve_newer_manual_result(setup,tmp_path,manual_completed):
+def test_new_connections_discard_pending_request_and_preserve_newer_manual_result(setup,tmp_path,manual_completed):
     repo,id,s,c=setup;gid,_,_=add_group(repo,id,tmp_path/'g',count=1);run(c,id)
     doc=repo.group(gid)['document_id'];row=repo.store.lines(doc)[0]
     # This is the exact durable intent written by enqueue_retry before dispatch.
@@ -76,13 +76,12 @@ def test_new_connections_recover_pending_request_and_preserve_newer_manual_resul
         def http(req):calls.extend(r['id'] for r in request_lines(req));return response(req)
         services=SimpleNamespace(tts_store=fresh_tts,translation=Translation(fresh,lambda store,job:KiraPoolProvider(store,'mock',transport=httpx.MockTransport(http),rpm=100000,tpm=100000000),network_probe=lambda _:True),kokoro=Kokoro(fresh,fresh_tts,None,engine_factory=FakeEngine),capcut=Capcut(fresh,fresh_tts),preflight=lambda _:None)
         reopened=Controller(fresh,services);services.translation.backoff=lambda _:0
-        assert reopened.retry_requests(id)==[request] and not reopened.busy
-        run(reopened,id)
-        assert fresh.workset(id)['state']=='completed',fresh.events(id)[:3]
-        assert reopened.retry_requests(id)[0]['state']=='done'
+        assert fresh.worksets()==[] and not reopened.busy
+        with pytest.raises(KeyError):run(reopened,id)
+        assert calls==[]
         if manual_completed:
             assert calls==[] and fresh_store.line(row['id'])['translation']=='The newer manual correction must be preserved'
-        else:assert calls==[row['id']]
+        else:assert fresh_store.line(row['id'])['translation']==row['translation']
     finally:
         if reopened:reopened.stop();reopened.join(10)
         fresh_tts.close();fresh_store.close()

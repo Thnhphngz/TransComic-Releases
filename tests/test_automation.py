@@ -284,15 +284,16 @@ def test_split_ready_part_exports_despite_other_part_translation_failure(setup,t
     assert [repo.group(gid)['data']['state'] for gid in ids]==['needs_attention','needs_attention','completed','completed']
 
 
-def test_crash_metadata_recovery_does_not_run_any_engine(setup,tmp_path):
+def test_crash_metadata_is_hidden_and_does_not_run_any_engine(setup,tmp_path):
     repo,id,s,c=setup;gid,_,_=add_group(repo,id,tmp_path/'a');repo.activate(id)
     repo.execute('UPDATE automation_worksets SET owner_pid=?,owner_started=? WHERE id=?',(99999999,0,id))
     reopened=Repository(repo.store)
-    assert reopened.workset(id)['state']=='interrupted' and reopened.groups(id)[0]['id']==gid
+    assert reopened.worksets()==[] and reopened.active() is None
+    with pytest.raises(KeyError):reopened.workset(id)
     assert FakeEngine.calls==[] and repo.store.jobs()==[]
 
 
-def test_reopened_checkpoint_reuses_translations_and_verified_wavs(setup,tmp_path):
+def test_reopened_session_does_not_resume_but_preserves_translations_and_verified_wavs(setup,tmp_path):
     repo,id,s,c=setup;gid,_,_=add_group(repo,id,tmp_path/'a',count=6);run(c,id)
     meta=repo.group(gid)['data'];items=s.tts_store.items(meta['tts_run'])
     folder=Path(s.tts_store.docs(meta['tts_run'])[0]['folder'])
@@ -306,10 +307,10 @@ def test_reopened_checkpoint_reuses_translations_and_verified_wavs(setup,tmp_pat
         def forbidden(*args):raise AssertionError('Cached translations must not call HTTP')
         services=SimpleNamespace(tts_store=fresh_tts,translation=Translation(fresh,forbidden,network_probe=lambda provider:True),kokoro=Kokoro(fresh,fresh_tts,None,engine_factory=FakeEngine),capcut=Capcut(fresh,fresh_tts),preflight=lambda cfg:None)
         reopened=Controller(fresh,services)
-        assert fresh.workset(id)['state']=='interrupted' and not reopened.busy
+        assert fresh.worksets()==[] and not reopened.busy
         assert len(FakeEngine.calls)==before and len(fresh_store.jobs())==jobs
-        run(reopened,id)
-        assert fresh.workset(id)['state']=='completed' and len(FakeEngine.calls)==before+1
+        with pytest.raises(KeyError):run(reopened,id)
+        assert len(FakeEngine.calls)==before
         assert len(fresh_store.jobs())==jobs
         assert all(file_hash(folder/name)==digest for name,digest in good.items())
     finally:fresh_tts.close();fresh_store.close()
@@ -454,9 +455,9 @@ def test_old_database_tables_settings_and_manifest_migration_are_preserved(tmp_p
         assert {name:[tuple(r) for r in store.db.execute('SELECT * FROM "'+name+'"')] for name in tables}==before
         id=repo.create('Migration fixture',defaults(store));gid,path,_=add_group(repo,id,tmp_path/'g')
         meta=repo.group(gid)['data'];repo.execute('DELETE FROM automation_group_fields WHERE group_id=?',(gid,));repo.execute('UPDATE automation_groups SET data=? WHERE id=?',(json.dumps(meta),gid))
-        upgraded=Repository(store);assert all(upgraded.group(gid)['data'][k]==v for k,v in meta.items())
-        assert upgraded.group(gid)['data']['slot_count']==len(meta['slots'])
-        assert len(upgraded.group_state(gid).get('images',[]))==0  # Large manifests migrated to field records.
+        upgraded=Repository(store);assert upgraded.worksets()==[]
+        # No eager migration/materialization of previous-session manifests.
+        assert json.loads(upgraded.rows('SELECT data FROM automation_groups WHERE id=?',(gid,))[0]['data'])==meta
     finally:store.close()
 
 

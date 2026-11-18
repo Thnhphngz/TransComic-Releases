@@ -558,7 +558,7 @@ class TtsPage(QWidget):
         """Keep the saved manual draft, but never present it as Automation's batch."""
         repo=getattr(self.store,'automation',None);active=repo.active() if repo else None
         contextual=bool(active);previous=getattr(self,'automation_context_active',False);self.automation_context_active=contextual
-        has_automation=bool(repo and repo.rows('SELECT 1 FROM automation_worksets WHERE started=1 LIMIT 1'))
+        has_automation=bool(repo and repo.rows('SELECT 1 FROM automation_worksets WHERE session_id=? AND started=1 LIMIT 1',(repo.session_id,)))
         self.manual_context_note.setVisible(not contextual and has_automation and self.store.run(self.run_id)['state']=='draft' and bool(self.store.docs(self.run_id)))
         self.automation_context.setVisible(contextual)
         for widget in (self.controls,self.tab_strip,self.tabs,self.action_strip):widget.setVisible(not contextual)

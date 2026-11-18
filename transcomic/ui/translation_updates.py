@@ -40,7 +40,8 @@ def document_status(rows,job_state=None,*,pending_work=False,structural=False):
 
 class SnapshotReader:
     """One connection, created/used/closed on its worker thread; no Store writes."""
-    def __init__(self,path):
+    def __init__(self,path,session_id=None):
+        self.session_id=session_id
         self.db=sqlite3.connect(Path(path).resolve().as_uri()+'?mode=ro',uri=True,timeout=.15)
         self.db.row_factory=sqlite3.Row;self.db.execute('PRAGMA query_only=ON')
         self.has_automation=self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='automation_worksets'").fetchone() is not None
@@ -88,7 +89,7 @@ class SnapshotReader:
                 for r in self.query('SELECT v.line_id,v.warnings,j.prompt_version FROM api_text_versions v JOIN request_attempts a ON a.id=v.attempt_id JOIN batches b ON b.id=a.original_batch_id JOIN jobs j ON j.id=b.job_id WHERE v.accepted=1 AND v.line_id IN ('+','.join('?'*len(chunk))+') ORDER BY a.rowid',chunk):
                     self.policies[r['line_id']]=r['prompt_version'];self.notes[r['line_id']]=json.loads(r['warnings'])
             export=self.db.execute('SELECT value FROM settings WHERE key=?',('export_revision_'+str(view),)).fetchone()
-            locked={r['document_id'] for r in self.query("SELECT g.document_id FROM automation_groups g JOIN automation_worksets w ON w.id=g.workset_id WHERE w.state IN ('running','stopping')")} if self.has_automation else set()
+            locked={r['document_id'] for r in self.query("SELECT g.document_id FROM automation_groups g JOIN automation_worksets w ON w.id=g.workset_id WHERE w.state IN ('running','stopping')"+(' AND w.session_id=?' if self.session_id else ''),(self.session_id,) if self.session_id else ())} if self.has_automation else set()
             self.db.commit()
         except BaseException:self.db.rollback();raise
         for doc in set(self.docs)-wanted:
@@ -194,7 +195,8 @@ class TranslationUpdates(QObject):
                     if self.closed:return
                     request=self.pending;self.pending=None;self.busy=True
                 try:
-                    if reader is None:reader=SnapshotReader(self.path)
+                    if reader is None:
+                        reader=SnapshotReader(self.path);reader.session_id=self.owner.automation_repo.session_id
                     if request['validate_editor'] and request['view']:
                         # Preserve the existing manual-edit validation, off Qt's
                         # thread. API commits already run this validator. Reuse

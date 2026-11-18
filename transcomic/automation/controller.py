@@ -30,6 +30,7 @@ class Controller(Retranslation,Reconciliation):
         self.repo=repo;self.services=services;self.changed=changed;self.finished=finished
         self.resource_check=resource_check;self.editor_check=editor_check;self.thread=None;self.stop_event=threading.Event();self.lock=threading.RLock();self.current=None
         self.pending_terminal=None;self.internal_abort=False;repo.controller=self
+        self.automation_session_id=repo.session_id
         self.paused=threading.Event();self.preparing=threading.Event()
     @property
     def busy(self):return bool(self.thread and self.thread.is_alive())
@@ -57,6 +58,7 @@ class Controller(Retranslation,Reconciliation):
             self.checkpoint(id,validation=dict(passed=proof['passed'],errors=proof['errors'],config_fingerprint=proof['config_fingerprint'],pending=proof['pending']),validation_sections=proof['sections'],validation_inputs=prepared_identity(self.repo.groups(id)))
         return proof
     def start(self,id,selected=None):
+        self.repo.require_open()
         with self.lock:
             if self.busy or self.repo.active():raise ValueError('Chỉ một bộ Automation được chạy.')
             work=self.repo.workset(id);proof=work['checkpoint'].get('validation',{})
@@ -77,6 +79,7 @@ class Controller(Retranslation,Reconciliation):
             if hasattr(self.services.translation,'reset'):self.services.translation.reset()
             self.changed()
             self.thread=threading.Thread(target=self._run,args=(id,selected),daemon=True,name='TransComic-Automation')
+            self.thread.automation_session_id=self.automation_session_id
             try:self.thread.start()
             except BaseException:
                 try:self.repo.state(id,'needs_attention')
@@ -89,6 +92,14 @@ class Controller(Retranslation,Reconciliation):
             self.stop_event.set();self.paused.clear();self.services.translation.stop()
             if self.current:self.repo.state(self.current,'stopping')
         self.changed()
+    def discard(self):
+        """Window close is permanent; Safe Stop within the same session is not."""
+        self.repo.begin_close();self.stop_event.set();self.paused.clear()
+        # Signalling only: no joins or SQLite waits on the GUI thread.
+        translation=self.services.translation;translation.stopping=True
+        if translation.scheduler:translation.scheduler.cancel_inflight()
+        kokoro=self.services.kokoro
+        if hasattr(kokoro,'cancel_session'):kokoro.cancel_session()
     def pause(self):
         if not self.busy or self.stop_event.is_set():return
         self.paused.set()
@@ -271,17 +282,20 @@ class Controller(Retranslation,Reconciliation):
                 self.reconcile_stages(id)
                 if terminal=='completed' and any(g['data']['state']!='completed' for g in self.repo.groups(id)):terminal='needs_attention'
             except Exception:self.repo.store.log.emit('gui_error',reason='automation_stage_reconcile_failed')
-            from .reports import write
-            try:self.checkpoint(id,reports=write(self.repo,id,self.services.tts_store,state=terminal))
-            except Exception as exc:
-                try:self.repo.event(id,None,'report','Không ghi được báo cáo ngoài; checkpoint nội bộ còn nguyên. '+type(exc).__name__)
-                except Exception:self.repo.store.log.emit('gui_error',reason='automation_report_failed',exception=type(exc).__name__)
+            if not self.repo.session_closing.is_set():
+                from .reports import write
+                try:self.checkpoint(id,reports=write(self.repo,id,self.services.tts_store,state=terminal))
+                except Exception as exc:
+                    try:self.repo.event(id,None,'report','Không ghi được báo cáo ngoài; checkpoint nội bộ còn nguyên. '+type(exc).__name__)
+                    except Exception:self.repo.store.log.emit('gui_error',reason='automation_report_failed',exception=type(exc).__name__)
             with self.lock:
                 try:self.repo.state(id,terminal)
                 except Exception:
                     self.pending_terminal='needs_attention';terminal='needs_attention'
                     self.repo.store.log.emit('gui_error',reason='automation_terminal_checkpoint_failed')
-            self.changed();self.finished(id,terminal)
+            try:self.repo.archive(id)
+            except Exception as exc:self.repo.store.log.emit('gui_error',reason='automation_history_archive_failed',exception=type(exc).__name__)
+            if not self.repo.session_closing.is_set():self.changed();self.finished(id,terminal)
     def has_pending(self,id,proof):
         from ..tts.documents import segments
         from .adapters import project_hash

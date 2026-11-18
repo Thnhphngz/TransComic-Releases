@@ -90,7 +90,7 @@ def gui(tmp_path,monkeypatch):
     yield app,store,window
     if window.scheduler and not hasattr(window.scheduler,'stop'):window.scheduler=None
     if window.scheduler and window.scheduler._thread and window.scheduler._thread.is_alive():window.scheduler.stop();window.scheduler.cancel_inflight();window.scheduler.join(5)
-    if not window._closed:window._exit_authorized=True;window.close();app.processEvents()
+    if not window._closed:window._exit_authorized=True;window.close();wait(app,lambda:window._closed)
 
 
 def test_active_editor_and_inactive_file_updates_do_not_reset_or_read_gui_database(gui,tmp_path):
@@ -150,7 +150,7 @@ def test_temporary_read_connection_failure_recovers_without_manual_refresh(gui,t
     w.translation_updates.request(full=True);assert w.translation_updates.wait_for_idle()
     assert len(calls)==2 and w.translation_updates.last['statuses'][doc]['total']==1
     assert w.translation_updates.thread.is_alive()
-    worker=w.translation_updates.thread;w.scheduler=None;w._exit_authorized=True;w.close();app.processEvents();worker.join(1)
+    worker=w.translation_updates.thread;w.scheduler=None;w._exit_authorized=True;w.close();wait(app,lambda:w._closed);worker.join(1)
     assert not worker.is_alive()
 
 

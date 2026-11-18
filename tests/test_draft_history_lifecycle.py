@@ -81,7 +81,7 @@ def lifecycle(tmp_path,monkeypatch):
 
 
 @pytest.mark.parametrize('count',[3,100])
-def test_close_during_import_reopens_all_accepted_inputs(lifecycle,tmp_path,monkeypatch,count):
+def test_close_during_import_discards_all_accepted_inputs(lifecycle,tmp_path,monkeypatch,count):
     from transcomic.automation.repository import Repository
     from transcomic.automation.validation import check_current
     app,open_window=lifecycle;w=open_window();p=w.automation_page
@@ -106,17 +106,15 @@ def test_close_during_import_reopens_all_accepted_inputs(lifecycle,tmp_path,monk
     w.close();wait(app,lambda:w._closed,2)
     monkeypatch.setattr(Repository,'add',original)
     reopened=open_window();p=reopened.automation_page
-    wait(app,lambda:len(p.repo.group_summaries(wid))==count and not p.import_busy,15)
-    assert not p.repo.workset(wid)['checkpoint']['draft_imports']
-    assert p.repo.workset(wid)['config']==saved_config
-    assert p.repo.workset(wid)['state']=='draft' and not p.repo.workset(wid)['started']
+    assert p.current is None and p.repo.worksets()==[] and not p.import_busy
+    with pytest.raises(KeyError):p.repo.workset(wid)
     assert not p.controller.busy and not reopened.store.jobs() and not p.services.tts_store.history_runs()
     reopened.close();wait(app,lambda:reopened._closed)
-    again=open_window();assert len(again.automation_repo.group_summaries(wid))==count
+    again=open_window();assert again.automation_repo.worksets()==[]
     assert not again.store.jobs()
 
 
-def test_pairing_intent_survives_close_and_stale_mapping_is_fenced(lifecycle,tmp_path,monkeypatch):
+def test_pairing_intent_is_discarded_on_close_and_stale_mapping_is_fenced(lifecycle,tmp_path,monkeypatch):
     from PIL import Image
     import transcomic.automation.validation as validation
     app,open_window=lifecycle;w=open_window();p=w.automation_page
@@ -137,8 +135,8 @@ def test_pairing_intent_survives_close_and_stale_mapping_is_fenced(lifecycle,tmp
     w.close();wait(app,lambda:w._closed,2)
     monkeypatch.setattr(validation,'image_manifest',original)
     reopened=open_window();p=reopened.automation_page
-    wait(app,lambda:p.repo.group_state(gid)['image_folder']==str(folders[1].resolve()) and not p.pair_pending)
-    assert p.repo.workset(wid)['checkpoint']['draft_pairings']==[]
+    assert p.current is None and p.repo.worksets()==[] and not p.pair_pending
+    with pytest.raises(KeyError):p.repo.group_state(gid)
     assert not reopened.store.jobs() and not p.controller.busy
 
 
@@ -161,7 +159,8 @@ def test_history_automation_ownership_and_write_failure(lifecycle,tmp_path,monke
     w.close();wait(app,lambda:w._closed)
     reopened=open_window();reopened.pages.setCurrentIndex(7);app.processEvents()
     assert doc['id'] not in reopened.tts_page.history_panel.cards and audio.read_bytes()==saved
-    assert reopened.automation_repo.group_state(gid)['tts_run']==run
+    assert reopened.automation_repo.worksets()==[]
+    assert reopened.tts_page.store.doc(doc['id']) is not None
 
 
 def test_explicit_validation_is_not_lost_behind_import(gui,tmp_path,monkeypatch):
