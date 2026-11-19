@@ -512,11 +512,19 @@ class WorkspaceV2Mixin:
         if (active or translated) and not confirmed:
             note = 'Job đang chạy sẽ tiếp tục trong Hàng đợi. ' if active else ''
             if QMessageBox.question(self, 'Bỏ file khỏi workspace', note+'Bản dịch và lịch sử vẫn được lưu. Bỏ các file đã chọn?', QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes: return
+        self.document_panel.model.checked.difference_update(instances)
+        self.remove_workspace_documents(ids)
+
+    def remove_workspace_documents(self, document_ids):
+        ids = set(document_ids).intersection(self.workspace_ids)
+        if not ids: return
+        panel_model = self.document_panel.model
+        panel_model.checked.difference_update(item['instance'] for item in panel_model.items if ids.issuperset(item['ids']))
         delegate = self.table.itemDelegate()
         if delegate.active_editor is not None:
             delegate.commitData.emit(delegate.active_editor); delegate.closeEditor.emit(delegate.active_editor)
         self.workspace_ids = [d for d in self.workspace_ids if d not in ids]
-        self.document_panel.model.checked.difference_update(instances)
+        self.automation_workspace_ids.difference_update(ids)
         if self.doc_id in ids:
             if self.workspace_ids: self.open_document(self.workspace_ids[0])
             else:

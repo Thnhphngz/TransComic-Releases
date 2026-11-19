@@ -46,6 +46,35 @@ def test_deepseek_retries_beyond_six_attempts_without_replaying_saved_rows(tmp_p
     finally:cleanup(store,scheduler)
 
 
+@pytest.mark.parametrize('failure',[504,'timeout','partial'])
+def test_deepseek_persistent_failure_stops_at_attempt_limit(tmp_path,failure):
+    from transcomic.retry import DEEPSEEK_MAX_ATTEMPTS
+    from transcomic.storage import Store
+    store=Store(tmp_path/'state.db')
+    doc=store.import_document(tmp_path/'s.txt',decode_txt(('Synthetic line\n'*4).encode()),'vi','en')[0]
+    cfg=settings(store);cfg.update(completion_backoff_base=.01,completion_backoff_max=.01)
+    job=store.create_job(doc,MODEL,'vi','en',1,provider='deepseek',config=cfg)
+    calls=[]
+
+    def handler(req):
+        calls.append([row['id'] for row in request_lines(req)])
+        if failure=='timeout':raise httpx.ReadTimeout('Synthetic timeout')
+        if failure=='partial':return response(req,[])
+        return httpx.Response(failure)
+
+    scheduler=Scheduler(store,DeepSeekProvider('synthetic',transport=httpx.MockTransport(handler)))
+    try:
+        scheduler.start(job);scheduler.join(5)
+        assert not scheduler._thread.is_alive() and store.job(job)['state']=='needs_intervention'
+        by_payload={tuple(row['id'] for row in b['payload']):store.attempts(b['id']) for b in store.batches(job)}
+        counts=Counter(map(tuple,calls))
+        assert max(counts.values())==DEEPSEEK_MAX_ATTEMPTS and set(counts)<=set(by_payload)
+        for payload,attempts in by_payload.items():
+            assert [a['attempt_number'] for a in attempts]==list(range(1,counts[payload]+1))
+        assert not any(row['translation'] for row in store.lines(doc))
+    finally:cleanup(store,scheduler)
+
+
 @pytest.mark.parametrize('status',[401,402])
 def test_deepseek_permanent_key_or_balance_failure_does_not_loop(tmp_path,status):
     from transcomic.storage import Store

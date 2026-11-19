@@ -114,9 +114,12 @@ class Smoke(MainWindow):
             self.confirm_exit=lambda running:confirmations.append(running) or 'safe'
             self.exit_probe_timer=QTimer(self);self.exit_probe_timer.setInterval(10)
             def tick():
-                if calls and not self._exit_pending:
-                    self.stop_translation();self.close();self.close()
-                if time.monotonic()-start>5:raise AssertionError('OS-exit probe timeout')
+                try:
+                    if calls and not self._exit_pending:
+                        self.stop_translation();self.close();self.close()
+                    if time.monotonic()-start>5:raise AssertionError('OS-exit probe timeout')
+                except Exception:
+                    self.exit_probe_timer.stop();self.fail()
             self.exit_probe_timer.timeout.connect(tick);self.exit_probe_timer.start()
             self._probe_info={'job':job,'doc':doc,'calls':calls,'start':start,'confirmations':confirmations}
         except Exception:self.fail()
@@ -124,11 +127,16 @@ class Smoke(MainWindow):
 if __name__=='__main__':
     if EXIT_ONLY:
         # Parent supplies its temp directory and verifies this process exit.
+        from unittest.mock import patch
         os.environ['QT_QPA_PLATFORM']='windows';application.MainWindow=Smoke
         created=[];original=Smoke.__init__
         def init(self,store):original(self,store);created.append(self)
         Smoke.__init__=init
-        try:runpy.run_path(str(ROOT/'run_transcomic.py'),run_name='__main__')
+        try:
+            # Keep the instrumented entry point in this interpreter even if
+            # a separate developer .venv is installed beside the source tree.
+            with patch('transcomic.dev_runtime.launch',return_value=None):
+                runpy.run_path(str(ROOT/'run_transcomic.py'),run_name='__main__')
         except SystemExit as result:
             if result.code:raise
             w=created[0];info=w._probe_info

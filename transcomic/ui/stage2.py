@@ -22,6 +22,7 @@ from .deepseek_api import DeepSeekApiMixin
 class Stage2Mixin(KiraApiMixin, DeepSeekApiMixin):
     def setup_stage2(self):
         self.workspace_ids = []
+        self.automation_workspace_ids = set()
         self.workspace_positions = {}
         self.extra_targets = json.loads(self.store.setting('extra_targets', '[]'))
         from ..languages import language
@@ -189,6 +190,7 @@ class Stage2Mixin(KiraApiMixin, DeepSeekApiMixin):
             self.statusBar().showMessage(f"Đang nhập trong nền · đã đọc {result['count']} tài liệu");return
         if kind == 'import':
             self.import_busy = False
+            self.automation_workspace_ids.difference_update(result.get('duplicate_ids', ()))
             self.workspace_ids.extend(result['document_ids'])
             self.workspace_ids = list(dict.fromkeys(self.workspace_ids))
             if not self.doc_id and result['document_ids']: self.open_document(result['document_ids'][0])
@@ -217,6 +219,7 @@ class Stage2Mixin(KiraApiMixin, DeepSeekApiMixin):
                     self.store.run_state(result['run_id'],'stopped')
                 self.notice.setText('Đã dừng chuẩn bị; chưa gửi API.');self.start_button.setEnabled(bool(self.doc_id));self.stop_button.setEnabled(False);return
             self.scheduler=result['scheduler'];self.current_job_ids=result['line_ids']
+            self.automation_workspace_ids.difference_update(result['documents'])
             self.workspace_ids=list(dict.fromkeys(self.workspace_ids+result['documents']))
             self.scheduler.start_many(result['jobs'],result['run_id'])
             self.refresh_workspace_choices();self.refresh()

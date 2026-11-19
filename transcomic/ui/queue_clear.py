@@ -10,7 +10,9 @@ BUSY='Hãy dừng quá trình dịch và chờ các tác vụ hiện tại kết
 def idle(window):
     scheduler=window.scheduler
     thread=getattr(scheduler,'_thread',None)
+    page=getattr(window,'automation_page',None)
     return not (window._closed or window._exit_pending or
+        (page and page.folder_scans_active()) or
         getattr(window,'import_busy',False) or getattr(window,'export_busy',False) or
         (thread and thread.is_alive()) or getattr(scheduler,'active',0) or getattr(scheduler,'active_http',0) or
         any(t.is_alive() for t in getattr(window,'background_threads',[]) if t is not threading.current_thread()))

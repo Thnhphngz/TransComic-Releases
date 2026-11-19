@@ -53,7 +53,7 @@ class AutomationSnapshots(QObject):
     ready=Signal(object)
     def __init__(self,page):
         super().__init__(page);self.page=page;self.path=page.repo.store.path;self.tts_path=page.services.tts_store.path
-        self.last=None;self.closed=False;self.thread=None;self.condition=threading.Condition();self.pending=None;self.serial=0;self.busy=False;self.apply_ms=[]
+        self.last=None;self.closed=False;self.thread=None;self.condition=threading.Condition();self.pending=None;self.serial=0;self.min_serial=0;self.busy=False;self.apply_ms=[]
         self.ready.connect(self.apply,Qt.QueuedConnection)
     def request(self):
         if self.closed or self.page.owner._closed or self.page.owner._exit_pending:return
@@ -89,10 +89,13 @@ class AutomationSnapshots(QObject):
     def apply(self,payload):
         p=self.page
         if self.closed or p.owner._closed or p.owner._exit_pending:return
-        if payload['id']!=p.current or self.last and payload['serial']<self.last['serial']:return
+        if payload['id']!=p.current or payload['serial']<self.min_serial or self.last and payload['serial']<self.last['serial']:return
         if payload.get('error'):QTimer.singleShot(150,self.request);return
         self.last=payload;start=time.perf_counter();p.refresh(payload);self.apply_ms.append((time.perf_counter()-start)*1000)
         if len(self.apply_ms)>500:self.apply_ms=self.apply_ms[-500:]
+    def invalidate(self):
+        self.min_serial=self.serial+1
+        self.last=None
     def shutdown(self):
         with self.condition:self.closed=True;self.pending=None;self.condition.notify()
     def wait_for_idle(self,seconds=5):

@@ -3,7 +3,7 @@ from dataclasses import asdict
 from pathlib import Path
 import shutil
 import tempfile
-from .repository import file_hash,fingerprint
+from .repository import file_hash,fingerprint,source_key
 from ..tts.documents import segments
 from ..capcut.media import IMAGES,natural_key,probe
 
@@ -25,9 +25,12 @@ def image_manifest(folder,mode,*,cancelled=None):
     root=Path(folder)
     if not folder or not root.is_dir():raise ValueError('Chưa chọn thư mục ảnh hợp lệ.')
     paths=sorted((p for p in root.iterdir() if p.is_file() and p.suffix.lower() in IMAGES),key=lambda p:natural_key(p.name))
-    values=[]
+    values=[];seen=set()
     for path in paths:
         check_current(cancelled)
+        key=source_key(path)
+        if key in seen:raise ValueError(path.name+': đường dẫn ảnh trùng.')
+        seen.add(key)
         media=probe(path,True)
         if media.error:raise ValueError(path.name+': '+media.error)
         row=asdict(media);row['sha256']=file_hash(path);values.append(row)
@@ -104,11 +107,20 @@ def file_stamp(path):
     s=Path(path).stat();return (s.st_size,s.st_mtime_ns,s.st_ctime_ns,s.st_ino)
 
 
-def input_stamp(group,path,rows):
+def image_stamp(folder,cancelled=None):
+    images=[]
+    for p in Path(folder).iterdir():
+        check_current(cancelled)
+        if p.suffix.lower() in IMAGES and p.is_file():
+            images.append((str(p.resolve()),file_stamp(p)))
+    return tuple(sorted(images))
+
+
+def input_stamp(group,path,rows,*,images=None,cancelled=None):
     """Cheap change detection for UI config edits; dispatch still does full hashes."""
     meta=group['data'];folder=Path(meta['image_folder'])
     if not meta['image_folder'] or not folder.is_dir():raise ValueError('Chưa chọn thư mục ảnh hợp lệ.')
-    images=sorted((str(p.resolve()),file_stamp(p)) for p in folder.iterdir() if p.is_file() and p.suffix.lower() in IMAGES)
+    if images is None:images=image_stamp(folder,cancelled)
     return fingerprint(dict(source=(str(path),file_stamp(path)),images=images,sort=meta['image_sort'],folder=str(folder.resolve()),
                             lines=[(r['id'],r['source_revision']) for r in rows],sha=meta['source_sha256']))
 
@@ -159,6 +171,8 @@ def check_current(cancelled):
 def validate(repo,id,services=None,*,refresh=True,reuse_inputs=False,force_config=False,cancelled=None,groups=None,prepared=False,inputs_only=False):
     check_current(cancelled)
     work=repo.workset(id);config=work['config'];errors=[];result=[];sections={};checked=[]
+    if not inputs_only and repo.has_pending_folders(id):
+        errors.append('Còn thư mục đang quét ảnh hoặc chờ chọn DOCX. Hãy hoàn tất hoặc bỏ dòng đó trước khi bắt đầu.')
     cached=work['checkpoint'].get('validation_sections',{}) if reuse_inputs and not force_config else {}
     for section in (() if inputs_only else DEPENDENCIES):
         check_current(cancelled)
@@ -190,14 +204,16 @@ def validate(repo,id,services=None,*,refresh=True,reuse_inputs=False,force_confi
         try:
             if group['source_key'] in seen:raise ValueError('Nguồn bị trùng.')
             seen.add(group['source_key'])
-            stamp=input_stamp(group,path,rows);cache=meta.get('input_validation',{})
+            stamp=input_stamp(group,path,rows,cancelled=cancelled);cache=meta.get('input_validation',{})
             used_cache=bool(reuse_inputs and cache.get('version')==1 and cache.get('stamp')==stamp and meta.get('images') and meta.get('slots')==[r['id'] for r in slots])
             if used_cache:images=meta['images']
             else:
                 read_source(path)
                 if file_hash(path)!=meta['source_sha256']:raise ValueError('Nguồn đã thay đổi; cần đối chiếu từng dòng trước khi tiếp tục.')
                 inspected=meta.get('image_inspection',{})
-                if reuse_inputs and inspected.get('version')==1 and inspected.get('stamp')==stamp and meta.get('images'):images=meta['images']
+                if reuse_inputs and inspected.get('version')==1 and inspected.get('stamp')==stamp and (meta.get('images') or inspected.get('error')):
+                    images=meta['images']
+                    if inspected.get('error'):raise ValueError(inspected['error'])
                 else:images=image_manifest(meta['image_folder'],meta['image_sort'],cancelled=cancelled)
             if len(images)!=len(slots) or not slots:raise ValueError(f'{len(slots)} dòng cần voice / {len(images)} ảnh — lệch {len(slots)-len(images)}')
             previous=meta.get('images',[])
@@ -207,7 +223,7 @@ def validate(repo,id,services=None,*,refresh=True,reuse_inputs=False,force_confi
                 if old_paths!=new_paths and not all(numeric_id(Path(a).name) is not None and numeric_id(Path(a).name)==numeric_id(Path(b).name) for a,b in zip(old_paths,new_paths)):
                     raise ValueError('Thứ tự/định danh ảnh thay đổi; chọn lại thư mục ảnh và xác nhận cách sắp xếp để giữ mapping chính xác.')
             if shutil.disk_usage(path.parent).free<max(16*1024*1024,len(slots)*2*1024*1024):raise ValueError('Không đủ dung lượng cho WAV ước lượng.')
-            if not used_cache and input_stamp(group,path,rows)!=stamp:raise ValueError('Đầu vào thay đổi trong khi kiểm tra; kiểm tra lại trước khi bắt đầu.')
+            if not used_cache and input_stamp(group,path,rows,cancelled=cancelled)!=stamp:raise ValueError('Đầu vào thay đổi trong khi kiểm tra; kiểm tra lại trước khi bắt đầu.')
         except (OSError,ValueError,UnicodeError) as exc:faults.append(str(exc))
         row=dict(group,path=str(path),name=path.name,line_count=len(slots),image_count=len(images),valid=not faults,errors=faults,input_cached=used_cache)
         result.append(row)

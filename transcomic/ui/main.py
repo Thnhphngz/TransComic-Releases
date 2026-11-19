@@ -214,7 +214,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         delegate=self.table.itemDelegate()
         if getattr(delegate,'active_editor',None) is not None:raise ValueError('Lưu hoặc hủy nội dung đang sửa trong tab Dịch trước khi tiếp tục.')
         if self.automation_page.preview.state()==QAbstractItemView.EditingState:raise ValueError('Lưu hoặc hủy tên part đang sửa trước khi tiếp tục.')
-        if any(t.is_alive() for t in getattr(self,'background_threads',[])):raise ValueError('Chờ tác vụ nhập/kiểm tra hiện tại hoàn tất.')
+        if self.automation_page.folder_scans_active() or any(t.is_alive() for t in getattr(self,'background_threads',[])):raise ValueError('Chờ tác vụ nhập/kiểm tra hiện tại hoàn tất.')
 
     def toggle_sidebar(self):
         compact = self.sidebar.width() > 100
@@ -757,7 +757,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         layout.addWidget(sub)
         return widget
 
-    def open_document(self, doc_id: str):
+    def open_document(self, doc_id: str, *, manual=False):
         if self.doc_id != doc_id and hasattr(self, 'workspace_positions'):
             if self.doc_id:
                 self.workspace_positions[self.doc_id] = self.table.verticalScrollBar().value()
@@ -779,6 +779,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         self.filename.setText(f"{Path(doc['path']).name}  ·  {len(self.model.rows):,} dòng  ·  {kind}")
         self.store.set_setting("recent_document", doc_id)
         if hasattr(self, 'workspace_ids'):
+            if manual:self.automation_workspace_ids.discard(doc_id)
             if doc_id not in self.workspace_ids: self.workspace_ids.append(doc_id)
             self.refresh_workspace_choices()
             position = self.workspace_positions.get(doc_id, 0)
@@ -1318,7 +1319,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         if item:
             entry_id = item.data(Qt.UserRole)
             job = None if entry_id.startswith('import:') else self.store.job(entry_id)
-            self.open_document(entry_id[7:] if job is None else job['document_id'])
+            self.open_document(entry_id[7:] if job is None else job['document_id'], manual=True)
             if job:
                 self.provider_selector.setCurrentIndex(self.provider_selector.findData(job['provider']))
                 self.source_lang.setCurrentText(job['source_lang']); self.target_lang.setCurrentText(job['target_lang'])
@@ -1343,7 +1344,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         if self.scheduler and self.scheduler._thread and self.scheduler._thread.is_alive():
             QMessageBox.information(self, "Đang dịch", "Hãy hoàn thành lượt dịch đang chạy.")
             return
-        self.open_document(job["document_id"])
+        self.open_document(job["document_id"], manual=True)
         try: adapter = self.make_provider(job, key)
         except Exception as exc: QMessageBox.information(self, 'Không phục hồi được cấu hình key', type(exc).__name__); return
         self.scheduler = Scheduler(self.store, adapter, self.bridge.changed.emit)
@@ -1352,6 +1353,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             self.scheduler.job_ids = [j['id'] for j in self.store.run_jobs(job['run_id'])]
             self.scheduler.run_id = job['run_id']
             self.workspace_ids = [j['document_id'] for j in self.store.run_jobs(job['run_id'])]
+            self.automation_workspace_ids.difference_update(self.workspace_ids)
         self.current_job_ids = {entry['id'] for jid in self.scheduler.job_ids or [job['id']] for batch in self.store.batches(jid) for entry in batch['payload']}
         self.refresh_workspace_choices()
         self.scheduler.start(job["id"])
@@ -1437,6 +1439,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
         tts=getattr(self,'tts_page',None)
         running = bool(self.scheduler and self.scheduler._thread and self.scheduler._thread.is_alive()) or any(t.is_alive() for t in getattr(self, 'background_threads', [])) or bool(tts and tts.is_busy()) or bool(getattr(self,'automation_controller',None) and self.automation_controller.busy)
         draft=getattr(self,'automation_page',None)
+        running = running or bool(draft and draft.folder_scans_active())
         if self._exit_pending and not self._exit_authorized:
             event.ignore()
             return
@@ -1475,7 +1478,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
             draft.request_draft_stop()
             # Also cover an idle window closed while a queued import completes.
             # Do not close a database still owned by a draft input worker.
-            if any(t.is_alive() for t in draft.tasks):
+            if draft.folder_scans_active() or any(t.is_alive() for t in draft.tasks):
                 self._exit_pending=True
                 if not hasattr(self,'_exit_deadline'):self._exit_deadline=time.monotonic()+self.shutdown_grace_seconds
                 self.exit_timer.start();event.ignore();return
@@ -1592,7 +1595,7 @@ class MainWindow(WorkspaceV2Mixin, Stage2Mixin, QMainWindow):
                 self._automation_fence_thread=threading.Thread(target=scheduler.fence_shutdown,daemon=True,name='AutomationHTTPFence')
                 self._automation_fence_thread.start()
             return False
-        if any(t.is_alive() for t in page.tasks):return False
+        if page.folder_scans_active() or any(t.is_alive() for t in page.tasks):return False
         if page.snapshots.thread and page.snapshots.thread.is_alive():return False
         if repo.stale_cleanup and not repo.stale_cleanup.done.is_set():return False
         fence=getattr(self,'_automation_fence_thread',None)

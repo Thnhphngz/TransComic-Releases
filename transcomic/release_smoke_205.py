@@ -43,24 +43,36 @@ def run(window, root, wait):
         identity = {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
                     for path in (*media.iterdir(), selected)}
         drop(page.table, page.table.viewport().rect().center(), [media])
-        wait(lambda: page.folder_inputs.items and next(iter(page.folder_inputs.items)).result)
-        entry, item = next(iter(page.folder_inputs.items.items()))
-        assert len(entry.result.images) == 2 and len(entry.result.words) == 2
-        assert '2 file Word' in item.text() and not window.store.documents()
+        wait(lambda: page.model.rowCount() == 1 and page.repo.folder_drafts(page.current)
+             and '⚠ 2 file Word' in page.model.index(0, 1).data())
+        entry, = page.repo.folder_drafts(page.current)
+        assert len(entry.scan.images) == 2 and len(entry.scan.words) == 2
+        index = page.model.index(0, 1)
+        assert '⚠ 2 file Word' in index.data() and not window.store.documents()
         window.grab().save(str(root / 'folder-warning.png'))
-        listing = page.folder_inputs.list
-        drop(listing, listing.visualItemRect(item).center(), [selected])
+        drop(page.table, page.table.visualRect(index).center(), [selected])
         wait(lambda: bool(page.repo.group_summaries(page.current)) and
-             page.repo.group_summaries(page.current)[0]['data']['image_folder'] == str(media))
+             not page.repo.folder_drafts(page.current) and
+             page.model.index(0, 1).data() == selected.name)
         rows = page.repo.group_summaries(page.current)
-        assert len(rows) == 1 and rows[0]['path'] == str(selected)
-        assert '2 file Word' in item.text() and not window.store.jobs()
+        assert len(rows) == 1 and rows[0]['id'] == entry.id and rows[0]['path'] == str(selected)
+        assert rows[0]['data']['image_folder'] == str(media)
+        assert rows[0]['data']['image_word_count'] == 2 and not window.store.jobs()
+        waiting = root / 'Waiting group'
+        waiting.mkdir()
+        assert image.save(str(waiting / '1.png'))
+        blank = page.table.viewport().rect().bottomLeft()
+        blank.setY(blank.y() - 3)
+        assert not page.table.indexAt(blank).isValid()
+        drop(page.table, blank, [waiting])
+        wait(lambda: page.model.rowCount() == 2 and page.repo.folder_drafts(page.current)
+             and not page.repo.folder_drafts(page.current)[0].busy)
         result = dict(version=VERSION, images=2, detected_word=2, explicit_import=1,
-                      translation_requests=0, sources=identity)
+                      pending_folder_at_close=True, translation_requests=0, sources=identity)
         marker = seen
     else:
         previous = json.loads(seen.read_text(encoding='utf-8'))
-        assert not page.folder_inputs.items and page.model.rowCount()==0
+        assert not page.repo.folder_drafts(page.current) and page.model.rowCount()==0
         assert len(window.store.documents()) == 1 and not window.store.jobs()
         assert all(hashlib.sha256(Path(path).read_bytes()).hexdigest()==sha
                    for path,sha in previous['sources'].items())

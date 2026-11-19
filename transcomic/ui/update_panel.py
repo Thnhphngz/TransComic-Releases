@@ -71,6 +71,8 @@ class UpdatePanel(QFrame):
         if self.window._closed or self.window._exit_pending or not self.auto.isChecked() or self.busy:return
         scheduler=self.window.scheduler
         if scheduler and scheduler._thread and scheduler._thread.is_alive():return
+        page=getattr(self.window,'automation_page',None)
+        if page and page.folder_scans_active():return
         if any(t.is_alive() for t in getattr(self.window,'background_threads',[])):return
         # Cache I/O and the due check also happen in the worker.
         self.check_now(False)
@@ -277,6 +279,8 @@ def native_install_idle(window):
     if window._closed:return False
     if getattr(window,'automation_controller',None) and window.automation_controller.busy:return False
     if getattr(window,'automation_repo',None) and window.automation_repo.active():return False
+    page=getattr(window,'automation_page',None)
+    if page and page.folder_scans_active():return False
     tts=getattr(window,'tts_page',None)
     if tts and tts.is_busy():return False
     snapshot=window_safety(window)

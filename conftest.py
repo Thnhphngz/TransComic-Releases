@@ -1,5 +1,6 @@
 """Root pytest configuration: unique external cache/tmp for every process."""
 import os
+import sys
 from pathlib import Path
 import tempfile
 import pytest
@@ -28,16 +29,27 @@ def pytest_report_header(config):
     return 'TransComic external test runtime: '+str(RUN)
 
 @pytest.fixture(autouse=True)
-def offline_release_network_guard(monkeypatch):
+def offline_release_network_guard(monkeypatch,request):
     """Automatic releases never spend translation API credits through tests."""
     if os.environ.get('TRANSCOMIC_RELEASE_OFFLINE_TESTS')!='1':return
     import httpx
-    sync=httpx.Client.send;asynchronous=httpx.AsyncClient.send
-    def guarded(client,*args,**kwargs):
-        if not isinstance(client._transport,httpx.MockTransport):raise AssertionError('Automatic release tests require MockTransport')
-        return sync(client,*args,**kwargs)
-    async def guarded_async(client,*args,**kwargs):
-        if not isinstance(client._transport,httpx.MockTransport):raise AssertionError('Automatic release tests require MockTransport')
-        return await asynchronous(client,*args,**kwargs)
-    monkeypatch.setattr(httpx.Client,'send',guarded)
-    monkeypatch.setattr(httpx.AsyncClient,'send',guarded_async)
+    sync=httpx.Client._send_single_request;asynchronous=httpx.AsyncClient._send_single_request
+    capture=None
+    if request.path.name in ('test_semantic_v3.py','test_semantic_v4.py'):
+        capture=getattr(sys.modules.get('scripts.benchmark_semantic_v3'),'Capture',None)
+
+    def verify(client,outgoing):
+        # Validate the selected transport, including mounts and redirect hops.
+        transport=client._transport_for_url(outgoing.url)
+        if capture is not None and type(transport) is capture:
+            transport=transport.inner
+        if not isinstance(transport,httpx.MockTransport):raise AssertionError('Automatic release tests require MockTransport')
+
+    def guarded(client,outgoing):
+        verify(client,outgoing)
+        return sync(client,outgoing)
+    async def guarded_async(client,outgoing):
+        verify(client,outgoing)
+        return await asynchronous(client,outgoing)
+    monkeypatch.setattr(httpx.Client,'_send_single_request',guarded)
+    monkeypatch.setattr(httpx.AsyncClient,'_send_single_request',guarded_async)

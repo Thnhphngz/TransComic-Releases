@@ -123,10 +123,11 @@ def test_ui_handoff_commit_occurs_only_after_data_close(tmp_path,monkeypatch,lat
     channel=Channel();launches=[]
     if late_busy=='slow_close':
         import transcomic.ui.main as main_module
-        clock=[0.0];original_close=w.store.close
-        monkeypatch.setattr(main_module,'time',SimpleNamespace(monotonic=lambda:clock[0]))
+        delay=[0.0];original_close=w.store.close
+        monotonic=main_module.time.monotonic
+        monkeypatch.setattr(main_module,'time',SimpleNamespace(monotonic=lambda:monotonic()+delay[0]))
         def slow_close():
-            original_close();clock[0]=1.0
+            original_close();delay[0]=1.0
         w.store.close=slow_close
     def launch(self,raw,cancel):
         plan=native.load_install_plan(raw,panel.service.directory,installation,policy='internal')
@@ -139,6 +140,8 @@ def test_ui_handoff_commit_occurs_only_after_data_close(tmp_path,monkeypatch,lat
         panel.begin_native_install()
         assert wait_until(lambda:not panel.busy and not panel.handoff_pending,3000)
         assert len(launches)==1
+        if late_busy is not True:
+            assert wait_until(lambda:w._closed,3000)
         if late_busy is True:
             assert not w._closed and channel.sent==[] and channel.closed
             w.store.db.rollback()
@@ -148,7 +151,9 @@ def test_ui_handoff_commit_occurs_only_after_data_close(tmp_path,monkeypatch,lat
             assert w._closed and w.store.log.closed and not w.store.log.thread.is_alive()
             assert channel.sent==[b'COMMIT_SAFE_EXIT'] and channel.closed
     finally:
-        if not w._closed:w._exit_authorized=True;w.close()
+        if not w._closed:
+            w._exit_authorized=True;w.close()
+            assert wait_until(lambda:w._closed,3000)
 
 
 def test_fresh_https_confirmation_rejects_locally_poisoned_cache(tmp_path):

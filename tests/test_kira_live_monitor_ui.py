@@ -233,6 +233,7 @@ def test_monitor_open_and_file_navigation_preserve_native_editor_undo(gui):
     docs,run,jobs,pool,scheduler,gate,calls=make_run(app,store,w,files=2,count=3,cap=1)
     try:
         wait_gui(app,lambda:len(calls)==2)
+        wait_gui(app,lambda:bool(w.model.flags(w.model.index(0,1)) & Qt.ItemIsEditable))
         index=w.model.index(0,1);w.table.setCurrentIndex(index);w.table.edit(index);app.processEvents()
         editor=w.table.itemDelegate().active_editor;assert editor is not None
         QTest.keyClicks(editor,'Manual replacement');assert editor.document().isUndoAvailable()

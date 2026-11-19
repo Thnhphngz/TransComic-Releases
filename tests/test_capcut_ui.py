@@ -14,10 +14,20 @@ def page(tmp_path):
     window.pages.setCurrentIndex(8);app.processEvents();p=window.capcut_page
     yield app,window,p
     from shiboken6 import isValid
-    if isValid(window):
-        p.request_stop()
-        while p.is_busy():app.processEvents();time.sleep(.01)
-        window._exit_authorized=True;window.close();app.processEvents()
+    if isValid(window) and not window._closed:
+        if not window._exit_pending:
+            p.request_stop()
+            while p.is_busy():app.processEvents();time.sleep(.01)
+        close_window(app,window)
+
+
+def close_window(app,window):
+    window._exit_authorized=True
+    window.close()
+    deadline=time.monotonic()+8
+    while not window._closed and time.monotonic()<deadline:
+        app.processEvents();time.sleep(.01)
+    assert window._closed
 
 
 def wait(app,p):

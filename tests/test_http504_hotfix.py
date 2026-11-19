@@ -165,6 +165,7 @@ def test_no_duplicate_processing_batch_and_restart_manual_recovery(tmp_path):
 
 def test_automation_504_retries_before_tts_and_mau(setup,tmp_path):
     repo,id,services,controller=setup;gid,_,_=add_group(repo,id,tmp_path/'fixture',count=1);calls=[]
+    repo.store.set_setting('kira_allow_unknown_resend','1')  # Simulate explicit consent for this mock retry.
     def handler(req):
         calls.append(1)
         if len(calls)==1:

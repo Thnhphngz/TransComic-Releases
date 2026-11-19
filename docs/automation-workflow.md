@@ -2,7 +2,7 @@
 
 ## Sử dụng
 
-1. Mở **Tự động hóa**. Có thể kéo một hoặc nhiều thư mục để nhập danh sách ảnh theo từng thư mục. Chỉ quét file ở cấp trực tiếp như luồng ghép ảnh cũ. DOCX trong thư mục chỉ được đếm. Chọn DOCX từ Explorer rồi thả vào mục ảnh tương ứng, hoặc chọn một dòng tài liệu và một thư mục rồi bấm **Ghép với dòng đã chọn**. Mỗi thư mục có từ hai DOCX trở lên vẫn hiện cảnh báo trong phiên sau khi ghép. Có thể nhập DOCX/TXT trước như trước đây.
+1. Mở **Tự động hóa**. Kéo DOCX vào vùng trống của bảng để nhập đúng file đó và nhận ảnh nằm cùng thư mục. Cũng có thể kéo một hoặc nhiều thư mục trực tiếp vào vùng trống. Mỗi thư mục tạo một dòng và tự gắn DOCX nếu có đúng một file. Dòng có ảnh nhưng thiếu DOCX, hoặc có nhiều DOCX, sẽ chờ bạn kéo đúng DOCX vào dòng đó. Ứng dụng chỉ quét file ở cấp trực tiếp. Bạn vẫn có thể nhập DOCX/TXT rồi kéo thư mục ảnh vào đúng dòng để ghép ảnh.
 2. Chọn thư mục ảnh cho từng hàng bằng nút **Ảnh**; có thể kéo thư mục ảnh trực tiếp vào bất kỳ ô nào của hàng đó. Drop giữ chính sách sort đang chọn; không đoán hàng qua tên folder. Folder được kiểm tra ngoài GUI trước khi ghi mapping; folder rỗng/lỗi giữ nguyên mapping cũ. Số lượng và badge tự kiểm tra sau khi nhận, không tự chạy dịch.
 3. Kiểm tra cấu hình chung, provider/model dịch, ngôn ngữ, voice Kokoro, tốc độ và thư mục project. Model/runtime Kokoro giữ cấu hình nội bộ hiện có; UI ghi rõ **Kokoro: 1 luồng · 1 nhóm mỗi lượt**. Chọn xuất riêng nhóm, gộp hoặc chia đều; bảng Project / sửa tên luôn hiện cho cả ba chế độ. Số part giữ nguyên vị trí, chỉ được chỉnh trong chế độ chia.
 4. Bấm **Kiểm tra lại**. Lần đầu chỉ được bắt đầu khi tất cả nhóm hợp lệ, số dòng cần voice khớp ảnh và tài nguyên sẵn sàng. Xem xác nhận trước khi chạy.
@@ -19,7 +19,7 @@ Hàng công cụ Automation theo thứ tự **Thêm tài liệu → Kiểm tra l
 
 STT và ba thao tác Ảnh / Dịch / × cố định hai mép bảng, dùng chung model và lựa chọn với phần nội dung. Đường dẫn rút gọn có tooltip; cột ít quan trọng co trước, phần giữa cuộn theo pixel khi cần. Shift+wheel hoặc delta ngang của trackpad cuộn ngang, không thay đổi các tab khác. Panel cấu hình cuộn dọc độc lập; trường thư mục hiển thị đường dẫn rút gọn khi không focus, giữ nguyên đường dẫn đầy đủ để chỉnh sửa. [Báo cáo refinement và ảnh đối chiếu](automation-compact-panel.md).
 
-Header bảng Automation không kéo thay đổi kích thước được; ứng dụng tự tính theo viewport/font/DPI. Khi chưa có tài liệu, bảng hiện **Thêm hoặc kéo thả file văn bản vào đây**; bộ lọc không có kết quả hiện thông báo riêng. Sidebar chỉ còn Dịch, Text to Speech, Xuất Project CapCut, Tự động hóa, Lịch sử, API và Cài đặt; scheduler/hàng đợi, SRT và diagnostic logging vẫn giữ trong backend.
+Header bảng Automation tự tính kích thước theo viewport, font và DPI. Khi chưa có tài liệu, bảng hiện **Kéo DOCX hoặc thư mục ảnh vào đây**. Bộ lọc không có kết quả hiện thông báo riêng. Sidebar chỉ còn Dịch, Text to Speech, Xuất Project CapCut, Tự động hóa, Lịch sử, API và Cài đặt. Scheduler, hàng đợi, SRT và diagnostic logging vẫn hoạt động trong backend.
 
 **Tab CapCut giữ giao diện thủ công v1.2.0**, không có dropdown/bảng Automation và không tự nhập các nhóm Automation. Xem tiến độ/project Automation ngay trong tab Tự động hóa, dùng menu hàng để mở kết quả. Mở tab CapCut không xuất thêm project hoặc thay checkpoint. [Báo cáo khôi phục UI](ui-restore-capcut.md).
 

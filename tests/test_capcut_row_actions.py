@@ -11,7 +11,7 @@ from PySide6.QtMultimedia import QMediaPlayer
 from transcomic.capcut.media import GroupScan
 from transcomic.ui.capcut_actions import button_rects
 from transcomic.ui.capcut_preview import CapcutPlayer
-from test_capcut_ui import page
+from test_capcut_ui import close_window,page
 from test_capcut_single_page import populate,settle
 from test_capcut_final_polish import PlaybackBackend
 
@@ -85,7 +85,7 @@ def test_click_audio_row_without_selection_switch_end_error_filter_hide_close(pa
     p.show_group(groups[1].id);assert d.playing_pair_id is None and player.player.source().isEmpty()
     click(app,d,0,0);w.pages.setCurrentIndex(0);assert d.playing_pair_id is None
     w.pages.setCurrentIndex(8);click(app,d,0,0);assert len(p.findChildren(CapcutPlayer))==1
-    w._exit_authorized=True;w.close();settle(app);assert p.closed
+    close_window(app,w);assert p.closed
 
 
 def test_image_buttons_exact_file_without_selection_and_close(page,tmp_path):

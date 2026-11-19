@@ -21,6 +21,7 @@ from test_window_lifecycle import test_cancel_and_safe_exit_do_not_resend_inflig
 from test_final_workflow import setup
 
 def test_search_many_windows_snapshots_reentry_and_owned_cleanup(tmp_path,monkeypatch):
+    from test_automation_ui import wait
     monkeypatch.setenv('QT_QPA_PLATFORM','offscreen');monkeypatch.setenv('LOCALAPPDATA',str(tmp_path))
     for iteration in range(12):
         path=tmp_path/str(iteration);path.mkdir()
@@ -50,6 +51,7 @@ def test_search_many_windows_snapshots_reentry_and_owned_cleanup(tmp_path,monkey
         s.close_bar();s.open();w.open_document(ids[1]);s.rebuild()
         if iteration%2:w.source_lang.showPopup()
         w._exit_authorized=True;w.close();w.close()
+        wait(app,lambda:w._closed)
         QCoreApplication.sendPostedEvents(None,QEvent.DeferredDelete);app.processEvents()
         assert not isValid(w) and not isValid(s) and not isValid(model)
         assert store.log.closed and not store.log.thread.is_alive()
@@ -92,7 +94,10 @@ def test_quota_reason_fences_before_slow_commit_and_publishes_after(tmp_path,cap
 def test_real_entry_process_exits_after_safe_cancel(tmp_path):
     import subprocess,sys,os
     # Separate process is only for proving OS process termination, not search stability.
-    result=subprocess.run([sys.executable,'scripts/stability_windows_stress.py','--exit-only'],
-        env=dict(os.environ,LOCALAPPDATA=str(tmp_path),QT_SCALE_FACTOR='1'),capture_output=True,timeout=20)
-    assert result.returncode==0,result.stderr.decode(errors='replace')
-    assert b'process_exit_verified_by_parent' in result.stdout
+    log=tmp_path/'exit-process.log'
+    with log.open('wb') as output:
+        result=subprocess.run([sys.executable,'scripts/stability_windows_stress.py','--exit-only'],
+            env=dict(os.environ,LOCALAPPDATA=str(tmp_path),QT_SCALE_FACTOR='1'),stdout=output,stderr=subprocess.STDOUT,timeout=20)
+    recorded=log.read_text(encoding='utf-8',errors='replace')
+    assert result.returncode==0,recorded
+    assert 'process_exit_verified_by_parent' in recorded,recorded

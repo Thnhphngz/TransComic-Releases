@@ -58,6 +58,8 @@ class Repository:
         self.session_id=initialize(store);self.session_closing=threading.Event();self.session_closed=False
         self.cleanup=None;self.stale_cleanup=None
         self.unfinished_worksets=set()
+        self._folder_drafts={}
+        self._folder_lock=threading.Lock()
         store.automation=self
 
     def rows(self,sql,args=()):
@@ -102,6 +104,7 @@ class Repository:
         rows=self.rows('''SELECT g.id,g.workset_id,g.document_id,g.position,d.path,
             json_extract(g.data,'$.state') state,json_extract(g.data,'$.error') error,
             json_extract(g.data,'$.tts_run') tts_run,json_extract(g.data,'$.image_folder') image_folder,
+            COALESCE(json_extract(g.data,'$.image_word_count'),0) image_word_count,
             COALESCE(json_extract(g.data,'$.image_count'),json_array_length(g.data,'$.images'),0) image_count,
             COALESCE(json_extract(g.data,'$.slot_count'),json_array_length(g.data,'$.slots'),0) slot_count,json_extract(g.data,'$.project') project,
             json_extract(g.data,'$.audio_folder') audio_folder,
@@ -109,7 +112,7 @@ class Repository:
             json_extract(g.data,'$.translation_recovery_reason') translation_recovery_reason,
             json_extract(g.data,'$.next_retry_at') next_retry_at
             FROM automation_groups g JOIN documents d ON d.id=g.document_id WHERE g.workset_id=? ORDER BY g.position,g.id''',(id,))
-        for row in rows:row['data']={key:row.pop(key) for key in ('state','error','tts_run','image_folder','image_count','slot_count','project','audio_folder','translation_recovery_state','translation_recovery_reason','next_retry_at')}
+        for row in rows:row['data']={key:row.pop(key) for key in ('state','error','tts_run','image_folder','image_word_count','image_count','slot_count','project','audio_folder','translation_recovery_state','translation_recovery_reason','next_retry_at')}
         return rows
     def workset(self,id):
         rows=self.rows('SELECT * FROM automation_worksets WHERE id=? AND session_id=?',(id,self.session_id))
@@ -175,7 +178,34 @@ class Repository:
             if old['started'] and any(config.get(k)!=old['config'].get(k) for k in ('source_lang','target_lang','provider','model')):
                 raise ValueError('Ngôn ngữ và provider/model của bộ đã chạy được giữ nguyên; hãy tạo bộ mới.')
             self.execute('UPDATE automation_worksets SET name=?,config=? WHERE id=?',(name or old['name'],json.dumps(config),id))
-    def add(self,id,paths,*,cancelled=None):
+    def folder_drafts(self,workset):
+        with self._folder_lock:return tuple(d for d in self._folder_drafts.values() if d.workset==workset)
+
+    def folder_draft(self,id):
+        with self._folder_lock:return self._folder_drafts.get(id)
+
+    def has_pending_folders(self,workset):
+        return any(d.state!='folder_scan_cancelled' for d in self.folder_drafts(workset))
+
+    def reserve_folder(self,workset,path):
+        from .folder_inputs import FolderDraft
+        path=Path(path).resolve()
+        with self.store.lock:
+            self.editable(workset)
+            if any(d.path==path for d in self.folder_drafts(workset)):return None
+            linked=self.rows("""SELECT json_extract(data,'$.image_folder') folder,
+                json_extract(data,'$.origin_folder') origin FROM automation_groups WHERE workset_id=?""",(workset,))
+            if any(Path(row[k])==path for row in linked for k in ('folder','origin') if row[k]):return None
+            draft=FolderDraft(workset,path)
+            with self._folder_lock:self._folder_drafts[draft.id]=draft
+            return draft
+
+    def finish_folder(self,draft):
+        with self._folder_lock:
+            if self._folder_drafts.get(draft.id) is draft:
+                del self._folder_drafts[draft.id]
+
+    def add(self,id,paths,*,cancelled=None,auto_images=False,folder=None):
         from ..bulk import natural_key
         from ..documents import import_txt,ImportedText,TextLine
         from ..docx_document import import_docx
@@ -188,16 +218,50 @@ class Repository:
             if self.rows('SELECT id FROM automation_groups WHERE workset_id=? AND source_key=?',(id,key)):continue
             obj=import_docx(path) if path.suffix.lower()=='.docx' else None
             data=ImportedText(tuple(TextLine(u.text,'') for u in obj.units),'docx',obj.raw) if obj else import_txt(path)
-            group=str(uuid.uuid4())
+            draft,inspection=folder if folder else (None,None)
+            image_root=draft.path if draft else path.parent
+            image_error=''
+            if obj and (auto_images or draft):
+                from .folder_inputs import scan_folder
+                from .validation import image_stamp
+                try:
+                    if inspection is None or inspection.stamp!=image_stamp(image_root,cancelled):
+                        inspection=scan_folder(image_root,cancelled=cancelled,inspection=True)
+                except (OSError,ValueError) as exc:
+                    if draft:raise
+                    image_error=str(exc)
+            group=draft.id if draft else str(uuid.uuid4())
+            from .validation import input_stamp,speakable
+            slot_positions=[i for i,line in enumerate(data.lines) if speakable(line.text)] if obj and (auto_images or draft) else []
             with self.store.transaction():
                 check_current(cancelled)
                 self.editable(id)
+                if self.rows('SELECT id FROM automation_groups WHERE workset_id=? AND source_key=?',(id,key)):continue
+                if draft and (draft.cancelled.is_set() or self.folder_draft(draft.id) is not draft):continue
                 doc,_=self.store.import_document(path,data,cfg['source_lang'],cfg['target_lang'],'docx' if obj else 'txt',[u.locator for u in obj.units] if obj else None)
                 meta={'source_sha256':hashlib.sha256(data.raw).hexdigest(),'image_folder':'','image_sort':'name','images':[], 'state':'draft','error':'','batch_jobs':{},'tts_run':None,'slots':[]}
                 position=self.rows('SELECT COALESCE(MAX(position)+1,0) next FROM automation_groups WHERE workset_id=?',(id,))[0]['next']
+                if obj and (auto_images or draft):
+                    meta.update(folder_import=True,slot_count=len(slot_positions),error=image_error)
+                    if draft:meta['origin_folder']=str(image_root)
+                    if inspection:
+                        meta['image_word_count']=len(inspection.words)
+                        meta['image_count']=len(inspection.images)
+                        meta['error']=inspection.error
+                        if inspection.images or inspection.error:
+                            meta['image_folder']=str(image_root)
+                        if meta['image_folder']:
+                            rows=self.store.lines(doc)
+                            stamp=input_stamp(dict(data=meta),path,rows,images=inspection.stamp)
+                            meta['image_inspection']=dict(version=1,stamp=stamp,error=inspection.error)
+                check_current(cancelled)
                 self.execute('INSERT INTO automation_groups VALUES (?,?,?,?,?,?)',(group,id,doc,position,key,json.dumps(meta)))
+                if inspection and meta['image_folder']:
+                    self.update_group(group,images=inspection.manifest,slots=[rows[i]['id'] for i in slot_positions])
+                if draft:check_current(cancelled)
             added.append(group)
         with self.store.transaction():
+            if folder:check_current(cancelled)
             self.editable(id)
             if not self.workset(id)['checkpoint'].get('manual_order'):
                 ordered=sorted(self.rows('SELECT g.id,d.path FROM automation_groups g JOIN documents d ON d.id=g.document_id WHERE g.workset_id=? ORDER BY g.position,g.id',(id,)),key=lambda g:natural_key(Path(g['path']).name))
@@ -239,12 +303,33 @@ class Repository:
             for n,g in enumerate(groups):self.execute('UPDATE automation_groups SET position=? WHERE id=?',(n,g['id']))
             data=self.workset(group['workset_id'])['checkpoint'];data['manual_order']=True
             self.execute('UPDATE automation_worksets SET checkpoint=? WHERE id=?',(json.dumps(data),group['workset_id']))
-    def remove_group(self,id):
+    def remove_group(self,id,*,keep_folder=False):
+        draft=self.folder_draft(id)
+        if draft:
+            draft.cancelled.set()
         with self.store.transaction():
-            self.editable(self.group(id)['workset_id']);self.execute('DELETE FROM automation_groups WHERE id=?',(id,))
+            if draft:
+                self.editable(draft.workset)
+                if not keep_folder:self.finish_folder(draft)
+                self.execute('DELETE FROM automation_groups WHERE id=? AND workset_id=?',(id,draft.workset))
+            else:
+                self.editable(self.group(id)['workset_id'])
+                self.execute('DELETE FROM automation_groups WHERE id=?',(id,))
     def delete(self,id):
-        with self.store.transaction():self.editable(id);self.execute('DELETE FROM automation_worksets WHERE id=?',(id,))
+        with self.store.transaction():
+            self.editable(id)
+            unlinked={row['document_id'] for row in self.rows('''
+                SELECT g.document_id FROM automation_groups g WHERE g.workset_id=?
+                AND NOT EXISTS (
+                    SELECT 1 FROM automation_groups other JOIN automation_worksets w ON w.id=other.workset_id
+                    WHERE other.document_id=g.document_id AND w.session_id=? AND w.id!=g.workset_id
+                )''',(id,self.session_id))}
+            for draft in self.folder_drafts(id):
+                draft.cancelled.set()
+                self.finish_folder(draft)
+            self.execute('DELETE FROM automation_worksets WHERE id=?',(id,))
         self.unfinished_worksets.discard(id)
+        return unlinked
     def activate(self,id):
         import psutil
         with self.store.transaction():

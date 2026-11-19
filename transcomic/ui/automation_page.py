@@ -12,8 +12,8 @@ from .controls import QComboBox,QSpinBox,QDoubleSpinBox
 from .glass import GlassButton
 from ..automation.validation import defaults,plan_parts,config_identity
 from ..automation.repository import fingerprint
-from ..automation.folder_inputs import DOCUMENTS, word_names, word_notice
-from .automation_folders import FolderInputs, local_paths
+from ..automation.folder_inputs import word_names, word_notice
+from .automation_drops import AutomationDrops, local_paths
 from .automation_widgets import AutomationCard,RoundedTableFrame,CompletionRing,ElidingPathEdit,STAGE_COLORS,status_color
 
 STATES={'draft':'Chưa chạy','waiting':'Đợi dịch','translating':'Đang dịch','waiting_tts':'Đợi Kokoro','waiting_tts_rescue':'Đợi cứu lỗi voice','speaking':'Đang tạo voice',
@@ -22,6 +22,8 @@ STATES={'draft':'Chưa chạy','waiting':'Đợi dịch','translating':'Đang d�
 
 
 STATES['preparing']='Đang chuẩn bị…'
+STATES.update(folder_queued='Chờ quét',folder_scan='Đang quét ảnh',folder_importing='Đang nhập DOCX…',
+              waiting_word='Chờ Word',folder_scan_error='Quét lỗi',folder_scan_cancelled='Đã hủy')
 
 
 class AutomationButton(GlassButton):
@@ -64,9 +66,14 @@ class GroupModel(QAbstractTableModel):
         if not index.isValid():return None
         row=self.rows[index.row()];column=index.column();meta=row['data']
         if role==Qt.UserRole:return row['id']
+        if role==Qt.ToolTipRole and column==1 and 'pending_name' in meta:
+            if meta['state']!='waiting_word':return '\n'.join(filter(None,(meta['scan_status'],meta.get('error'))))
+            count=meta.get('image_word_count',0)
+            prompt=f'Thư mục chứa {count} file Word. ' if count else ''
+            return f'{prompt}Hãy kéo file DOCX muốn sử dụng vào dòng này.\n{meta.get("error","")}'
         if role==Qt.ToolTipRole and column==2 and (warning:=word_notice(meta.get('image_word_count',0))):
-            return f"{meta['image_folder']}\n{warning}. Chỉ DOCX bạn chọn mới được nhập."
-        if role==Qt.AccessibleTextRole and column==6:return 'Chọn thư mục ảnh; Mở bản dịch; Bỏ nhóm'
+            return f"{meta['image_folder']}\n{warning} trong thư mục khi quét."
+        if role==Qt.AccessibleTextRole and column==6:return 'Bỏ nhóm' if 'pending_name' in meta else 'Chọn thư mục ảnh; Mở bản dịch; Bỏ nhóm'
         if role==Qt.ToolTipRole:
             from ..kira_recovery import reason_label
             if column==1 and row['id'] in self.image_pairings:return 'Đã nhận thư mục ảnh, đang kiểm tra: '+self.image_pairings[row['id']]
@@ -81,8 +88,12 @@ class GroupModel(QAbstractTableModel):
             if column==5 and meta['state'] in ('preparing','waiting','translating','needs_attention') and recovery in ('ready','parked','provider_recovering','retry_scheduled','waiting_rate_limit','network_waiting','user_paused','paused','needs_reconciliation','blocked_auth','blocked_quota','blocked_budget'):
                 if recovery in ('ready','parked'):return 'Chờ slot dịch' if recovery=='parked' else 'Đợi dịch'
                 return {'provider_recovering':'Đang hồi phục','retry_scheduled':'Chờ thử lại','waiting_rate_limit':'Chờ giới hạn tốc độ','network_waiting':'Chờ mạng','user_paused':'Đã tạm dừng','paused':'Đã tạm dừng','needs_reconciliation':'Cần đối chiếu kết quả','blocked_auth':'Key không hợp lệ','blocked_quota':'Hết quota','blocked_budget':'Đã đạt giới hạn'}.get(recovery,recovery)
-            values=[row.get('sequence',row['position']+1),Path(row['path']).name,meta.get('image_folder') or 'Chưa chọn ảnh',
-                    f'{meta.get("slot_count",len(meta.get("slots",[])))} dòng · {meta.get("image_count",len(meta.get("images",[])))} ảnh' if meta.get('slot_count') else 'Chờ kiểm tra',
+            count=meta.get('image_count',len(meta.get('images',[])))
+            quantity=f'{meta.get("slot_count",0)} dòng · {count} ảnh' if meta.get('slot_count') else f'{count} ảnh' if 'pending_name' in meta else 'Chờ kiểm tra'
+            if column==4 and (scan_text:=meta.get('scan_text')):return scan_text
+            if column==5 and meta['state']=='folder_scan':return meta['scan_status']
+            values=[row.get('sequence',row['position']+1),meta.get('pending_name',Path(row['path']).name),meta.get('image_folder') or 'Chưa chọn ảnh',
+                    quantity,
                     f'Dịch {row.get("translated",0)}/{row.get("translation_total",0)}\nKokoro {row.get("waves",0)}/{meta.get("slot_count",len(meta.get("slots",[])))} · CapCut '+('✓' if meta['state']=='completed' else '—'),
                     STATES.get(meta.get('display_state',meta['state']),meta['state']),'']
             return values[column]
@@ -136,7 +147,7 @@ class GroupActions(QuietItemDelegate):
         content=rect.adjusted(8,5,-8,-5);column=index.column();painter.setFont(option.font)
         if column==0:
             painter.setPen(QColor(c['muted']));painter.drawText(rect.adjusted(4,0,-4,0),Qt.AlignCenter,str(index.data()))
-        elif column==4:
+        elif column==4 and not meta.get('scan_text'):
             width=(content.width()-10)/3
             parts=((row.get('translated',0),row.get('translation_total',0)),(row.get('waves',0),meta.get('slot_count',0)),(int(meta['state']=='completed'),1))
             for i,((done,total),label) in enumerate(zip(parts,('Dịch','Kokoro','CapCut'))):
@@ -147,8 +158,9 @@ class GroupActions(QuietItemDelegate):
                 painter.setPen(QColor('#ffffff' if ratio>.45 else c['ink']));small=QFont(option.font);small.setPointSizeF(max(7,small.pointSizeF()-1));painter.setFont(small);painter.drawText(bar,Qt.AlignCenter,f'{round(ratio*100)}%');painter.setFont(option.font)
         elif column==5:
             color=QColor(status_color(meta.get('display_state',meta['state']),dark));badge=QRectF(content);badge.setHeight(29);badge.moveCenter(QPointF(content.center()));shade=QColor(color);shade.setAlpha(23 if dark else 15)
-            painter.setPen(Qt.NoPen);painter.setBrush(shade);painter.drawRoundedRect(badge,10,10);painter.setPen(color);painter.drawText(badge.adjusted(5,0,-5,0),Qt.AlignCenter,painter.fontMetrics().elidedText(str(index.data() or ''),Qt.ElideRight,int(badge.width()-10)))
-        elif column==2 and (warning:=word_notice(meta.get('image_word_count',0))):
+            label=STATES['folder_scan'] if meta['state']=='folder_scan' else str(index.data() or '')
+            painter.setPen(Qt.NoPen);painter.setBrush(shade);painter.drawRoundedRect(badge,10,10);painter.setPen(color);painter.drawText(badge.adjusted(5,0,-5,0),Qt.AlignCenter,painter.fontMetrics().elidedText(label,Qt.ElideRight,int(badge.width()-10)))
+        elif column==2 and 'pending_name' not in meta and (warning:=word_notice(meta.get('image_word_count',0))):
             painter.setPen(QColor(c['ink']))
             fm=painter.fontMetrics()
             line=QRect(content);line.setHeight(fm.height());line.moveTop(rect.center().y()-fm.height())
@@ -157,12 +169,15 @@ class GroupActions(QuietItemDelegate):
             painter.drawText(line,Qt.AlignVCenter,fm.elidedText(warning,Qt.ElideRight,line.width()))
         elif column!=6:
             paired_ink=index.data(Qt.ForegroundRole) if column==1 else None
+            if column==1 and 'pending_name' in meta:
+                paired_ink=QColor('#f5bb69' if dark else '#81450c')
             painter.setPen(paired_ink if paired_ink is not None else QColor(status_color('needs_attention' if meta.get('error') else 'completed',dark) if column==3 and meta.get('slot_count') else c['muted'] if column==3 else c['ink']))
             text=str(index.data() or '');painter.drawText(content,Qt.AlignVCenter|Qt.AlignLeft,painter.fontMetrics().elidedText(text,Qt.ElideRight,content.width()))
         if table.keyboard_focus and table.currentIndex()==index and column!=6:
             painter.setPen(QPen(QColor(c['accent']),1));painter.drawLine(content.bottomLeft(),content.bottomRight())
         if column!=6:painter.restore();return
         for action,(rect,label) in enumerate(zip(group_button_rects(option.rect),('Ảnh','Dịch','×'))):
+            if 'pending_name' in meta and action!=2:continue
             key=(index.data(Qt.UserRole),('images','editor','remove')[action]);enabled=action==1 or table.model().can_mutate
             bounds,ink=glass_surface(painter,rect,c,enabled,table.hover==key,table.pressed_action==key,focus=table.hasFocus() and table.keyboard_focus and table.currentIndex()==index and table.keyboard_action==action)
             painter.setPen(QColor('#ef7878') if action==2 and enabled else ink);painter.drawText(bounds,Qt.AlignCenter,label)
@@ -191,8 +206,9 @@ class GroupTable(QTableView):
     def action_at(self,position):
         index=self.indexAt(position)
         if not index.isValid() or index.column()!=6:return None
+        pending='pending_name' in self.model().rows[index.row()]['data']
         for i,rect in enumerate(group_button_rects(self.visualRect(index))):
-            if rect.contains(position) and (i==1 or self.model().can_mutate):return index.data(Qt.UserRole),('images','editor','remove')[i]
+            if rect.contains(position) and (not pending or i==2) and (i==1 or self.model().can_mutate):return index.data(Qt.UserRole),('images','editor','remove')[i]
         return None
     def mouseMoveEvent(self,event):
         self.hover=self.action_at(event.position().toPoint());self.viewport().setCursor(Qt.PointingHandCursor if self.hover else Qt.ArrowCursor);self.viewport().update();super().mouseMoveEvent(event)
@@ -211,9 +227,11 @@ class GroupTable(QTableView):
             pane=panes[next_pane];column=next(c for c in range(7) if not pane.isColumnHidden(c))
             pane.setFocus(Qt.TabFocusReason);pane.setCurrentIndex(self.model().index(max(0,index.row()),column));event.accept();return
         if index.isValid() and index.column()==6:
-            if event.key() in (Qt.Key_Left,Qt.Key_Right):self.keyboard_action=(self.keyboard_action+(1 if event.key()==Qt.Key_Right else -1))%3;self.viewport().update();return
+            pending='pending_name' in self.model().rows[index.row()]['data']
+            if event.key() in (Qt.Key_Left,Qt.Key_Right):self.keyboard_action=2 if pending else (self.keyboard_action+(1 if event.key()==Qt.Key_Right else -1))%3;self.viewport().update();return
             if event.key() in (Qt.Key_Return,Qt.Key_Enter,Qt.Key_Space):
-                if self.keyboard_action==1 or self.model().can_mutate:self.action_clicked.emit(index.data(Qt.UserRole),('images','editor','remove')[self.keyboard_action])
+                action=2 if pending else self.keyboard_action
+                if action==1 or self.model().can_mutate:self.action_clicked.emit(index.data(Qt.UserRole),('images','editor','remove')[action])
                 event.accept();return
         super().keyPressEvent(event)
     def mousePressEvent(self,event):
@@ -231,10 +249,13 @@ class GroupTable(QTableView):
     def dragMoveEvent(self,event):
         self.update_drop(event)
     def update_drop(self,event):
-        paths=[Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
+        paths=local_paths(event)
         folder=len(paths)==1 and paths[0].is_dir()
-        if self.valid_drop(event):
-            index=self.indexAt(event.position().toPoint());self.drop_target.emit(index.data(Qt.UserRole) if folder else None);event.acceptProposedAction()
+        if paths and self.model().can_mutate:
+            index=self.indexAt(event.position().toPoint())
+            pending=index.isValid() and 'pending_name' in self.model().rows[index.row()]['data']
+            target=index.isValid() and (folder and not pending or pending and len(paths)==1 and paths[0].suffix.lower()=='.docx')
+            self.drop_target.emit(index.data(Qt.UserRole) if target else None);event.acceptProposedAction()
         else:
             self.drop_target.emit(None);event.ignore()
             if folder and not self.model().can_mutate:self.drop_rejected.emit('Đang chạy Automation; dừng an toàn trước khi thay thư mục ảnh.')
@@ -253,12 +274,14 @@ def panel(title):
     label=QLabel(title);label.setObjectName('section');label.setStyleSheet('font-weight:600;');layout.addWidget(label);return frame,layout
 
 
-class AutomationPage(QWidget):
+class AutomationPage(AutomationDrops,QWidget):
     task_done=Signal(object,object)
     refresh_requested=Signal()
     completion=Signal(str,str)
     group_changed=Signal(str)
     audio_release=Signal(object)
+    folder_progress=Signal(object,str)
+    folder_result=Signal(object,object)
     def __init__(self,owner,repo,services,controller):
         super().__init__(owner);self.owner=owner;self.repo=repo;self.services=services;self.controller=controller;self.setObjectName('automationPage')
         self.setStyleSheet('QWidget#automationPage QLabel, QWidget#automationPage QWidget#automationField { background: transparent; }')
@@ -266,9 +289,13 @@ class AutomationPage(QWidget):
         self.validation_details='Chưa kiểm tra đầu vào.';self.validation_busy=False;self.validation_again=False;self.validation_force=False;self.validation_generation=0;self._adapting=False;self.pair_generation={};self.pair_pending=set()
         self.import_busy=False;self.import_queue=[];self.project_error_requested=False;self._preview_signature=None
         self.draft_cancel=threading.Event();self._pair_tokens=set()
+        self.folder_validation_needed=set()
+        self.init_folder_scans()
         self.pair_slots=threading.BoundedSemaphore(2)
         self.validation_timer=QTimer(self);self.validation_timer.setSingleShot(True);self.validation_timer.setInterval(250);self.validation_timer.timeout.connect(self.run_validation)
         self.task_done.connect(self.on_done,Qt.QueuedConnection);self.refresh_requested.connect(self.mark_dirty,Qt.QueuedConnection);self.completion.connect(self.on_finished,Qt.QueuedConnection)
+        self.folder_progress.connect(self.show_folder_progress,Qt.QueuedConnection)
+        self.folder_result.connect(self.show_folder_result,Qt.QueuedConnection)
         self.repo.listeners.append(lambda *args:self.refresh_requested.emit())
         self.group_changed.connect(self.mark_group_dirty,Qt.QueuedConnection);self.repo.group_listeners.append(self.group_changed.emit)
         self.audio_release.connect(self.release_audio_files,Qt.QueuedConnection)
@@ -301,10 +328,8 @@ class AutomationPage(QWidget):
         for label,value in (('Tất cả','all'),('Đang xử lý','active'),('Cần xử lý','needs_attention'),('Hoàn thành','completed')):self.filter.addItem(label,value)
         filters.addWidget(self.filter);self.up=self.add_button(filters,'↑',lambda:self.move(-1));self.down=self.add_button(filters,'↓',lambda:self.move(1))
         self.search.textChanged.connect(self.mark_dirty);self.filter.currentIndexChanged.connect(self.mark_dirty)
-        self.folder_inputs=FolderInputs(self);body.addWidget(self.folder_inputs)
         # Adjacent number/content/action views share selection and pixel offsets.
         self.table=GroupTable();self.model=GroupModel(self.table);self.table.setModel(self.model)
-        self.table.selectionModel().currentChanged.connect(lambda *_:self.folder_inputs.update_controls())
         self.number_table=GroupTable();self.action_table=GroupTable();self.table_shell=RoundedTableFrame();table_row=QHBoxLayout(self.table_shell.content);table_row.setContentsMargins(0,0,0,0);table_row.setSpacing(0)
         self.table_panes=(self.number_table,self.table,self.action_table)
         for pane,columns in zip(self.table_panes,((0,),(1,2,3,4,5),(6,))):
@@ -329,7 +354,7 @@ class AutomationPage(QWidget):
         self.table.viewport().installEventFilter(self)
         self.table.horizontalScrollBar().rangeChanged.connect(self.horizontal_range_changed)
         self.table_shell.setMinimumHeight(110);body.addWidget(self.table_shell,1)
-        self.empty_state=QLabel('Thêm hoặc kéo thả file văn bản vào đây',self.table_shell);self.empty_state.setToolTip('Có thể kéo thư mục để chỉ nhập ảnh.');self.empty_state.setObjectName('muted');self.empty_state.setAlignment(Qt.AlignCenter);self.empty_state.setWordWrap(True)
+        self.empty_state=QLabel('Kéo DOCX hoặc thư mục ảnh vào đây',self.table_shell);self.empty_state.setObjectName('muted');self.empty_state.setAlignment(Qt.AlignCenter);self.empty_state.setWordWrap(True)
         self.empty_state.setAttribute(Qt.WA_TransparentForMouseEvents);self.empty_state.setAcceptDrops(False)
         self.table_shell.installEventFilter(self)
         self.table.horizontalHeader().sectionResized.connect(self.bound_column_width)
@@ -498,7 +523,7 @@ class AutomationPage(QWidget):
         top=self.table.horizontalHeader().height()+2
         self.empty_state.setGeometry(12,top,max(1,self.table_shell.width()-24),max(1,self.table.viewport().height()-4));self.empty_state.raise_()
     def update_empty_state(self,total):
-        self.empty_state.setText('Không tìm thấy tài liệu phù hợp' if total else 'Thêm hoặc kéo thả file văn bản vào đây')
+        self.empty_state.setText('Không tìm thấy tài liệu phù hợp' if total else 'Kéo DOCX hoặc thư mục ảnh vào đây')
         self.empty_state.setVisible(self.model.rowCount()==0);self.position_empty_state()
     def set_drop_target(self,id):
         old=self.model.drop_group_id
@@ -543,7 +568,9 @@ class AutomationPage(QWidget):
         self.mark_dirty()
     def request_draft_stop(self):
         """Fence callbacks and cancel checks; never cancel user-started stages here."""
+        if self.draft_cancel.is_set():return
         self.draft_cancel.set();self.validation_generation+=1
+        self.stop_folder_scans()
         self.setEnabled(False)
         self.validation_timer.stop();self.timer.stop();self.snapshots.shutdown()
     def load_worksets(self,select=None):
@@ -564,8 +591,8 @@ class AutomationPage(QWidget):
                 if key in self.fields:self.set_field(key,value)
             self.loading=False
         self.refresh()
-        self.folder_inputs.render()
-        if self.current and self.repo.workset(self.current)['checkpoint'].get('validation_sections'):self.queue_validation()
+        if self.current in self.folder_validation_needed:self.finish_folder_batch(self.current)
+        elif self.current and self.repo.workset(self.current)['checkpoint'].get('validation_sections'):self.queue_validation()
     def set_field(self,key,value):
         control=self.fields[key]
         if isinstance(control,QComboBox):
@@ -643,49 +670,42 @@ class AutomationPage(QWidget):
     def delete_workset(self):
         if not self.current:return
         self.repo.editable(self.current)
-        if QMessageBox.question(self,'Xóa bộ công việc','Chỉ xóa metadata/checkpoint của bộ này; giữ toàn bộ file nguồn và kết quả ngoài ổ đĩa.',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)==QMessageBox.Yes:
-            self.repo.delete(self.current);self.folder_inputs.discard_workset(self.current);self.current=None;self.load_worksets()
+        workset=self.current
+        if QMessageBox.question(self,'Xóa bộ công việc','Xóa bộ này và gỡ tài liệu chỉ thuộc bộ khỏi danh sách đang mở ở tab Dịch. File nguồn, bản dịch đã lưu và kết quả xuất được giữ.',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)==QMessageBox.Yes:
+            self.dequeue_folders(draft.id for draft in self.repo.folder_drafts(workset))
+            unlinked=self.repo.delete(workset)
+            self.folder_validation_needed.discard(workset)
+            self.snapshots.invalidate()
+            updates=self.owner.translation_updates
+            if updates.automation_scope and updates.automation_scope['id']==workset:
+                updates.automation_scope=None
+            self.current=None;self.load_worksets()
+            self.owner.remove_workspace_documents(unlinked & self.owner.automation_workspace_ids)
     def choose_files(self):
         paths,_=QFileDialog.getOpenFileNames(self,'Thêm DOCX/TXT từ nhiều thư mục','','DOCX/TXT (*.docx *.txt)')
-        if paths:self.drop_paths(paths,None)
-    def drop_paths(self,paths,id=None):
-        if self.draft_cancel.is_set() or self.repo.session_closing.is_set():return
-        if self.controller.busy:
-            self.notice.setText('Dừng an toàn trước khi thêm tài liệu hoặc thư mục ảnh.')
-            return
-        folders,documents=[],[]
-        for path in map(Path,paths):
-            if path.is_dir():folders.append(path)
-            elif path.suffix.lower() in DOCUMENTS and path.is_file():documents.append(path)
-        if len(folders)==1 and len(paths)==1 and id:
-            self.safe(lambda:self.pair_folder(id,folders[0],preview_if_invalid=True))
-            return
-        if folders:
-            if not self.current:self.create_workset(folders[0].name)
-            self.folder_inputs.add(self.current,folders)
-        if documents:
-            if not self.current:self.notice.setText('Tạo/chọn bộ công việc trước khi nhập tài liệu.');return
-            self.safe(lambda:self.queue_documents(documents))
-        if len(folders)+len(documents)<len(paths):
-            self.notice.setText('Chỉ hỗ trợ tài liệu DOCX/TXT và thư mục ảnh.')
+        if paths:self.safe(lambda:self.queue_documents(paths))
 
-    def queue_documents(self,paths,after_import=None):
+    def queue_documents(self,paths,*,auto_images=False):
         workset=self.current
         from ..automation.draft_inputs import remember
         entry=remember(self.repo,workset,'draft_imports',paths=[str(Path(p).absolute()) for p in paths])
-        self.validation_generation+=1;self.proof=None;self.validation_timer.stop();self.import_queue.append((workset,entry,after_import))
+        self.validation_generation+=1;self.proof=None;self.validation_timer.stop();self.import_queue.append((workset,entry,auto_images))
         if not self.import_busy:self.import_next()
     def import_next(self):
         if self.draft_cancel.is_set():return
         if not self.import_queue:
-            self.import_busy=False;self.queue_validation();self.mark_dirty();return
-        self.import_busy=True;workset,entry,after_import=self.import_queue.pop(0);paths=entry['paths']
+            self.import_busy=False
+            if self.current in self.folder_validation_needed:self.finish_folder_batch(self.current)
+            else:self.queue_validation()
+            self.mark_dirty();return
+        self.import_busy=True;workset,entry,auto_images=self.import_queue.pop(0);paths=entry['paths']
         self.set_validation_status('Đang nhập tài liệu','Đọc tài liệu trong nền; giữ thứ tự các đợt thêm.');self.start.setEnabled(False)
         def work():
             from ..automation.draft_inputs import forget
             from ..automation.validation import ValidationSuperseded
             try:
-                result=self.repo.add(workset,paths,cancelled=self.draft_cancel.is_set)
+                options={'auto_images':True} if auto_images else {}
+                result=self.repo.add(workset,paths,cancelled=self.draft_cancel.is_set,**options)
                 forget(self.repo,workset,'draft_imports',entry['token'])
                 return result,None
             except ValidationSuperseded:return (),None
@@ -693,12 +713,10 @@ class AutomationPage(QWidget):
         def finish(value):
             result,error=value
             if error:self.notice.setText(error)
-            elif after_import:
-                if result:self.safe(lambda:after_import(result))
-                else:self.notice.setText('DOCX đã có trong bộ. Chọn dòng đó rồi bấm Ghép với dòng đã chọn.')
+            if result and auto_images:self.folder_validation_needed.add(workset)
             self.import_done(workset);self.import_next()
         self.background(work,finish)
-    def pair_folder(self,id,folder,sort=None,*,intent=None,preview_if_invalid=False):
+    def pair_folder(self,id,folder,sort=None,*,intent=None):
         """Validate a proposed mapping off-thread before changing any saved mapping."""
         group=self.repo.group(id);workset=group['workset_id'];self.repo.editable(workset)
         if workset!=self.current:raise ValueError('Nhóm không thuộc bộ công việc đang xem.')
@@ -717,10 +735,10 @@ class AutomationPage(QWidget):
             if not path.is_dir() or not os.access(path,os.R_OK):raise ValueError('Thư mục ảnh không tồn tại hoặc không đọc được.')
             path=path.resolve();doc=self.repo.store.document(group['document_id']);rows=self.repo.store.lines(group['document_id'])
             proposed={**group,'data':{**group['data'],'image_folder':str(path),'image_sort':sort}}
-            stamp=input_stamp(proposed,Path(doc['path']),rows)
+            stamp=input_stamp(proposed,Path(doc['path']),rows,cancelled=cancelled)
             images=image_manifest(path,sort,cancelled=cancelled)
             if not images:raise ValueError('Thư mục không có ảnh hợp lệ; giữ nguyên mapping trước đó.')
-            if input_stamp(proposed,Path(doc['path']),rows)!=stamp:raise ValueError('Đầu vào thay đổi khi kiểm tra; giữ mapping trước đó.')
+            if input_stamp(proposed,Path(doc['path']),rows,cancelled=cancelled)!=stamp:raise ValueError('Đầu vào thay đổi khi kiểm tra; giữ mapping trước đó.')
             return dict(folder=str(path),images=images,stamp=stamp,slots=[r['id'] for r in rows if speakable(r['source'])],
                         word_count=len(word_names(path,cancelled)))
         def checked(result):
@@ -731,7 +749,6 @@ class AutomationPage(QWidget):
             if self.current!=workset:self.model.set_image_pairing(id);return
             if error:
                 forget(self.repo,workset,'draft_pairings',intent['token']);self.model.set_image_pairing(id);self.notice.setText(error)
-                if preview_if_invalid:self.folder_inputs.add(workset,[folder])
                 return
             current=self.repo.group(id);self.repo.editable(workset)
             if (current['data'].get('image_folder'),current['data'].get('image_sort','name'))!=original:self.model.set_image_pairing(id);return
@@ -740,7 +757,7 @@ class AutomationPage(QWidget):
                 forget(self.repo,workset,'draft_pairings',intent['token'])
             self.proof=None;self.mark_dirty();self.notice.setText('')
             self.model.set_image_pairing(id,value['folder'])
-            if self.current==workset:self.queue_validation()
+            if self.current==workset:self.finish_folder_batch(workset)
         def check():
             from ..automation.validation import check_current
             try:
@@ -758,7 +775,7 @@ class AutomationPage(QWidget):
         return index.data(Qt.UserRole) if index.isValid() else None
     def choose_images(self,id=None):
         id=id or self.selected()
-        if not id:return
+        if not id or self.repo.folder_draft(id):return
         self.repo.editable(self.repo.group(id)['workset_id']);folder=QFileDialog.getExistingDirectory(self,'Ghép thư mục ảnh cho '+Path(self.repo.store.document(self.repo.group(id)['document_id'])['path']).name)
         if not folder:return
         sort,ok=QInputDialog.getItem(self,'Sắp xếp ảnh','Thứ tự ảnh:',['Theo tên tự nhiên','Theo Date created'],0,False)
@@ -766,25 +783,45 @@ class AutomationPage(QWidget):
     def row_action(self,id,action):
         if action=='images':self.safe(lambda:self.choose_images(id))
         elif action=='editor':self.safe(lambda:self.open_translation(id))
+        elif action=='cancel_scan':self.safe(lambda:self.cancel_folder_scan(id))
         else:
-            if QMessageBox.question(self,'Bỏ nhóm','Bỏ metadata nhóm; giữ nguồn và tất cả kết quả?',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)==QMessageBox.Yes:self.safe(lambda:self.repo.remove_group(id));self.proof=None;self.mark_dirty();self.queue_validation()
+            if QMessageBox.question(self,'Bỏ nhóm','Bỏ metadata nhóm; giữ nguồn và tất cả kết quả?',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)==QMessageBox.Yes:
+                def remove():
+                    draft=self.repo.folder_draft(id)
+                    self.dequeue_folders((id,))
+                    self.repo.remove_group(id)
+                    self.pair_generation.pop(id,None)
+                    self.pair_pending.discard(id)
+                    self.model.set_image_pairing(id)
+                    self.mark_dirty()
+                    if draft:self.finish_folder_batch(draft.workset)
+                    else:self.queue_validation()
+                self.safe(remove)
     def move(self,delta):
         id=self.selected()
-        if id:self.repo.move(id,delta);self.proof=None;self.mark_dirty();self.queue_validation()
+        if id and not self.repo.folder_draft(id):self.repo.move(id,delta);self.proof=None;self.mark_dirty();self.queue_validation()
     def open_translation_index(self,index):
         if index.isValid():self.open_translation(index.data(Qt.UserRole))
     def open_translation(self,id=None):
         id=id or self.selected()
-        if id:self.owner.open_document(self.repo.group(id)['document_id']);self.owner.pages.setCurrentIndex(0)
+        if id and not self.repo.folder_draft(id):self.owner.open_document(self.repo.group(id)['document_id']);self.owner.pages.setCurrentIndex(0)
     def open_result(self,id=None):
         id=id or self.selected()
-        if not id:return
+        if not id or self.repo.folder_draft(id):return
         group=self.repo.group(id);meta=group['data'];path=meta.get('project') or meta.get('audio_folder') or str(Path(self.repo.store.document(group['document_id'])['path']).parent)
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))
     def row_context_menu(self,position,view=None):
         view=view or self.table;index=view.indexAt(position)
         if not index.isValid():return
         id=index.data(Qt.UserRole);menu=QMenu(self.table)
+        if draft:=self.repo.folder_draft(id):
+            if draft.state in ('folder_queued','folder_scan'):
+                cancel=menu.addAction('Hủy quét ảnh');cancel.setEnabled(self.model.can_mutate)
+                cancel.triggered.connect(lambda:self.row_action(id,'cancel_scan'))
+            action=menu.addAction('Bỏ nhóm')
+            action.setEnabled(self.model.can_mutate)
+            action.triggered.connect(lambda:self.row_action(id,'remove'))
+            self.row_menu=menu;menu.popup(view.viewport().mapToGlobal(position));return
         for title,callback in (('Ảnh / sắp xếp',lambda:self.choose_images(id)),('Mở trong Dịch',lambda:self.open_translation(id)),('Mở kết quả',lambda:self.open_result(id))):
             action=menu.addAction(title);action.setEnabled(title!='Ảnh / sắp xếp' or self.model.can_mutate);action.triggered.connect(lambda checked=False,fn=callback:self.safe(fn))
         self.row_menu=menu;menu.popup(view.viewport().mapToGlobal(position))
@@ -811,13 +848,13 @@ class AutomationPage(QWidget):
         text=QPlainTextEdit();text.setReadOnly(True);text.setPlainText(self.validation_details);layout.addWidget(text)
         close=QDialogButtonBox(QDialogButtonBox.Close);close.rejected.connect(dialog.reject);layout.addWidget(close)
         self.validation_dialog=dialog;self.validation_detail_text=text;dialog.finished.connect(lambda *_:setattr(self,'validation_detail_text',None));dialog.show()
-    def queue_validation(self,force=False):
+    def queue_validation(self,force=False,*,initial=False):
         force=force or self.validation_force
         self.validation_generation+=1;self.proof=None
         if self.import_busy:self.validation_again=True;self.validation_force=self.validation_force or force;return
         if not self.current or self.repo.active() or self.controller.busy:return
         verified=bool(self.repo.workset(self.current)['checkpoint'].get('validation_sections'))
-        if not force and not verified:
+        if not force and not verified and not initial:
             self.set_validation_status('Chưa kiểm tra','Thêm tài liệu, ghép ảnh và bấm Kiểm tra lại để xác minh đầu vào.');return
         self.validation_force=self.validation_force or force;self.validation_again=True
         self.set_validation_status('Đang kiểm tra','Đang xác minh đầu vào và cấu hình liên quan.');self.start.setEnabled(False)
@@ -885,6 +922,7 @@ class AutomationPage(QWidget):
         if not snapshot:return
         ids=snapshot['scope_docs'] if self.controller.current else [g['document_id'] for g in snapshot['groups']]
         old=set(self.owner.workspace_ids);self.owner.workspace_ids=list(dict.fromkeys([*self.owner.workspace_ids,*ids]))
+        self.owner.automation_workspace_ids.update(set(ids)-old)
         page=self.owner.pages.currentIndex()
         updates=getattr(self.owner,'translation_updates',None)
         if updates:
@@ -915,18 +953,18 @@ class AutomationPage(QWidget):
         self.sync_views(snapshot=snapshot)
         if self.owner.pages.currentIndex()!=9:return
         active=snapshot['active'];work=snapshot['work'];self._render_work=work;locked=bool(active and active==self.current or self.controller.busy and self.controller.current==self.current)
-        self.folder_inputs.update_controls()
         self.model.can_mutate=not locked
         self.worksets.setEnabled(True);self.add.setEnabled(bool(work) and not locked);self.delete_button.setEnabled(bool(work) and not locked)
         self.up.setEnabled(bool(work) and not locked);self.down.setEnabled(bool(work) and not locked)
         self.stop.setEnabled(bool(active) and self.controller.busy and work and work['id']==active and work['state']=='running')
         running_control=bool(work and work['state']=='running' and work['config']['provider']=='kira' and work['config'].get('kira_recovery_version',2)>=4 and self.controller.busy and self.controller.current==self.current)
-        can_start=bool(work) and not self.controller.busy and not self.import_busy and not self.pair_pending and self.proof is not None and self.proof.get('pending',True) and (self.proof['passed'] or work['started'] and not self.proof['errors'])
+        drafts=self.repo.folder_drafts(self.current)
+        can_start=bool(work) and not self.repo.has_pending_folders(self.current) and not self.controller.busy and not self.import_busy and not self.pair_pending and self.proof is not None and self.proof.get('pending',True) and (self.proof['passed'] or work['started'] and not self.proof['errors'])
         self.start.setEnabled(running_control or can_start)
         self.start.setText(('Tiếp tục' if self.controller.paused.is_set() else 'Tạm dừng') if running_control else 'Tiếp tục' if work and work['started'] else 'Bắt đầu')
         if self.controller.busy and self.controller.current==self.current and self.controller.preparing.is_set():
             self.start.setText('Tiếp tục' if self.controller.paused.is_set() else 'Đang chuẩn bị…');self.start.setEnabled(self.controller.paused.is_set())
-        self.validate_button.setEnabled(bool(work) and not locked and not self.validation_busy and not any(t.is_alive() for t in self.tasks))
+        self.validate_button.setEnabled(bool(work) and not locked and not self.validation_busy and not self.folder_scans_active() and not any(t.is_alive() for t in self.tasks))
         if self.controller.pending_terminal and not self.controller.busy:
             self.validate_button.setEnabled(self.current==self.controller.current)
             self.notice.setText('Chưa lưu được checkpoint cuối; giải phóng dung lượng và bấm Kiểm tra lại. Không tự gửi API.')
@@ -943,16 +981,24 @@ class AutomationPage(QWidget):
         self.output.setToolTip(self.output.text())
         if not work:self.model.update([]);self.adapt_layout();self.update_empty_state(0);self.summary.setText('Chưa chạy · 00:00');self.group_summary.setText('Hoàn tất 0/0 nhóm · Cần xử lý 0');self.preview.setRowCount(0);self.completion_ring.set_counts(0,0);return
         lanes=self.services.kokoro.config(work['config'])['workers'];self.kokoro_lanes.setText(f'Kokoro: {lanes} luồng · 1 nhóm mỗi lượt')
-        groups=snapshot['groups']
+        groups=list(snapshot['groups'])
+        shown={g['id'] for g in groups}
+        groups.extend(d.row() for d in drafts if d.id not in shown)
         exporting={gid for part in work['checkpoint'].get('parts',[]) if part.get('state')=='exporting' for gid in part['group_ids']}
         for sequence,g in enumerate(groups,1):
             g['sequence']=sequence
-            g['data']['display_state']='exporting' if g['id'] in exporting else g['data']['state']
+            meta=g['data'];state=meta['state']
+            if state in ('folder_scan','waiting_word'):meta['scan_text']=meta['scan_status']
+            elif not work['started'] and meta.get('origin_folder'):
+                meta['scan_text']='Quét lỗi' if meta.get('image_inspection',{}).get('error') else 'Đã quét xong'
+            if not work['started'] and meta.get('folder_import') and meta.get('error') and state in ('draft','waiting'):
+                state='needs_attention'
+            meta['display_state']='exporting' if g['id'] in exporting else state
             self.dirty_groups.discard(g['id'])
-        query=self.search.text().casefold();mode=self.filter.currentData();filtered=[g for g in groups if query in (g['path']+' '+g['data'].get('image_folder','')).casefold() and (mode=='all' or mode=='active' and g['data']['state'] in ('translating','speaking','waiting_capcut') or mode=='needs_attention' and g['data']['state'] in ('needs_attention','stale') or mode==g['data']['state'])]
+        query=self.search.text().casefold();mode=self.filter.currentData();filtered=[g for g in groups if query in (g['path']+' '+g['data'].get('image_folder','')).casefold() and (mode=='all' or mode=='active' and g['data']['display_state'] in ('translating','speaking','waiting_capcut','folder_queued','folder_scan','folder_importing') or mode=='needs_attention' and g['data']['display_state'] in ('needs_attention','stale','waiting_word','folder_scan_error') or mode==g['data']['display_state'])]
         self.model.update(filtered,total=len(groups));self.adapt_layout()
         self.update_empty_state(len(groups))
-        completed=sum(g['data']['state']=='completed' for g in groups);errors=sum(g['data']['state']=='needs_attention' for g in groups)
+        completed=sum(g['data']['state']=='completed' for g in groups);errors=sum(g['data']['display_state'] in ('needs_attention','waiting_word','folder_scan_error') for g in groups)
         self.completion_ring.set_counts(completed,len(groups))
         elapsed=max(0,int((work['checkpoint'].get('ended') or time.time())-(work['checkpoint'].get('started') or time.time())))
         state=STATES.get(work['state'],work['state'])
@@ -967,7 +1013,7 @@ class AutomationPage(QWidget):
         if not work['started'] and self.proof:parts=self.proof['parts']
         for stage,done,total in (('Dịch',sum(g['translated'] for g in groups),sum(g['translation_total'] for g in groups)),('Kokoro',sum(g['waves'] for g in groups),sum(g['data'].get('slot_count',0) for g in groups)),('CapCut',sum(p.get('state')=='completed' for p in parts),len(parts))):
             self.progress_labels[stage].setText(f'{done}/{total}');self.progress_labels[stage].setToolTip(f'{stage}: {done}/{total}');self.progress_bars[stage].setValue(round(done*100/total) if total else 0)
-        if not self.preview.state()==QAbstractItemView.EditingState:self.preview_parts(groups)
+        if not self.preview.state()==QAbstractItemView.EditingState:self.preview_parts([g for g in groups if g['document_id']])
     def on_finished(self,id,state):
         if self.owner._closed or self.repo.session_closing.is_set():return
         self.proof=None;self.sync_views();self.mark_dirty()
@@ -979,9 +1025,10 @@ class AutomationPage(QWidget):
             self.owner.tray.show();self.owner.tray.showMessage(title,self.repo.workset(id)['name'],QSystemTrayIcon.Information if state=='completed' else QSystemTrayIcon.Warning,10000)
         if self.repo.store.setting('automation_sound','0')=='1':QApplication.beep()
     def dragEnterEvent(self,event):
-        if not self.controller.busy and local_paths(event):event.acceptProposedAction()
+        paths=local_paths(event)
+        if not self.controller.busy and paths and all(path.is_file() for path in paths):event.acceptProposedAction()
         else:event.ignore()
     def dropEvent(self,event):
         paths=local_paths(event)
-        if not paths:event.ignore();return
+        if not paths or not all(path.is_file() for path in paths):event.ignore();return
         self.drop_paths([str(path) for path in paths]);event.acceptProposedAction()

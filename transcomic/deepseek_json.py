@@ -39,6 +39,7 @@ def parse_translation(content, expected, prompt_version):
         diag['root_metadata']={key:obj[key] for key in extras if key=='type'}
         diag['extra_root_keys']=sorted(extras)
         if extras!={'type'} or prompt_version not in SEMANTIC_VERSIONS or obj['type']!='json_object':
+            diag['schema_conflict']=True
             return fail('JSON có trường root không được phép hoặc metadata mâu thuẫn')
     if 'lines' not in obj or not isinstance(obj['lines'],list) or any(not isinstance(r,dict) or set(r)!={'id','text'} for r in obj['lines']):
         return fail('JSON sai schema dòng')

@@ -12,6 +12,7 @@ from transcomic.documents import decode_txt
 from transcomic.storage import Store
 from transcomic.ui.main import MainWindow
 from transcomic.ui.period_warning import period_selections
+from test_automation_ui import wait as wait_for_condition
 
 
 @pytest.fixture
@@ -23,7 +24,7 @@ def gui(tmp_path):
     yield app,store,w
     if not w._closed:
         if w.period_warning.dialog: w.period_warning.dialog.close()
-        w._exit_authorized=True;w.close()
+        w._exit_authorized=True;w.close();wait_for_condition(app,lambda:w._closed)
     app.processEvents()
 
 
@@ -192,8 +193,7 @@ def test_window_close_stops_open_popup_and_pending_navigation(gui,tmp_path,pendi
     dialog=popup(gui)
     warning=w.period_warning
     if pending:warning.choose((doc,store.lines(doc)[0]['id']))
-    w._exit_authorized=True;w.close();app.processEvents();QTest.qWait(150)
-    assert w._closed
+    w._exit_authorized=True;w.close();wait_for_condition(app,lambda:w._closed)
     if isValid(dialog):assert not dialog.isVisible() and not dialog.watch.isActive()
     if isValid(warning):assert not warning.timer.isActive()
 

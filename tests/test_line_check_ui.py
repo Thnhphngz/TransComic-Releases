@@ -22,7 +22,7 @@ def gui(tmp_path):
     assert not any(e['event']=='gui_error' for e in s.log.snapshot())
     yield app,s,w
     if not w._closed:
-        w._exit_authorized=True;w.close();app.processEvents()
+        w._exit_authorized=True;w.close();until(lambda:w._closed)
 
 
 def until(condition,seconds=5):
@@ -176,6 +176,5 @@ def test_close_with_running_inspection_and_open_dialog(gui,tmp_path,monkeypatch)
     def slow(*a,**k):time.sleep(.1);return original(*a,**k)
     monkeypatch.setattr(module,'validate_snapshot',slow)
     s.edit_line(s.lines(doc)[0]['id'],'translation','New')
-    w.line_check.recount();w._exit_authorized=True;w.close();app.processEvents();QTest.qWait(180)
-    assert w._closed
+    w.line_check.recount();w._exit_authorized=True;w.close();until(lambda:w._closed)
     if isValid(dialog):assert not dialog.isVisible() and not dialog.watch.isActive()

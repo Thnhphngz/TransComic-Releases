@@ -3,12 +3,12 @@ from dataclasses import replace
 from pathlib import Path
 import threading,time
 import pytest
-from PySide6.QtCore import Qt,QPoint
+from PySide6.QtCore import QCoreApplication,QEvent,Qt,QPoint
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QTabWidget
 from transcomic.capcut.media import scan_group,GroupScan
 from transcomic.ui.capcut_import import MultiGroupDialog
-from test_capcut_ui import page,wait
+from test_capcut_ui import close_window,page,wait
 from test_capcut_media import media_group
 
 
@@ -97,7 +97,8 @@ def test_shared_audio_stop_switch_hide_delete_close(page,tmp_path,monkeypatch):
     w.pages.setCurrentIndex(0);assert player.isHidden() and p.active_details is None
     w.pages.setCurrentIndex(8);p.remove_group(b.id);assert player.parent() is p and not player.entries
     p.show_group(a.id);d.table.setCurrentIndex(d.proxy.index(0,0));d.invoke_action(d.proxy.index(d.table.currentIndex().row(),6),0)
-    w._exit_authorized=True;w.close();settle(app)
+    close_window(app,w)
+    QCoreApplication.sendPostedEvents(None,QEvent.DeferredDelete)
     from shiboken6 import isValid
     assert w._closed and p.closed and not isValid(player)
     assert p.thumbs.stop.is_set() and p.preview_cache.stop.is_set()

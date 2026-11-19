@@ -59,7 +59,7 @@ def test_empty_filter_state_and_real_file_drop_without_overlay_blocking(gui,tmp_
     app,w,p,id=gui
     if w.dark!=dark:w.toggle_theme()
     p.refresh();app.processEvents()
-    assert p.empty_state.isVisible() and p.empty_state.text()=='Thêm hoặc kéo thả file văn bản vào đây'
+    assert p.empty_state.isVisible() and p.empty_state.text()=='Kéo DOCX hoặc thư mục ảnh vào đây'
     assert p.empty_state.testAttribute(Qt.WA_TransparentForMouseEvents) and not p.empty_state.acceptDrops()
     assert not p.notice.isVisible()
     path=tmp_path/'Added by drop.txt';path.write_text('A synthetic source line',encoding='utf-8')
@@ -68,8 +68,10 @@ def test_empty_filter_state_and_real_file_drop_without_overlay_blocking(gui,tmp_
     drop=QDropEvent(QPointF(point),Qt.CopyAction,mime,Qt.LeftButton,Qt.NoModifier);QApplication.sendEvent(p.table.viewport(),drop)
     wait(app,lambda:len(p.repo.groups(id))==1);p.refresh();app.processEvents()
     assert enter.isAccepted() and drop.isAccepted() and not p.empty_state.isVisible() and not p.notice.isVisible()
-    p.search.setText('no match');p.flush();assert p.empty_state.isVisible() and p.empty_state.text()=='Không tìm thấy tài liệu phù hợp'
-    p.search.clear();p.flush();assert not p.empty_state.isVisible() and p.model.rowCount()==1
+    p.search.setText('no match');p.flush()
+    wait(app,lambda:p.empty_state.isVisible() and p.empty_state.text()=='Không tìm thấy tài liệu phù hợp')
+    p.search.clear();p.flush()
+    wait(app,lambda:not p.empty_state.isVisible() and p.model.rowCount()==1)
     assert not p.repo.store.jobs() and not FakeEngine.calls
 
 
@@ -118,7 +120,10 @@ def test_bad_folder_blank_drop_and_active_drop_preserve_mapping(gui,tmp_path):
     assert 'không có ảnh hợp lệ' in p.notice.text() and p.repo.group(gid)['data']==original
     corrupt=tmp_path/'corrupt';corrupt.mkdir();(corrupt/'001.png').write_bytes(b'not an image')
     send_folder(app,p,corrupt);settle(app,p);assert p.repo.group(gid)['data']==original
-    p.drop_paths([str(empty)],None);assert 'đúng hàng' in p.notice.text() and p.repo.group(gid)['data']==original
+    p.drop_paths([str(empty)],None)
+    wait(app,lambda:'Không tìm thấy DOCX hoặc ảnh hợp lệ' in p.notice.text())
+    settle(app,p)
+    assert p.model.rowCount()==1 and p.repo.group(gid)['data']==original
     # A rejected folder must not bubble into the main window's document importer.
     (empty/'unrelated.txt').write_text('Do not import this folder',encoding='utf-8');count=p.repo.rows('SELECT COUNT(*) n FROM documents')[0]['n']
     mime=QMimeData();mime.setUrls([QUrl.fromLocalFile(str(empty))]);event=QDragEnterEvent(QPoint(400,400),Qt.CopyAction,mime,Qt.LeftButton,Qt.NoModifier)
@@ -171,9 +176,9 @@ def test_latest_folder_drop_wins_when_prechecks_finish_out_of_order(gui,tmp_path
     from transcomic.automation import validation
     app,w,p,id=gui;gid,_,_=add_group(p.repo,id,tmp_path/'g',count=2);first=media_group(tmp_path/'first',2);last=media_group(tmp_path/'last',2);p.refresh()
     entered=threading.Event();release=threading.Event();real=validation.image_manifest
-    def delayed(folder,sort):
+    def delayed(folder,sort,**kwargs):
         if str(folder)==first.image_dir:entered.set();release.wait(4)
-        return real(folder,sort)
+        return real(folder,sort,**kwargs)
     monkeypatch.setattr(validation,'image_manifest',delayed)
     try:
         p.drop_paths([first.image_dir],gid);wait(app,entered.is_set);p.drop_paths([last.image_dir],gid)

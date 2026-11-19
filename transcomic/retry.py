@@ -1,12 +1,17 @@
 """Evidence-based retry permission. No uncertainty is converted into success."""
+DEEPSEEK_MAX_ATTEMPTS = 10
+
+
 def allowed_retry(job, diagnostics, next_attempt):
     import json
     config=json.loads(job.get('config') or '{}')
     from .completion import enabled,retryable
+    if job.get('provider') == 'deepseek':
+        if not enabled(config) or diagnostics.get('schema_conflict') or next_attempt > DEEPSEEK_MAX_ATTEMPTS:
+            return False
     if enabled(config):
         if config.get('kira_multi_key') and diagnostics.get('recoverable_key_rejection') is True:return True
         return retryable(diagnostics)
-    if job.get('provider') == 'deepseek': return False
     multi=config.get('kira_multi_key')
     if multi and config.get('kira_recovery_version') not in (1,2,3,4):return False
     if diagnostics.get('finish_reason') in ('SAFETY', 'RECITATION', 'content_filter'): return False

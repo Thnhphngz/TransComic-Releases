@@ -104,7 +104,24 @@ def main():
             assert len(window.workspace_ids)==2
             doc=next(i for i in window.workspace_ids if store.document(i)['format']=='txt')
             word_id=next(i for i in window.workspace_ids if store.document(i)['format']=='docx')
-            for row in store.units(word_id):store.edit_line(row['id'],'translation','Translated '+row['source'])
+            from .providers import KiraProvider
+            from .translation import Scheduler
+            dispatches=[]
+            translated='The synthetic story continues to the next chapter'
+            def translate_fixture(request):
+                payload=json.loads(json.loads(request.content)['messages'][1]['content'])
+                ids=[row['id'] for row in payload['lines']];dispatches.append(ids)
+                content=json.dumps({'lines':[{'id':id,'text':translated} for id in ids]})
+                return httpx.Response(200,json={'choices':[{'message':{'content':content},'finish_reason':'stop'}]})
+            for document_id in (doc,word_id):
+                job=store.create_job(document_id,'mock','Tiếng Việt','Tiếng Anh',1)
+                provider=KiraProvider('release-smoke-fixture','mock',transport=httpx.MockTransport(translate_fixture))
+                scheduler=Scheduler(store,provider);scheduler.start(job)
+                wait(lambda:not scheduler._thread.is_alive(),15)
+                units=store.units(document_id)
+                assert len(units)==2 and all(row['state']=='done' and row['translation']==translated for row in units)
+                assert dispatches[-1]==[row['id'] for row in units]
+            assert len(dispatches)==2
             rendered,missing=render_docx(word.read_bytes(),store.units(word_id))
             assert missing==0 and len(inspect_docx(rendered).units)==2
             window.open_document(word_id);QTest.qWait(40);window.grab().save(str(root/'docx-fixture.png'))
@@ -134,7 +151,7 @@ def main():
                 window.search.open(True);window.search.scope.setCurrentIndex(2);window.search.query.setText('Alpha');window.search.replacement.setText('Beta');window.search.navigate(1);window.search.replace_current()
                 assert store.lines(doc)[0]['translation']=='Beta translation';window.search.undo();window.search.hide()
                 before=store.lines(doc)  # Replace/Undo deliberately advances edit revisions.
-            job=store.create_job(doc,'fixture','Tiếng Việt','Tiếng Anh',1);store.job_state(job,'completed')
+            assert {row['id'] for row in store.history() if row['job_id']}=={doc,word_id}
             window.pages.setCurrentIndex(1);window.refresh();window.confirm_clear_all=lambda count:True;window.clear_all_queue()
             wait(lambda:not window.queue_clear_busy);assert not store.history() and store.lines(doc)==before
             panel=window.update_panel;panel.service=mock_service(root/'Updates');window.pages.setCurrentIndex(3)
@@ -185,7 +202,8 @@ def main():
             automation=run_automation(window,root,wait)
             report={'passed':bool(workflow.get('passed')),'frozen':bool(getattr(sys,'frozen',False)),'version':VERSION,'platform':app.platformName(),'dpr':window.devicePixelRatioF(),
                     'tts':tts,'capcut':capcut,'automation':automation,'migration':migration,'gateway_recovery':recovery,'workflow_202':workflow,'admission_203':admission_203,
-                    'txt_docx_fixture':True,'docx_export_units':2,'source_files_unchanged':original_hashes=={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in (text,word)},
+                    'txt_docx_fixture':True,'txt_docx_mock_http_requests':len(dispatches),'docx_export_units':2,
+                    'source_files_unchanged':original_hashes=={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in (text,word)},
                     'themes':['light','dark'],'visible_pages':[0,7,8,9,1,2,3],'workspace_preserved':True,'queue_clear':True,'search_replace_undo':True,
                     'manual_popup':True,'auto_no_popup':True,'later_no_download':True,'download_verified':True,'real_http_requests':0,'installer_processes':0,
                     'isolated_database':str(store.path),'default_data_path_unchanged':True,'safe_exit_deadline_ms':900,'process_exit_observed_by_launcher':False}

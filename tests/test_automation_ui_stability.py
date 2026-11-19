@@ -122,10 +122,10 @@ def test_100_file_batched_drop_cancels_obsolete_validation_without_overlap_or_re
     p.table.setCurrentIndex(p.model.index(12,1));p.table.scrollTo(p.model.index(12,1));app.processEvents()
     selected=p.selected();scroll=p.table.verticalScrollBar().value();reset=[];p.model.modelReset.connect(lambda:reset.append(1))
     entered=threading.Event();gate=threading.Event();original=validation.input_stamp;live=0;peak=0;cancelled=0;main=threading.get_ident();threads=[]
-    def slow(*args):
+    def slow(*args,**kwargs):
         threads.append(threading.get_ident())
         if not entered.is_set():entered.set();assert gate.wait(8)
-        return original(*args)
+        return original(*args,**kwargs)
     monkeypatch.setattr(validation,'input_stamp',slow)
     original_validate=p.controller.validate
     def counted(*args,**kwargs):

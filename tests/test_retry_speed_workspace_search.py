@@ -13,6 +13,7 @@ from transcomic.providers import KiraProvider
 from transcomic.translation import Scheduler
 from transcomic.ui.main import MainWindow
 from transcomic.ui.window_state import show_initial
+from test_automation_ui import wait
 
 
 def window(tmp_path):
@@ -66,16 +67,16 @@ def test_preview_revision_change_aborts_entire_transaction_and_late_api_loses(tm
 
 def test_layout_restore_panel_sidebar_theme_font_and_empty_workspace(tmp_path):
     app,store,w,ids=window(tmp_path);w.toggle_sidebar();w.document_splitter.setSizes([245,900]);w.dark=True;store.set_setting('dark','1');w.font_spin.setValue(18)
-    w.document_splitter.splitterMoved.emit(245,1);QTest.qWait(300);sizes=w.document_splitter.sizes();w._exit_authorized=True;w.close()
+    w.document_splitter.splitterMoved.emit(245,1);QTest.qWait(300);sizes=w.document_splitter.sizes();w._exit_authorized=True;w.close();wait(app,lambda:w._closed)
     store=Store(tmp_path/'state.db');restored=MainWindow(store);restored.resize(1400,800);restored.show();app.processEvents();QTest.qWait(30)
     assert restored.sidebar.width()==72 and abs(restored.document_splitter.sizes()[0]-sizes[0])<=3
     assert restored.dark and restored.font_spin.value()==18 and not restored.workspace_ids and restored.doc_id is None and restored.scheduler is None
     assert len(store.documents())==6
-    restored.toggle_documents_panel();restored._exit_authorized=True;restored.close()
+    restored.toggle_documents_panel();restored._exit_authorized=True;restored.close();wait(app,lambda:restored._closed)
     store=Store(tmp_path/'state.db');again=MainWindow(store);again.resize(900,580);again.show();app.processEvents();QTest.qWait(30)
     assert again.document_panel.isHidden() and again.sidebar.width()==72
     again.toggle_documents_panel();app.processEvents();assert again.table.viewport().width()>400
-    again._exit_authorized=True;again.close()
+    again._exit_authorized=True;again.close();wait(app,lambda:again._closed)
 
 
 def test_retry_fairness_early_start_and_controlled_concurrency_recovery(tmp_path):

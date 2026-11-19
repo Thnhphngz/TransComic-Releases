@@ -20,6 +20,43 @@ from transcomic.kira_pool import KiraPoolProvider
 import httpx
 
 
+@pytest.mark.parametrize('keep_other_documents',[False,True])
+def test_delete_workset_syncs_translation_without_deleting_saved_data(gui,tmp_path,monkeypatch,keep_other_documents):
+    app,w,page,workset=gui
+    repo=page.repo
+    group,source,_=add_group(repo,workset,tmp_path/'auto','Auto only',count=1)
+    removed=repo.group(group)['document_id']
+    line,=w.store.lines(removed)
+    w.store.edit_line(line['id'],'translation','Bản dịch phải được giữ')
+    saved_line=w.store.line(line['id'])
+    saved_source=source.read_bytes()
+    expected=[]
+    if keep_other_documents:
+        shared_group,_,_=add_group(repo,workset,tmp_path/'shared','Shared',count=1)
+        manual_group,manual_source,_=add_group(repo,workset,tmp_path/'manual','Manually opened',count=1)
+        shared=repo.group(shared_group)['document_id'];manual=repo.group(manual_group)['document_id']
+        other=repo.create('Bộ khác',repo.workset(workset)['config'])
+        repo.execute('''INSERT INTO automation_groups (id,workset_id,document_id,position,source_key,data)
+            SELECT ?,?,document_id,0,source_key,data FROM automation_groups WHERE id=?''',('shared-group',other,shared_group))
+        expected=[manual,shared]
+
+    page.refresh()
+    assert removed in w.automation_workspace_ids
+    if keep_other_documents:
+        w.import_paths([manual_source])
+        wait(app,lambda:not w.import_busy)
+        assert manual not in w.automation_workspace_ids
+    w.open_document(removed)
+    monkeypatch.setattr(QMessageBox,'question',lambda *args:QMessageBox.Yes)
+    page.delete_button.click()
+    w.pages.setCurrentIndex(0)
+    wait(app,lambda:set(w.workspace_ids)==set(expected) and w.doc_id==(expected[0] if expected else None))
+    assert not repo.owns(workset)
+    assert {d for item in w.document_panel.model.items for d in item['ids']}==set(expected)
+    assert w.store.document(removed)['path']==str(source)
+    assert w.store.line(line['id'])==saved_line and source.read_bytes()==saved_source
+
+
 def wait(app,predicate,seconds=8):
     deadline=time.monotonic()+seconds
     while not predicate() and time.monotonic()<deadline:app.processEvents();time.sleep(.01)
@@ -85,10 +122,10 @@ def test_layout_shared_sidebar_validation_and_real_start_lock(gui,tmp_path,monke
         (directory/'geometry.json').write_text(json.dumps({name:[getattr(p,name).geometry().getRect(),getattr(p,name).parentWidget().size().toTuple(),getattr(p,name).isVisible()] for name in ('worksets','new_button','delete_button','up','down','output','output_choose')}))
 
 
-def test_drop_folder_requires_target_row_and_actions_use_stable_id(gui,tmp_path,monkeypatch):
+def test_drop_folder_on_existing_row_and_actions_use_stable_id(gui,tmp_path):
     app,w,p,id=gui;gid,path,folder=add_group(p.repo,id,tmp_path/'a');other,path2,folder2=add_group(p.repo,id,tmp_path/'b','3-4');p.refresh()
-    p.drop_paths([str(tmp_path/'a')],None);assert len(p.repo.groups(id))==2
     p.drop_paths([str(folder2)],gid);wait(app,lambda:p.repo.group(gid)['data']['image_folder']==str(folder2.resolve()))
+    assert len(p.repo.groups(id))==2
     p.search.setText(str(path2));p.flush();assert p.snapshots.wait_for_idle()
     assert p.model.rowCount()==1 and p.model.rows[0]['id']==other
     p.row_action(other,'editor');assert w.doc_id==p.repo.group(other)['document_id'] and w.pages.currentIndex()==0

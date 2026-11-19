@@ -122,6 +122,12 @@ class Runtime:
         return self.snapshot
 
     def verify_previous(self,record):
+        if 'scoped_release_id' in record:
+            proof=self.scoped_latest(self.gh('repos/'+REPO+'/releases/latest'))
+            if any(record.get(key)!=proof[key] for key in ('version','scoped_release_id','source_commit','build_id','asset_inventory')):
+                raise UpdateError('SCOPED_RELEASE_JOURNAL_MISMATCH')
+            return dict(tag='v'+record['version'],build_id=record['build_id'],assets_verified=True,
+                        published=True,draft=False,release_id=record['scoped_release_id'],release_url=proof['release_url'])
         version=record['version']
         scope=FIRST_SCOPE if version=='0.1.1' else OFFICIAL_SCOPE if version=='1.0.0' and not record.get('automatic_v2') else automatic_scope(version)
         assets=[package.Asset.inspect(n,a['path'],self.root) for n,a in record['asset_inventory'].items()]
@@ -134,6 +140,35 @@ class Runtime:
         publisher.verify(version,remote,assets,published=remote['draft'] is False)
         return {'tag':'v'+version,'build_id':record['build_id'],'assets_verified':True,'published':remote['draft'] is False,'draft':remote['draft'] is True,
             'release_id':remote['id'],'release_url':remote['html_url']}
+
+    def scoped_latest(self,release):
+        """Verify a six-asset release from the Windows packaging workflow."""
+        from transcomic.update.internal import candidate,verify_checksums
+        from transcomic.update.metadata import asset_url,release_url
+        tag=release['tag_name'];version=tag.removeprefix('v');validate_release_version(version)
+        if tag!='v'+version or release['draft'] is not False or release['prerelease'] is not False or release['html_url']!=release_url(tag):
+            raise UpdateError('SCOPED_LATEST_NOT_PUBLIC')
+        folder=safe_path(self.root/'releases'/version,self.root)
+        manifest=package.load(folder/'build-manifest.json');commit=manifest['source_commit']
+        ref=self.gh('repos/'+REPO+'/git/ref/tags/'+tag)['object']
+        if not re.fullmatch('[0-9a-f]{40}',commit) or ref.get('sha')!=commit or ref.get('type')!='commit' or manifest['version']!=version:
+            raise UpdateError('SCOPED_RELEASE_SOURCE_MISMATCH')
+        notes=(folder/'release-notes.md').read_text(encoding='utf8').strip()
+        if f'Source commit: \x60{commit}\x60.' not in notes or release['body'].replace('\r\n','\n').strip()!=notes:
+            raise UpdateError('SCOPED_RELEASE_NOTES_MISMATCH')
+        names=set(package.names(version))|{f'TransComic-{version}-ThirdParty-Sources.zip','build-manifest.json','ThirdParty-SHA256SUMS.txt'}
+        if len(release['assets'])!=len(names) or {a['name'] for a in release['assets']}!=names:
+            raise UpdateError('SCOPED_RELEASE_ASSET_INVENTORY_MISMATCH')
+        assets={}
+        for asset in release['assets']:
+            name=asset['name'];path=safe_path(folder/name,self.root);digest=package.sha(path);size=path.stat().st_size
+            if (asset['state'],asset['digest'],asset['size'],asset['browser_download_url'])!=('uploaded','sha256:'+digest,size,asset_url(tag,name)):
+                raise UpdateError('SCOPED_RELEASE_ASSET_CHANGED: '+name)
+            assets[name]=dict(path=str(path),sha256=digest,size=size)
+        raw=(folder/'transcomic-update.json').read_bytes()
+        verify_checksums((folder/'SHA256SUMS.txt').read_bytes(),candidate(release,json.loads(raw)),raw)
+        return dict(version=version,source_commit=commit,distribution_commit=commit,scoped_release_id=release['id'],
+                    release_url=release['html_url'],build_id=assets['build-manifest.json']['sha256'],asset_inventory=assets)
 
     def verify_recovery_inputs(self,record,work):
         """Validate immutable historical evidence; never relabel it as current tests."""
@@ -386,6 +421,30 @@ class AutomaticSystem:
         if any(SemVer.parse(t,tag=True)>SemVer.parse(version) for t in remote['tags']):raise UpdateError('REMOTE_NEWER_TAG_REQUIRES_RECONCILIATION')
         return {'review':review,'remote':remote,'record':record,'current':current,'version':version,'pending':pending,'changed':changed}
 
+    def adopt_scoped_latest(self,expected):
+        with process_lock(self.root):
+            remote=self.runtime.inventory();proof=self.runtime.scoped_latest(remote['latest'])
+            if proof['version']!=expected or version_at(self.root)!=expected or remote['distribution_commit']!=proof['source_commit']:
+                raise UpdateError('SCOPED_RELEASE_ADOPTION_VERSION_OR_HEAD_MISMATCH')
+            if source.git(self.root,'rev-parse','HEAD').decode().strip()!=proof['source_commit']:
+                raise UpdateError('SCOPED_RELEASE_ADOPTION_LOCAL_HEAD_MISMATCH')
+            baseline=source.fingerprint(source.file_map(self.root,proof['source_commit']))
+            with self.journal.exclusive():
+                old=self.journal.load()
+                if old and old.get('scoped_release_id')==proof['scoped_release_id'] and old['build_id']==proof['build_id']:return old
+                if not old or old['state']!=ReleaseState.PUBLISHED or not old.get('post_publication_verified') or SemVer.parse(old['version'])>=SemVer.parse(expected):
+                    raise UpdateError('SCOPED_RELEASE_ADOPTION_REQUIRES_OLDER_VERIFIED_JOURNAL')
+                source.git(self.root,'merge-base','--is-ancestor',old['source_commit'],proof['source_commit'])
+                history=safe_path(self.root/'.release-state/history'/('v'+old['version']+'.json'),self.root)
+                if history.exists():
+                    if package.load(history)!=old:raise UpdateError('JOURNAL_HISTORY_CONFLICT')
+                else:write(history,old)
+                record=dict(proof,schema=1,state=ReleaseState.PUBLISHED,last_completed=ReleaseState.PUBLISHED,
+                            origin_id=proof['build_id'],distribution_policy='internal',released_fingerprint=baseline,
+                            post_publication_verified=True,workflow_status='PUBLISHED AND VERIFIED',adopted_at=now())
+                self.journal.save(record)
+            return record
+
     def run(self,mode,expected_version=None):
         if mode=='check':
             plan=self.plan();self.require_expected_version(plan,expected_version);self.describe(plan,mode);return plan
@@ -492,6 +551,7 @@ def main(argv=None):
     modes=parser.add_mutually_exclusive_group();modes.add_argument('--check',action='store_true',help='Read-only checks; no source/version/journal changes')
     modes.add_argument('--build-only',action='store_true',help='Reserve version, commit, test/build/package; no GitHub writes')
     modes.add_argument('--recover-published',action='store_true',help='Verify and complete the existing published journal version using GitHub GET only; never bump/build/publish')
+    modes.add_argument('--adopt-scoped-latest',action='store_true',help='Verify an existing six-asset Windows release and reconcile the local journal')
     parser.add_argument('--expected-version',help='Optional safety bound: stop before any mutation if the planned version differs')
     args=parser.parse_args(argv)
     if args.expected_version:
@@ -499,6 +559,10 @@ def main(argv=None):
         except UpdateError:parser.error('Invalid expected version')
     try:
         system=AutomaticSystem(Runtime());mode='check' if args.check else 'build-only' if args.build_only else 'recover-published' if args.recover_published else 'auto'
+        if args.adopt_scoped_latest:
+            if not args.expected_version:parser.error('--adopt-scoped-latest requires --expected-version')
+            record=system.adopt_scoped_latest(args.expected_version)
+            print('VERIFIED JOURNAL v'+record['version']+' '+record['source_commit']);return 0
         if args.expected_version:system.run(mode,expected_version=args.expected_version)
         else:system.run(mode)
         return 0

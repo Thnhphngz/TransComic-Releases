@@ -60,6 +60,7 @@ class Controller(Retranslation,Reconciliation):
     def start(self,id,selected=None):
         self.repo.require_open()
         with self.lock:
+            if self.repo.has_pending_folders(id):raise ValueError('Còn dòng đang quét ảnh hoặc chờ chọn DOCX.')
             if self.busy or self.repo.active():raise ValueError('Chỉ một bộ Automation được chạy.')
             work=self.repo.workset(id);proof=work['checkpoint'].get('validation',{})
             from .validation import project_name_error

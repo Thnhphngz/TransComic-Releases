@@ -63,8 +63,16 @@ def run(window,root):
                     assert rect.height()>20 and view.viewport().rect().contains(rect.center())
                     popup_timings.append(dict(choice=choice,visible_ms=round((time.monotonic()-deadline[0]+4)*1000)))
                     popup.grab().save(str(root/f'export-202-{dark}-{choice}.png'))
-                    from .release_ui_probe import click
-                    input_methods.append(click(view.viewport(),rect.center()))
+                    if app.platformName()=='windows':
+                        from .release_ui_probe import click
+                        input_methods.append(click(view.viewport(),rect.center()))
+                    else:
+                        # Offscreen has no desktop popup mouse grab. Exercise the
+                        # combo's keyboard selection and activation instead.
+                        QTest.keyClick(view,Qt.Key_Home)
+                        for _ in range(choice):QTest.keyClick(view,Qt.Key_Down)
+                        QTest.keyClick(view,Qt.Key_Return)
+                        input_methods.append('QTest keyboard')
                     QTimer.singleShot(40,confirm_selection)
                 except BaseException as exc:fail(exc)
             def confirm_selection():
@@ -94,7 +102,7 @@ def run(window,root):
             assert not faults and ok and value==MODES[choice][0],faults
         records.append(dict(dark=dark,manual_pairs=10,spare_excluded=True,popup_choices=3,focus_preserved=True,
                             input_method=sorted(set(input_methods)),popup_timings=popup_timings))
-    window.pages.setCurrentIndex(9);app.processEvents()
+    window.pages.setCurrentIndex(9);window.activateWindow();app.processEvents()
     page=window.automation_page;repo=window.automation_repo
     original={w['id']:repo.workset(w['id'])['config'] for w in repo.workset_summaries()}
     getter=QInputDialog.getText
@@ -104,7 +112,8 @@ def run(window,root):
         for name in ('Native project one','Native project two'):
             page.new_workset();id=page.current
             assert page.fields['project_name'].text()=='' and repo.workset(id)['config']['part_names']=={}
-            page.start_clicked();assert not page.controller.busy and page.fields['project_name'].hasFocus()
+            page.start_clicked();app.processEvents()
+            assert not page.controller.busy and page.fields['project_name'].hasFocus()
             page.fields['project_name'].setText(name);page.config_changed();saved.append((id,name))
         for id,name in saved:page.load_worksets(id);assert page.fields['project_name'].text()==name
         assert all(repo.workset(id)['config']==cfg for id,cfg in original.items())

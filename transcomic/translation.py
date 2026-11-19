@@ -355,7 +355,7 @@ class Scheduler:
         import json
         interval = max(0.0, float(json.loads(job['config']).get('request_interval', 0)))
         config = json.loads(job['config'])
-        from .completion import enabled,retryable,delay as completion_delay
+        from .completion import enabled,delay as completion_delay
         completing=enabled(config)
         backoff_base = max(.01, float(config.get('rate_backoff_base', 1)))
         backoff_max = max(backoff_base, float(config.get('rate_backoff_max', 30)))
@@ -628,7 +628,8 @@ class Scheduler:
                             self.intervention_reason = diagnostics['failure_kind']
                             self._set_state('needs_intervention')
                             self._event('provider_quota_exhausted', self.intervention_reason)
-                        if job['provider'] == 'deepseek' and (result.error or result.unknown) and (not completing or not retryable(diagnostics)):
+                        can_retry=allowed_retry(job,diagnostics,number+1)
+                        if job['provider'] == 'deepseek' and (result.error or result.unknown) and not can_retry:
                             self.intervention_reason = diagnostics.get('failure_kind') or 'deepseek_error'
                             self._set_state('needs_intervention')
                         if diagnostics.get('http_status') == 429 and job['provider'] != 'deepseek':
@@ -701,8 +702,7 @@ class Scheduler:
                                 self.recovery_successes = 0
                                 self.recovery_reason = 'successful_probe_window'
                                 self._event('concurrency_changed', self.recovery_reason, previous_concurrency=previous_concurrency, effective_concurrency=self.effective_concurrency, configured_concurrency=job['concurrency'], reduced_seconds=time.monotonic()-self.reduced_at, last_rate_limit_at=self.last_rate_limit_at)
-                        from .retry import allowed_retry
-                        if not completing and number >= (21 if config.get('kira_recovery_version')==4 else 6) or not allowed_retry(job, diagnostics, number+1):
+                        if not completing and number >= (21 if config.get('kira_recovery_version')==4 else 6) or not can_retry:
                             if result.error or result.unknown or diagnostics.get('wrong_language_ids'):
                                 self._event('retry_exhausted', 'attempt_budget_or_non_retryable', job_id=job['id'], batch_id=batch['id'], attempt_number=number)
                             break
